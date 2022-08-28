@@ -40,7 +40,7 @@ public class ClusterTests
     public static final String HELLO_WORLD_MSG = "Hello World!";
     public static final String NO_OP_MSG = "No op!           ";
     public static final String REGISTER_TIMER_MSG = "Register a timer!";
-    public static final String ECHO_IPC_INGRESS_MSG = "Echo as IPC ingress";
+    public static final String ECHO_SERVICE_IPC_INGRESS_MSG = "Echo as Service IPC ingress";
     public static final String UNEXPECTED_MSG =
         "Should never get this message because it is not going to be committed!";
     public static final String LARGE_MSG;
@@ -202,11 +202,11 @@ public class ClusterTests
                 final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
                 final AeronCluster client = testCluster.client();
                 final ExpandableArrayBuffer msgBuffer = testCluster.msgBuffer();
-                msgBuffer.putStringWithoutLengthAscii(0, HELLO_WORLD_MSG);
+                final int messageLength = msgBuffer.putStringWithoutLengthAscii(0, HELLO_WORLD_MSG);
 
                 while (!Thread.interrupted())
                 {
-                    final long result = client.offer(msgBuffer, 0, HELLO_WORLD_MSG.length());
+                    final long result = client.offer(msgBuffer, 0, messageLength);
                     if (result > 0)
                     {
                         messageCounter.increment();

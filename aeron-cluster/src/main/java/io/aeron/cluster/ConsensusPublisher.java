@@ -74,7 +74,8 @@ final class ConsensusPublisher
                     .logLeadershipTermId(logLeadershipTermId)
                     .logPosition(logPosition)
                     .leadershipTermId(leadershipTermId)
-                    .followerMemberId(followerMemberId);
+                    .followerMemberId(followerMemberId)
+                    .protocolVersion(ConsensusModule.Configuration.PROTOCOL_SEMANTIC_VERSION);
 
                 bufferClaim.commit();
 
@@ -111,7 +112,8 @@ final class ConsensusPublisher
                     .logLeadershipTermId(logLeadershipTermId)
                     .logPosition(logPosition)
                     .candidateTermId(candidateTermId)
-                    .candidateMemberId(candidateMemberId);
+                    .candidateMemberId(candidateMemberId)
+                    .protocolVersion(ConsensusModule.Configuration.PROTOCOL_SEMANTIC_VERSION);
 
                 bufferClaim.commit();
 
@@ -702,6 +704,36 @@ final class ConsensusPublisher
         do
         {
             final long result = session.responsePublication().offer(buffer, 0, length);
+            if (result > 0)
+            {
+                return true;
+            }
+
+            checkResult(result);
+        }
+        while (--attempts > 0);
+
+        return false;
+    }
+
+    public boolean challengeResponse(
+        final ExclusivePublication publication,
+        final long nextCorrelationId,
+        final long clusterSessionId,
+        final byte[] encodedChallengeResponse)
+    {
+        final ChallengeResponseEncoder encoder = new ChallengeResponseEncoder()
+            .wrapAndApplyHeader(buffer, 0, messageHeaderEncoder)
+            .correlationId(nextCorrelationId)
+            .clusterSessionId(clusterSessionId)
+            .putEncodedCredentials(encodedChallengeResponse, 0, encodedChallengeResponse.length);
+
+        final int length = MessageHeaderEncoder.ENCODED_LENGTH + encoder.encodedLength();
+
+        int attempts = SEND_ATTEMPTS;
+        do
+        {
+            final long result = publication.offer(buffer, 0, length);
             if (result > 0)
             {
                 return true;

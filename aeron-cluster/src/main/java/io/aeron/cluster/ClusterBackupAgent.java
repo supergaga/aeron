@@ -26,8 +26,7 @@ import io.aeron.archive.codecs.RecordingSignalEventDecoder;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.ClusterException;
-import io.aeron.cluster.codecs.BackupResponseDecoder;
-import io.aeron.cluster.codecs.MessageHeaderDecoder;
+import io.aeron.cluster.codecs.*;
 import io.aeron.cluster.service.ClusterMarkFile;
 import io.aeron.exceptions.RegistrationException;
 import io.aeron.exceptions.TimeoutException;
@@ -35,7 +34,6 @@ import io.aeron.logbuffer.Header;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
-import org.agrona.collections.ArrayUtil;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.AgentInvoker;
 import org.agrona.concurrent.AgentTerminationException;
@@ -68,6 +66,8 @@ public final class ClusterBackupAgent implements Agent
     private static final int SLOW_TICK_INTERVAL_MS = 10;
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final BackupResponseDecoder backupResponseDecoder = new BackupResponseDecoder();
+    private final ChallengeDecoder challengeDecoder = new ChallengeDecoder();
+    private final SessionEventDecoder sessionEventDecoder = new SessionEventDecoder();
 
     private final ClusterBackup.Context ctx;
     private final ClusterMarkFile markFile;
@@ -95,7 +95,7 @@ public final class ClusterBackupAgent implements Agent
     private AeronArchive.AsyncConnect clusterArchiveAsyncConnect;
     private AeronArchive clusterArchive;
 
-    private SnapshotReplication snapshotReplication;
+    private MultiSnapshotReplication multiSnapshotReplication;
 
     private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this::onFragment);
     private final Subscription consensusSubscription;
@@ -120,7 +120,6 @@ public final class ClusterBackupAgent implements Agent
     private long liveLogRecordingId = NULL_VALUE;
     private int leaderCommitPositionCounterId = NULL_VALUE;
     private int clusterConsensusEndpointsCursor = NULL_VALUE;
-    private int snapshotCursor = 0;
     private int liveLogReplaySessionId = NULL_VALUE;
     private int liveLogRecCounterId = NULL_COUNTER_ID;
 
@@ -180,10 +179,7 @@ public final class ClusterBackupAgent implements Agent
                 backupArchive.tryStopRecording(liveLogRecordingSubscriptionId);
             }
 
-            if (null != snapshotReplication)
-            {
-                snapshotReplication.close(backupArchive);
-            }
+            CloseHelper.close(multiSnapshotReplication);
 
             if (!ctx.ownsAeronClient())
             {
@@ -307,11 +303,8 @@ public final class ClusterBackupAgent implements Agent
         snapshotsRetrieved.clear();
         fragmentAssembler.clear();
 
-        if (null != snapshotReplication)
-        {
-            snapshotReplication.close(backupArchive);
-            snapshotReplication = null;
-        }
+        CloseHelper.close(multiSnapshotReplication);
+        multiSnapshotReplication = null;
 
         if (NULL_VALUE != liveLogRecordingSubscriptionId)
         {
@@ -363,24 +356,48 @@ public final class ClusterBackupAgent implements Agent
             throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        if (messageHeaderDecoder.templateId() == BackupResponseDecoder.TEMPLATE_ID)
+        switch (messageHeaderDecoder.templateId())
         {
-            backupResponseDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
+            case BackupResponseDecoder.TEMPLATE_ID:
+                backupResponseDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
 
-            onBackupResponse(
-                backupResponseDecoder.correlationId(),
-                backupResponseDecoder.logRecordingId(),
-                backupResponseDecoder.logLeadershipTermId(),
-                backupResponseDecoder.logTermBaseLogPosition(),
-                backupResponseDecoder.lastLeadershipTermId(),
-                backupResponseDecoder.lastTermBaseLogPosition(),
-                backupResponseDecoder.commitPositionCounterId(),
-                backupResponseDecoder.leaderMemberId(),
-                backupResponseDecoder);
+                onBackupResponse(
+                    backupResponseDecoder.correlationId(),
+                    backupResponseDecoder.logRecordingId(),
+                    backupResponseDecoder.logLeadershipTermId(),
+                    backupResponseDecoder.logTermBaseLogPosition(),
+                    backupResponseDecoder.lastLeadershipTermId(),
+                    backupResponseDecoder.lastTermBaseLogPosition(),
+                    backupResponseDecoder.commitPositionCounterId(),
+                    backupResponseDecoder.leaderMemberId(),
+                    backupResponseDecoder);
+                break;
+
+            case ChallengeDecoder.TEMPLATE_ID:
+                challengeDecoder.wrapAndApplyHeader(buffer, offset, messageHeaderDecoder);
+                final byte[] encodedChallenge = new byte[challengeDecoder.encodedChallengeLength()];
+                challengeDecoder.getEncodedChallenge(encodedChallenge, 0, challengeDecoder.encodedChallengeLength());
+
+                onChallenge(
+                    challengeDecoder.correlationId(), challengeDecoder.clusterSessionId(), encodedChallenge);
+                break;
+
+            case SessionEventDecoder.TEMPLATE_ID:
+                sessionEventDecoder.wrapAndApplyHeader(buffer, offset, messageHeaderDecoder);
+                final EventCode code = sessionEventDecoder.code();
+                final String detail = sessionEventDecoder.detail();
+
+                if (this.correlationId == sessionEventDecoder.correlationId() &&
+                    (EventCode.ERROR == code || EventCode.AUTHENTICATION_REJECTED == code))
+                {
+                    throw new ClusterException(code + ": " + detail);
+                }
+
+                break;
         }
     }
 
@@ -453,12 +470,12 @@ public final class ClusterBackupAgent implements Agent
             }
 
             timeOfLastBackupQueryMs = 0;
-            snapshotCursor = 0;
             this.correlationId = NULL_VALUE;
             leaderCommitPositionCounterId = commitPositionCounterId;
 
             clusterMembers = ClusterMember.parse(backupResponseDecoder.clusterMembers());
             leaderMember = ClusterMember.findMember(clusterMembers, leaderMemberId);
+            leaderMember.leadershipTermId(logLeadershipTermId);
 
             if (null != eventsListener)
             {
@@ -482,6 +499,18 @@ public final class ClusterBackupAgent implements Agent
             timeOfLastProgressMs = nowMs;
             state(snapshotsToRetrieve.isEmpty() ? LIVE_LOG_RECORD : SNAPSHOT_RETRIEVE, nowMs);
         }
+    }
+
+    private void onChallenge(
+        final long correlationId,
+        final long clusterSessionId,
+        final byte[] encodedChallenge)
+    {
+        final byte[] challengeResponse = ctx.credentialsSupplier().onChallenge(encodedChallenge);
+        this.correlationId = ctx.aeron().nextCorrelationId();
+
+        consensusPublisher.challengeResponse(
+            consensusPublication, this.correlationId, clusterSessionId, challengeResponse);
     }
 
     private int slowTick(final long nowMs)
@@ -577,7 +606,7 @@ public final class ClusterBackupAgent implements Agent
                 ctx.consensusStreamId(),
                 AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION,
                 ctx.consensusChannel(),
-                ArrayUtil.EMPTY_BYTE_ARRAY))
+                ctx.credentialsSupplier().encodedCredentials()))
             {
                 timeOfLastBackupQueryMs = nowMs;
                 this.correlationId = correlationId;
@@ -600,68 +629,33 @@ public final class ClusterBackupAgent implements Agent
             return null == clusterArchive ? clusterArchiveAsyncConnect.step() - step : 1;
         }
 
-        if (null == snapshotReplication)
+        if (null == multiSnapshotReplication)
         {
             final ChannelUri replicationUri = ChannelUri.parse(ctx.catchupChannel());
             replicationUri.put(ENDPOINT_PARAM_NAME, ctx.catchupEndpoint());
-            final long replicationId = backupArchive.replicate(
-                snapshotsToRetrieve.get(snapshotCursor).recordingId,
-                RecordingPos.NULL_RECORDING_ID,
-                NULL_POSITION,
+            multiSnapshotReplication = new MultiSnapshotReplication(
+                backupArchive,
                 clusterArchive.context().controlRequestStreamId(),
                 clusterArchive.context().controlRequestChannel(),
-                null,
                 replicationUri.toString());
 
-            snapshotReplication = new SnapshotReplication(replicationId, true);
-            timeOfLastProgressMs = nowMs;
+            snapshotsToRetrieve.forEach(multiSnapshotReplication::addSnapshot);
             workCount++;
         }
-        else
+
+        workCount += multiSnapshotReplication.poll();
+        workCount += pollBackupArchiveEvents();
+        timeOfLastProgressMs = nowMs;
+
+        if (multiSnapshotReplication.isComplete())
         {
-            workCount += pollBackupArchiveEvents();
-            timeOfLastProgressMs = nowMs;
+            snapshotsRetrieved.addAll(multiSnapshotReplication.snapshotsRetrieved());
 
-            if (snapshotReplication.isDone())
-            {
-                if (snapshotReplication.isComplete())
-                {
-                    final RecordingLog.Snapshot snapshot = snapshotsToRetrieve.get(snapshotCursor);
+            multiSnapshotReplication.close();
+            multiSnapshotReplication = null;
 
-                    snapshotsRetrieved.add(new RecordingLog.Snapshot(
-                        snapshotReplication.recordingId(),
-                        snapshot.leadershipTermId,
-                        snapshot.termBaseLogPosition,
-                        snapshot.logPosition,
-                        snapshot.timestamp,
-                        snapshot.serviceId));
-
-                    snapshotReplication = null;
-
-                    if (++snapshotCursor >= snapshotsToRetrieve.size())
-                    {
-                        state(LIVE_LOG_RECORD, nowMs);
-                        workCount++;
-                    }
-                }
-                else
-                {
-                    final ChannelUri replicationUri = ChannelUri.parse(ctx.catchupChannel());
-                    replicationUri.put(ENDPOINT_PARAM_NAME, ctx.catchupEndpoint());
-                    final long replicationId = backupArchive.replicate(
-                        snapshotsToRetrieve.get(snapshotCursor).recordingId,
-                        snapshotReplication.recordingId(),
-                        NULL_POSITION,
-                        clusterArchive.context().controlRequestStreamId(),
-                        clusterArchive.context().controlRequestChannel(),
-                        null,
-                        replicationUri.toString());
-
-                    snapshotReplication = new SnapshotReplication(replicationId, false);
-                    timeOfLastProgressMs = nowMs;
-                    workCount++;
-                }
-            }
+            state(LIVE_LOG_RECORD, nowMs);
+            workCount++;
         }
 
         return workCount;
@@ -696,10 +690,10 @@ public final class ClusterBackupAgent implements Agent
                         return 0;
                     }
 
-                    final String endpoint = catchupEndpoint.substring(0, catchupEndpoint.length() - 2) +
-                        resolvedEndpoint.substring(resolvedEndpoint.lastIndexOf(':'));
                     final ChannelUri channelUri = ChannelUri.parse(ctx.catchupChannel());
-                    channelUri.put(ENDPOINT_PARAM_NAME, endpoint);
+                    channelUri.put(ENDPOINT_PARAM_NAME, catchupEndpoint);
+                    channelUri.replaceEndpointWildcardPort(resolvedEndpoint);
+
                     replayChannel = channelUri.toString();
                 }
             }
@@ -963,9 +957,9 @@ public final class ClusterBackupAgent implements Agent
                         throw ex;
                     }
                 }
-                else if (RecordingSignalEventDecoder.TEMPLATE_ID == templateId && null != snapshotReplication)
+                else if (RecordingSignalEventDecoder.TEMPLATE_ID == templateId && null != multiSnapshotReplication)
                 {
-                    snapshotReplication.onSignal(
+                    multiSnapshotReplication.onSignal(
                         poller.correlationId(),
                         poller.recordingId(),
                         poller.recordingPosition(),

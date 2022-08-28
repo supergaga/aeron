@@ -77,6 +77,7 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
     private final ControlSession controlSession;
     private final ControlResponseProxy controlResponseProxy;
     private final Catalog catalog;
+    private final int fileIoMaxLength;
     private final Aeron aeron;
     private final AeronArchive.Context context;
     private AeronArchive.AsyncConnect asyncConnect;
@@ -94,6 +95,7 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
         final long stopPosition,
         final String liveDestination,
         final String replicationChannel,
+        final int fileIoMaxLength,
         final RecordingSummary recordingSummary,
         final AeronArchive.Context context,
         final CachedEpochClock epochClock,
@@ -106,6 +108,7 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
         this.dstRecordingId = dstRecordingId;
         this.liveDestination = "".equals(liveDestination) ? null : liveDestination;
         this.replicationChannel = replicationChannel;
+        this.fileIoMaxLength = fileIoMaxLength;
         this.aeron = context.aeron();
         this.context = context;
         this.catalog = catalog;
@@ -257,6 +260,13 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
         srcStopPosition = stopPosition;
         replayStreamId = streamId;
         replaySessionId = sessionId;
+
+        if (Aeron.NULL_VALUE != fileIoMaxLength && fileIoMaxLength < mtuLength)
+        {
+            state(State.DONE);
+            error("Replication fileIoMaxLength is less than than the recording mtuLength", ArchiveException.GENERIC);
+            return;
+        }
 
         if (NULL_VALUE == dstRecordingId)
         {
@@ -475,11 +485,9 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
             channelUri.put(CommonContext.SESSION_ID_PARAM_NAME, Integer.toString(replaySessionId));
 
             final String endpoint = channelUri.get(CommonContext.ENDPOINT_PARAM_NAME);
-            if (null != endpoint && endpoint.endsWith(":0"))
+            if (null != endpoint)
             {
-                final int i = resolvedEndpoint.lastIndexOf(':');
-                channelUri.put(CommonContext.ENDPOINT_PARAM_NAME,
-                    endpoint.substring(0, endpoint.length() - 2) + resolvedEndpoint.substring(i));
+                channelUri.replaceEndpointWildcardPort(resolvedEndpoint);
             }
 
             if (null != liveDestination)
@@ -489,14 +497,20 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
             }
 
             final long correlationId = aeron.nextCorrelationId();
+
+            final ReplayParams replayParams = new ReplayParams()
+                .position(replayPosition)
+                .length(NULL_POSITION == dstStopPosition ? AeronArchive.NULL_LENGTH : dstStopPosition - replayPosition)
+                .fileIoMaxLength(fileIoMaxLength);
+
             if (srcArchive.archiveProxy().replay(
                 srcRecordingId,
-                replayPosition,
-                NULL_POSITION == dstStopPosition ? AeronArchive.NULL_LENGTH : dstStopPosition - replayPosition,
                 channelUri.toString(),
                 replayStreamId,
+                replayParams,
                 correlationId,
-                srcArchive.controlSessionId()))
+                srcArchive.controlSessionId()
+            ))
             {
                 workCount += trackAction(correlationId);
             }
@@ -738,6 +752,7 @@ class ReplicationSession implements Session, RecordingDescriptorConsumer
         timeOfLastActionMs = epochClock.time();
     }
 
+    @SuppressWarnings("unused")
     private void logStateChange(final State oldState, final State newState, final long replicationId)
     {
         //System.out.println("ReplicationSession: " + oldState + " -> " + newState + " replicationId=" + replicationId);

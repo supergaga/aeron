@@ -26,6 +26,7 @@ import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.logbuffer.TermRebuilder;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.protocol.RttMeasurementFlyweight;
+import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
 import org.agrona.collections.ArrayListUtil;
@@ -74,6 +75,7 @@ class PublicationImagePadding2 extends PublicationImageConductorFields
 class PublicationImageReceiverFields extends PublicationImagePadding2
 {
     boolean isEndOfStream = false;
+    boolean sendSmWithEosFlag = false;
     long timeOfLastPacketNs;
     ImageConnection[] imageConnections = new ImageConnection[1];
 }
@@ -97,6 +99,9 @@ public final class PublicationImage
     {
         INIT, ACTIVE, DRAINING, LINGER, DONE
     }
+
+    // expected minimum number of SMs with EOS bit set sent during draining.
+    private static final long SM_EOS_MULTIPLE = 5;
 
     private static final AtomicLongFieldUpdater<PublicationImage> BEGIN_SM_CHANGE_UPDATER =
         AtomicLongFieldUpdater.newUpdater(PublicationImage.class, "beginSmChange");
@@ -440,8 +445,16 @@ public final class PublicationImage
     {
         if (State.ACTIVE == state)
         {
+            final long nowNs = cachedNanoClock.nanoTime();
+
             isRebuilding = false;
-            timeOfLastStateChangeNs = cachedNanoClock.nanoTime();
+            timeOfLastStateChangeNs = nowNs;
+            sendSmWithEosFlag = !isEndOfStream;
+            if (sendSmWithEosFlag)
+            {
+                timeOfLastSmNs = nowNs - smTimeoutNs - 1;
+            }
+
             this.state = State.DRAINING;
         }
     }
@@ -627,9 +640,10 @@ public final class PublicationImage
             {
                 final int termId = computeTermIdFromPosition(smPosition, positionBitsToShift, initialTermId);
                 final int termOffset = (int)smPosition & termLengthMask;
+                final short flags = sendSmWithEosFlag ? StatusMessageFlyweight.END_OF_STREAM_FLAG : 0;
 
                 channelEndpoint.sendStatusMessage(
-                    imageConnections, sessionId, streamId, termId, termOffset, receiverWindowLength, (byte)0);
+                    imageConnections, sessionId, streamId, termId, termOffset, receiverWindowLength, flags);
 
                 statusMessagesSent.incrementOrdered();
 
@@ -759,9 +773,13 @@ public final class PublicationImage
                 break;
 
             case DRAINING:
-                if (isDrained())
+                if (isDrained() && ((timeOfLastStateChangeNs + (SM_EOS_MULTIPLE * smTimeoutNs)) - timeNs < 0))
                 {
                     conductor.transitionToLinger(this);
+
+                    channelEndpoint.decRefImages();
+                    conductor.tryCloseReceiveChannelEndpoint(channelEndpoint);
+
                     timeOfLastStateChangeNs = timeNs;
                     state = State.LINGER;
                 }

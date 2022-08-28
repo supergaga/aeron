@@ -15,11 +15,11 @@ Aeron
 [![Code Quality: Java](https://img.shields.io/lgtm/grade/java/g/real-logic/aeron.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/real-logic/aeron/context:java)
 [![Code Quality: C/C++](https://img.shields.io/lgtm/grade/cpp/g/real-logic/aeron.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/real-logic/aeron/context:cpp)
 
-Efficient reliable UDP unicast, UDP multicast, and IPC message transport. Java and C++ clients are available in this
+Efficient reliable UDP unicast, UDP multicast, and IPC message transport. Java, C, and C++ clients are available in this
 repository, and a [.NET client](https://github.com/AdaptiveConsulting/Aeron.NET) is available from a 3rd party. All
-three clients can exchange messages across machines, or on the same machine via IPC, very efficiently. Message streams
-can be recorded by the [Archive](https://github.com/real-logic/aeron/tree/master/aeron-archive) module to persistent
-storage for later, or real-time, replay. Aeron [Cluster](https://github.com/real-logic/aeron/tree/master/aeron-cluster)
+clients can exchange messages across machines, or on the same machine via IPC, very efficiently. Message streams can be
+recorded by the [Archive](https://github.com/real-logic/aeron/tree/master/aeron-archive) module to persistent storage
+for later, or real-time, replay. Aeron [Cluster](https://github.com/real-logic/aeron/tree/master/aeron-cluster)
 provides support for fault-tolerant services as replicated state machines based on the
 [Raft](https://raft.github.io/) consensus algorithm.
 
@@ -39,10 +39,10 @@ For the latest version information and changes see the [Change Log](https://gith
 with Java **downloads** at [Maven Central](http://search.maven.org/#search%7Cga%7C1%7Caeron).
 
 Commercial support, training, and development on Aeron is available from
-[sales@real-logic.co.uk](mailto:sales@real-logic.co.uk?subject=Aeron). Premium features are available which include
-Solarflare/Xilinx ef_vi and AWS DPDK transport bindings for a further reduction in latency with increased throughput,
-and security with ATS (Aeron Transport Security) for encrypted communications is available to customers on commercial
-support.
+[sales@real-logic.co.uk](mailto:sales@real-logic.co.uk?subject=Aeron). Premium features are available to customers on
+commercial support which include transport bindings for Solarflare/Xilinx ef_vi, Mellanox VMA, and AWS DPDK for further
+reduction in latency and increased throughput. Secure communications is available with ATS (Aeron Transport Security)
+for encrypted streams.
 
 ### How do I use Aeron?
 
@@ -68,128 +68,7 @@ support.
 
 1. [Hacking on Aeron](https://github.com/real-logic/aeron/wiki/Hacking-on-Aeron)
 1. [Performance Testing](https://github.com/real-logic/aeron/wiki/Performance-Testing)
-
-Build
------
-
-### Java Build
-
-Build the project with [Gradle](http://gradle.org/) using this
-[build.gradle](https://github.com/real-logic/aeron/blob/master/build.gradle) file.
-
-You will require the Java 8+ to build Aeron:
-
-* [JDK 8](https://adoptopenjdk.net/index.html) or later, Java versions before 1.8.0_65 are very buggy and can cause
-tests to fail.
-
-Full clean and build of all modules
-
-```shell
-    $ ./gradlew
-```
-    
-### C++ Build
-
-You require the following to build the C++ API for Aeron:
-
-* 3.6.1 or higher of [CMake](http://www.cmake.org/)
-* C++11 supported compiler for the supported platform
-* C11 supported compiler for the supported platform
-* Requirements to build [HdrHistogram_c](https://github.com/HdrHistogram/HdrHistogram_c). 
-* JDK 8 or later to compile the SBE schema definitions used by the archive client.
-
-__Note__: Aeron support is available for 64-bit Linux, OSX, and Windows. 
-
-For convenience, the `cppbuild` script does a full clean, build, and test of all targets as a Release build.
-
-```shell
-    $ ./cppbuild/cppbuild
-```
-
-For those comfortable with CMake - then a clean, build, and test looks like:
-
-```shell
-    $ mkdir -p cppbuild/Debug
-    $ cd cppbuild/Debug
-    $ cmake -DCMAKE_BUILD_TYPE=Debug ../..
-    $ cmake --build . --clean-first
-    $ ctest
-```
-
-#### C Media Driver
-
-By default, the C Media Driver is built as part of the C++ Build. However, it can be disabled via the CMake
-option `BUILD_AERON_DRIVER` being set to `OFF`.
-
-__Note__: C Media Driver is supported on Mac and Linux, the Windows version is experimental.
-
-For dependencies and other information, see the
-[README](https://github.com/real-logic/aeron/blob/master/aeron-driver/src/main/c/README.md).
-
-#### Documentation
-
-If you have doxygen installed and want to build the Doxygen doc, there is a nice `doc` target that can be used.
-
-```shell
-    $ make doc
-```
-    
-#### Packaging
-
-If you would like a packaged version of the compiled API, there is the `package` target that uses CPack. If the doc
-has been built previous to the packaging, it will be included. Packages created are "TGZ;STGZ", but can be changed
-by running `cpack` directly.
-
-```shell
-    $ make package
-```
-
-Running Samples
----------------
-
-Start up a media driver which will create the data and conductor directories. On Linux, this will probably be in
-`/dev/shm/aeron` or `/tmp/aeron`.
-
-```shell
-    $ java -cp aeron-all/build/libs/aeron-all-${VERSION}.jar io.aeron.driver.MediaDriver
-```
-
-Alternatively, specify the data and conductor directories. The following example uses the shared memory 'directory' on
-Linux, but you could just as easily point to the regular filesystem.
-
-```shell
-    $ java -cp aeron-all/build/libs/aeron-all-${VERSION}.jar -Daeron.dir=/dev/shm/aeron io.aeron.driver.MediaDriver
-```
-
-You can run the `BasicSubscriber` from a command line. On Linux, this will be pointing to the `/dev/shm` shared memory
-directory, so be sure your `MediaDriver` is doing the same!
-
-```shell
-    $ java -cp aeron-all/build/libs/aeron-all-${VERSION}.jar io.aeron.samples.BasicSubscriber
-```
-    
-You can run the `BasicPublisher` from a command line. On Linux, this will be pointing to the `/dev/shm` shared memory
-directory, so be sure your `MediaDriver` is doing the same!
-
-```shell
-    $ java -cp aeron-all/build/libs/aeron-all-${VERSION}.jar io.aeron.samples.BasicPublisher
-```
-
-You can run the `AeronStat` utility to read system counters from a command line
-    
-```shell
-    $ java -cp aeron-all/build/libs/aeron-all-${VERSION}.jar io.aeron.samples.AeronStat
-```
-
-For more samples and scripts to run them, see the [aeron-samples](https://github.com/real-logic/aeron/tree/master/aeron-samples) directory.
-
-Media Driver Packaging
-----------------------
-
-The Media Driver is packaged by the default build into an application that can be found here
-
-    aeron-driver/build/distributions/aeron-driver-${VERSION}.zip
-
+1. [Building Aeron](https://github.com/real-logic/aeron/wiki/Building-Aeron)
 
 License (See LICENSE file for full license)
 -------------------------------------------

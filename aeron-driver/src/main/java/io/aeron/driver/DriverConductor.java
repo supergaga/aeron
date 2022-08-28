@@ -304,6 +304,7 @@ public final class DriverConductor implements Agent
                     sourceAddress,
                     congestionControl);
 
+                channelEndpoint.incRefImages();
                 publicationImages.add(image);
                 receiverProxy.newPublicationImage(channelEndpoint, image);
 
@@ -568,7 +569,8 @@ public final class DriverConductor implements Agent
             {
                 if (0 == channelEndpoint.decRefToStreamAndSession(subscription.streamId(), subscription.sessionId()))
                 {
-                    receiverProxy.removeSubscription(channelEndpoint, subscription.streamId());
+                    receiverProxy.removeSubscription(
+                        channelEndpoint, subscription.streamId(), subscription.sessionId());
                 }
             }
             else
@@ -579,12 +581,7 @@ public final class DriverConductor implements Agent
                 }
             }
 
-            if (channelEndpoint.shouldBeClosed())
-            {
-                receiverProxy.closeReceiveChannelEndpoint(channelEndpoint);
-                receiveChannelEndpointByChannelMap.remove(channelEndpoint.subscriptionUdpChannel().canonicalForm());
-                channelEndpoint.closeIndicators();
-            }
+            tryCloseReceiveChannelEndpoint(channelEndpoint);
         }
     }
 
@@ -640,6 +637,16 @@ public final class DriverConductor implements Agent
         for (int i = 0, size = subscriptionLinks.size(); i < size; i++)
         {
             subscriptionLinks.get(i).unlink(publication);
+        }
+    }
+
+    void tryCloseReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
+    {
+        if (channelEndpoint.shouldBeClosed())
+        {
+            receiverProxy.closeReceiveChannelEndpoint(channelEndpoint);
+            receiveChannelEndpointByChannelMap.remove(channelEndpoint.subscriptionUdpChannel().canonicalForm());
+            channelEndpoint.closeIndicators();
         }
     }
 
@@ -1140,6 +1147,11 @@ public final class DriverConductor implements Agent
         receiverProxy.removeDestination(
             receiveChannelEndpoint, UdpChannel.parse(destinationChannel, nameResolver, true));
         clientProxy.operationSucceeded(correlationId);
+    }
+
+    void closeReceiveDestination(final ReceiveDestinationTransport destinationTransport)
+    {
+        CloseHelper.close(destinationTransport);
     }
 
     void onTerminateDriver(final DirectBuffer tokenBuffer, final int tokenOffset, final int tokenLength)

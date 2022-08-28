@@ -105,7 +105,7 @@ add_definitions(-DAERON_VERSION_PATCH=${aeron_VERSION_PATCH})
 if (UNIX)
     add_compile_options(-Wall -Wpedantic -Wextra -Wno-unused-parameter)
 
-    if (CMAKE_COMPILER_IS_GNUCXX AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11.0")
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11.0")
         add_compile_options(-Wno-error=maybe-uninitialized)
     endif ()
 
@@ -127,7 +127,11 @@ if (UNIX)
         SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
     endif (COVERAGE_BUILD)
 
-    if (AERON_ENABLE_NONSTANDARD_OPTIMIZATIONS)
+    if (AERON_ENABLE_NONSTANDARD_OPTIMIZATIONS AND
+        NOT (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" AND
+            ${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER_EQUAL "9" AND
+            ${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS "10"))
+        message("Set -Ofast for ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
         add_compile_options($<$<CONFIG:Release>:-Ofast>)
     endif ()
 endif ()
@@ -234,8 +238,8 @@ if (AERON_TESTS)
 
     FetchContent_Declare(
         gmock
-        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/googletest-release-1.11.0.zip
-        URL_MD5 52943a59cefce0ae0491d4d2412c120b)
+        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/googletest-release-1.12.1.zip
+        URL_MD5 2648d4138129812611cf6b6b4b497a3b)
 
     FetchContent_MakeAvailable(gmock)
 endif ()

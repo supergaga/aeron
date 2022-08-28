@@ -273,6 +273,32 @@ public final class ConsensusModule implements AutoCloseable
     public static final class Configuration
     {
         /**
+         * Major version of the network protocol from consensus module to consensus module. If these don't match then
+         * consensus modules are not compatible.
+         */
+        public static final int PROTOCOL_MAJOR_VERSION = 1;
+
+        /**
+         * Minor version of the network protocol from consensus module to consensus module. If these don't match then
+         * some features may not be available.
+         */
+        public static final int PROTOCOL_MINOR_VERSION = 0;
+
+        /**
+         * Patch version of the network protocol from consensus module to consensus module. If these don't match then
+         * bug fixes may not have been applied.
+         */
+        public static final int PROTOCOL_PATCH_VERSION = 0;
+
+        /**
+         * Combined semantic version for the client to consensus module protocol.
+         *
+         * @see SemanticVersion
+         */
+        public static final int PROTOCOL_SEMANTIC_VERSION = SemanticVersion.compose(
+            PROTOCOL_MAJOR_VERSION, PROTOCOL_MINOR_VERSION, PROTOCOL_PATCH_VERSION);
+
+        /**
          * Type of snapshot for this component.
          */
         public static final long SNAPSHOT_TYPE_ID = 1;
@@ -298,7 +324,7 @@ public final class ConsensusModule implements AutoCloseable
         public static final String CLUSTER_INGRESS_IPC_ALLOWED_DEFAULT = "false";
 
         /**
-         * Service ID to identify a snapshot in the {@link RecordingLog}.
+         * Service ID to identify a snapshot in the {@link RecordingLog} for the consensus module.
          */
         public static final int SERVICE_ID = Aeron.NULL_VALUE;
 
@@ -1295,6 +1321,7 @@ public final class ConsensusModule implements AutoCloseable
         private LogPublisher logPublisher;
         private EgressPublisher egressPublisher;
         private DutyCycleTracker dutyCycleTracker;
+        private AppVersionValidator appVersionValidator;
         private boolean isLogMdc;
 
         /**
@@ -1352,6 +1379,11 @@ public final class ConsensusModule implements AutoCloseable
             if (null == epochClock)
             {
                 epochClock = SystemEpochClock.INSTANCE;
+            }
+
+            if (null == appVersionValidator)
+            {
+                appVersionValidator = AppVersionValidator.SEMANTIC_VERSIONING_VALIDATOR;
             }
 
             if (null == clusterTimeConsumerSupplier)
@@ -1694,6 +1726,32 @@ public final class ConsensusModule implements AutoCloseable
         public int appVersion()
         {
             return appVersion;
+        }
+
+        /**
+         * User assigned application version validator implementation used to check version compatibility.
+         * <p>
+         * The default validator uses {@link org.agrona.SemanticVersion} semantics.
+         *
+         * @param appVersionValidator for user application.
+         * @return this for fluent API.
+         */
+        public Context appVersionValidator(final AppVersionValidator appVersionValidator)
+        {
+            this.appVersionValidator = appVersionValidator;
+            return this;
+        }
+
+        /**
+         * User assigned application version validator implementation used to check version compatibility.
+         * <p>
+         * The default validator uses {@link org.agrona.SemanticVersion} semantics.
+         *
+         * @return AppVersionValidator in use.
+         */
+        public AppVersionValidator appVersionValidator()
+        {
+            return appVersionValidator;
         }
 
         /**
@@ -3421,7 +3479,6 @@ public final class ConsensusModule implements AutoCloseable
          * Supplier of the {@link TimerService} instances.
          *
          * @return supplier of dynamically created {@link TimerService} instances.
-         * @see io.aeron.driver.Configuration#CONGESTION_CONTROL_STRATEGY_SUPPLIER_PROP_NAME
          */
         public TimerServiceSupplier timerServiceSupplier()
         {

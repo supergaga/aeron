@@ -16,10 +16,7 @@
 package io.aeron.cluster;
 
 import io.aeron.log.EventLogExtension;
-import io.aeron.test.InterruptAfter;
-import io.aeron.test.InterruptingTestCallback;
-import io.aeron.test.SlowTest;
-import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.*;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.cluster.TestNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -386,7 +383,7 @@ class DynamicMembershipTest
         cluster.stopNode(leader0);
         final TestNode leader1 = cluster.awaitLeader();
         cluster.startStaticNode(leader0.index(), false);
-        TestCluster.awaitElectionClosed(cluster.node(leader0.index()));
+        awaitElectionClosed(cluster.node(leader0.index()));
 
         cluster.reconnectClient();
         cluster.sendMessages(messageCount);
@@ -396,7 +393,7 @@ class DynamicMembershipTest
         cluster.stopNode(leader1);
         final TestNode leader2 = cluster.awaitLeader();
         cluster.startStaticNode(leader1.index(), false);
-        TestCluster.awaitElectionClosed(cluster.node(leader1.index()));
+        awaitElectionClosed(cluster.node(leader1.index()));
 
         cluster.reconnectClient();
         cluster.sendMessages(messageCount);
@@ -446,6 +443,7 @@ class DynamicMembershipTest
         assertEquals(messageCount, dynamicMemberA.service().messageCount());
 
         awaitMembershipSize(staticLeader, 3);
+        awaitActiveMember(dynamicMemberA);
 
         staticFollowerB.isTerminationExpected(true);
         staticLeader.removeMember(staticFollowerB.index(), false);
@@ -464,6 +462,7 @@ class DynamicMembershipTest
         assertEquals(messageCount, dynamicMemberB.service().messageCount());
 
         awaitMembershipSize(staticLeader, 3);
+        awaitActiveMember(dynamicMemberB);
 
         final int initialLeaderIndex = staticLeader.index();
         staticLeader.isTerminationExpected(true);
@@ -487,11 +486,13 @@ class DynamicMembershipTest
         awaitMembershipSize(newLeader, 3);
 
         awaitElectionClosed(dynamicMemberC);
+        awaitActiveMember(dynamicMemberC);
         assertEquals(FOLLOWER, dynamicMemberC.role());
     }
 
     @Test
-    @InterruptAfter(10)
+    @InterruptAfter(30)
+    @SuppressWarnings("checkstyle:methodlength")
     void shouldDynamicallyJoinMemberAfterRecyclingAllStaticNodes(final TestInfo testInfo)
     {
         cluster = aCluster().withStaticNodes(3).withDynamicNodes(4).start();
@@ -529,6 +530,7 @@ class DynamicMembershipTest
         assertEquals(messageCount, dynamicMemberA.service().messageCount());
 
         awaitMembershipSize(staticLeader, 3);
+        awaitActiveMember(dynamicMemberA);
 
         staticFollowerB.isTerminationExpected(true);
         staticLeader.removeMember(staticFollowerB.index(), false);
@@ -547,6 +549,7 @@ class DynamicMembershipTest
         assertEquals(messageCount, dynamicMemberB.service().messageCount());
 
         awaitMembershipSize(staticLeader, 3);
+        awaitActiveMember(dynamicMemberB);
 
         final int initialLeaderIndex = staticLeader.index();
         staticLeader.isTerminationExpected(true);
@@ -568,6 +571,7 @@ class DynamicMembershipTest
         assertEquals(messageCount, dynamicMemberC.service().messageCount());
 
         awaitMembershipSize(newLeader, 3);
+        awaitActiveMember(dynamicMemberC);
 
         final long snapshotCount = cluster.getSnapshotCount(newLeader);
         cluster.takeSnapshot(newLeader);
@@ -590,6 +594,7 @@ class DynamicMembershipTest
         cluster.awaitSnapshotLoadedForService(dynamicMemberD);
         assertEquals(messageCount, dynamicMemberD.service().messageCount());
         awaitMembershipSize(newLeader, 3);
+        awaitActiveMember(dynamicMemberD);
     }
 
     @Test
@@ -643,8 +648,7 @@ class DynamicMembershipTest
 
         cluster.stopNode(leader0);
         final TestNode leader1 = cluster.awaitLeader();
-        cluster.startStaticNode(leader0.index(), false);
-        TestCluster.awaitElectionClosed(leader0);
+        awaitElectionClosed(cluster.startStaticNode(leader0.index(), false));
 
         cluster.takeSnapshot(leader1);
         cluster.awaitSnapshotCount(1);
@@ -656,8 +660,7 @@ class DynamicMembershipTest
 
         cluster.stopNode(leader1);
         final TestNode leader2 = cluster.awaitLeader();
-        cluster.startStaticNode(leader1.index(), false);
-        TestCluster.awaitElectionClosed(leader1);
+        awaitElectionClosed(cluster.startStaticNode(leader1.index(), false));
 
         cluster.reconnectClient();
         cluster.sendMessages(messageCount);
