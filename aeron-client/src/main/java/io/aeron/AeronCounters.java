@@ -257,6 +257,21 @@ public final class AeronCounters
      */
     public static final int CLUSTER_CLUSTERED_SERVICE_CYCLE_TIME_THRESHOLD_EXCEEDED_TYPE_ID = 219;
 
+    /**
+     * The type id of the {@link Counter} used for the warm standby state.
+     */
+    public static final int CLUSTER_STANDBY_STATE_TYPE_ID = 220;
+
+    /**
+     * Counter type id for the clustered service error count.
+     */
+    public static final int CLUSTER_STANDBY_ERROR_COUNT_TYPE_ID = 221;
+
+    /**
+     * Counter type for responses to heartbeat request from the cluster.
+     */
+    public static final int CLUSTER_STANDBY_HEARTBEAT_RESPONSE_COUNT_TYPE_ID = 222;
+
     private AeronCounters()
     {
     }

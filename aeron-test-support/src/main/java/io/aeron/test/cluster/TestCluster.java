@@ -18,6 +18,8 @@ package io.aeron.test.cluster;
 import io.aeron.*;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.RecordingSignalConsumer;
+import io.aeron.archive.codecs.RecordingSignal;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.*;
 import io.aeron.cluster.client.AeronCluster;
@@ -48,9 +50,7 @@ import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ExpandableArrayBuffer;
-import org.agrona.collections.IntHashSet;
-import org.agrona.collections.MutableInteger;
-import org.agrona.collections.MutableLong;
+import org.agrona.collections.*;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.NoOpLock;
 import org.agrona.concurrent.status.AtomicCounter;
@@ -58,6 +58,7 @@ import org.agrona.concurrent.status.CountersReader;
 import org.mockito.internal.matchers.apachecommons.ReflectionEquals;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -885,6 +886,18 @@ public final class TestCluster implements AutoCloseable
         }
     }
 
+    public void sendAndAwaitMessages(final int messageCount)
+    {
+        sendAndAwaitMessages(messageCount, messageCount);
+    }
+
+    public void sendAndAwaitMessages(final int sendCount, final int awaitCount)
+    {
+        sendMessages(sendCount);
+        awaitResponseMessageCount(awaitCount);
+        awaitServicesMessageCount(awaitCount);
+    }
+
     public void pollUntilMessageSent(final int messageLength)
     {
         while (true)
@@ -1447,12 +1460,24 @@ public final class TestCluster implements AutoCloseable
         try (Aeron aeron = Aeron.connect(
             new Aeron.Context().aeronDirectoryName(node.mediaDriver().aeronDirectoryName())))
         {
+            final MutableBoolean segmentsDeleted = new MutableBoolean(false);
+            final RecordingSignalConsumer deleteSignalConsumer =
+                (controlSessionId, correlationId, recordingId1, subscriptionId, position, signal) ->
+                {
+                    if (RecordingSignal.DELETE == signal)
+                    {
+                        segmentsDeleted.set(true);
+                    }
+                };
+
             final AeronArchive.Context aeronArchiveCtx = node
                 .consensusModule()
                 .context()
                 .archiveContext()
                 .clone()
-                .aeron(aeron).ownsAeronClient(false);
+                .recordingSignalConsumer(deleteSignalConsumer)
+                .aeron(aeron)
+                .ownsAeronClient(false);
 
             try (AeronArchive aeronArchive = AeronArchive.connect(aeronArchiveCtx))
             {
@@ -1464,12 +1489,17 @@ public final class TestCluster implements AutoCloseable
                     latestSnapshot.logPosition,
                     recordingDescriptor.termBufferLength(),
                     recordingDescriptor.segmentFileLength());
-                aeronArchive.purgeSegments(recordingId, newStartPosition);
+                final long segmentsDeleteCount = aeronArchive.purgeSegments(recordingId, newStartPosition);
+
+                while (0 < segmentsDeleteCount && !segmentsDeleted.get())
+                {
+                    aeronArchive.pollForRecordingSignals();
+                }
             }
         }
     }
 
-    private static String[] clusterMembersEndpoints(final int clusterId, final int maxMemberCount)
+    static String[] clusterMembersEndpoints(final int clusterId, final int maxMemberCount)
     {
         final String[] clusterMembersEndpoints = new String[maxMemberCount];
 
@@ -1486,7 +1516,7 @@ public final class TestCluster implements AutoCloseable
         return clusterMembersEndpoints;
     }
 
-    private static String clusterConsensusEndpoints(final int clusterId, final int beginIndex, final int endIndex)
+    static String clusterConsensusEndpoints(final int clusterId, final int beginIndex, final int endIndex)
     {
         final StringBuilder builder = new StringBuilder();
 
@@ -1512,12 +1542,22 @@ public final class TestCluster implements AutoCloseable
 
     static String archiveControlRequestChannel(final int memberId)
     {
-        return "aeron:udp?endpoint=" + hostname(memberId) + ":801" + memberId;
+        return "aeron:udp?endpoint=" + archiveControlRequestEndpoint(memberId);
+    }
+
+    static String archiveControlRequestEndpoint(final int memberId)
+    {
+        return hostname(memberId) + ":801" + memberId;
     }
 
     static String archiveControlResponseChannel(final int memberId)
     {
-        return "aeron:udp?endpoint=" + hostname(memberId) + ":0";
+        return "aeron:udp?endpoint=" + archiveControlResponseEndpoint(memberId);
+    }
+
+    static String archiveControlResponseEndpoint(final int memberId)
+    {
+        return hostname(memberId) + ":0";
     }
 
     public void invalidateLatestSnapshot()
@@ -1676,6 +1716,17 @@ public final class TestCluster implements AutoCloseable
                         position.set(header.position());
                     },
                     10);
+            }
+        }
+    }
+
+    public void seedRecordingsFromLatestSnapshot()
+    {
+        for (final TestNode node : nodes)
+        {
+            if (null != node)
+            {
+                ClusterTool.seedRecordingLogFromSnapshot(node.consensusModule().context().clusterDir());
             }
         }
     }
@@ -1848,4 +1899,56 @@ public final class TestCluster implements AutoCloseable
             }
         };
     }
+
+    public static final CredentialsSupplier SIMPLE_CREDENTIALS_SUPPLIER = new CredentialsSupplier()
+    {
+        public byte[] encodedCredentials()
+        {
+            return "admin:admin".getBytes(StandardCharsets.US_ASCII);
+        }
+
+        public byte[] onChallenge(final byte[] encodedChallenge)
+        {
+            return ArrayUtil.EMPTY_BYTE_ARRAY;
+        }
+    };
+
+    public static final CredentialsSupplier CHALLENGE_RESPONSE_CREDENTIALS_SUPPLIER = new CredentialsSupplier()
+    {
+        public byte[] encodedCredentials()
+        {
+            return "admin:adminC".getBytes(StandardCharsets.US_ASCII);
+        }
+
+        public byte[] onChallenge(final byte[] encodedChallenge)
+        {
+            return "admin:CSadmin".getBytes(StandardCharsets.US_ASCII);
+        }
+    };
+
+    public static final CredentialsSupplier INVALID_SIMPLE_CREDENTIALS_SUPPLIER = new CredentialsSupplier()
+    {
+        public byte[] encodedCredentials()
+        {
+            return "admin:invalid".getBytes(StandardCharsets.US_ASCII);
+        }
+
+        public byte[] onChallenge(final byte[] encodedChallenge)
+        {
+            return ArrayUtil.EMPTY_BYTE_ARRAY;
+        }
+    };
+
+    public static final CredentialsSupplier INVALID_CHALLENGE_RESPONSE_CREDENTIALS_SUPPLIER = new CredentialsSupplier()
+    {
+        public byte[] encodedCredentials()
+        {
+            return "admin:adminC".getBytes(StandardCharsets.US_ASCII);
+        }
+
+        public byte[] onChallenge(final byte[] encodedChallenge)
+        {
+            return "admin:invalid".getBytes(StandardCharsets.US_ASCII);
+        }
+    };
 }

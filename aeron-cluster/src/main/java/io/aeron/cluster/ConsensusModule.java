@@ -1515,7 +1515,7 @@ public final class ConsensusModule implements AutoCloseable
             {
                 dutyCycleTracker = new DutyCycleStallTracker(
                     ClusterCounters.allocate(
-                        aeron, buffer, "Cluster max cycle time (ns)",
+                        aeron, buffer, "Cluster max cycle time in ns",
                         AeronCounters.CLUSTER_MAX_CYCLE_TIME_TYPE_ID, clusterId),
                     ClusterCounters.allocate(
                         aeron, buffer, "Cluster work cycle time exceeded count: threshold=" + cycleThresholdNs + "ns",
@@ -1745,7 +1745,7 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * User assigned application version validator implementation used to check version compatibility.
          * <p>
-         * The default validator uses {@link org.agrona.SemanticVersion} semantics.
+         * The default is to use {@link org.agrona.SemanticVersion} major version for checking compatibility.
          *
          * @return AppVersionValidator in use.
          */

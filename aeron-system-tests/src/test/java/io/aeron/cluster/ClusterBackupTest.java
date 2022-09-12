@@ -18,16 +18,10 @@ package io.aeron.cluster;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.samples.archive.SampleAuthenticator;
 import io.aeron.security.AuthenticatorSupplier;
-import io.aeron.security.CredentialsSupplier;
-import io.aeron.test.InterruptAfter;
-import io.aeron.test.InterruptingTestCallback;
-import io.aeron.test.SlowTest;
-import io.aeron.test.SystemTestWatcher;
-import io.aeron.test.Tests;
+import io.aeron.test.*;
 import io.aeron.test.cluster.TestBackupNode;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.cluster.TestNode;
-import org.agrona.collections.ArrayUtil;
 import org.agrona.collections.MutableBoolean;
 import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.errors.ErrorLogReader;
@@ -36,9 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.nio.charset.StandardCharsets;
-
-import static io.aeron.test.cluster.TestCluster.aCluster;
+import static io.aeron.test.cluster.TestCluster.*;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.junit.jupiter.api.Assertions.*;
@@ -49,57 +41,6 @@ class ClusterBackupTest
 {
     @RegisterExtension
     final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
-    private final CredentialsSupplier simpleCredentialsSupplier = new CredentialsSupplier()
-    {
-        public byte[] encodedCredentials()
-        {
-            return "admin:admin".getBytes(StandardCharsets.US_ASCII);
-        }
-
-        public byte[] onChallenge(final byte[] encodedChallenge)
-        {
-            return ArrayUtil.EMPTY_BYTE_ARRAY;
-        }
-    };
-
-    private final CredentialsSupplier challengeResponseCredentialsSupplier = new CredentialsSupplier()
-    {
-        public byte[] encodedCredentials()
-        {
-            return "admin:adminC".getBytes(StandardCharsets.US_ASCII);
-        }
-
-        public byte[] onChallenge(final byte[] encodedChallenge)
-        {
-            return "admin:CSadmin".getBytes(StandardCharsets.US_ASCII);
-        }
-    };
-
-    private final CredentialsSupplier invalidSimpleCredentialsSupplier = new CredentialsSupplier()
-    {
-        public byte[] encodedCredentials()
-        {
-            return "admin:invalid".getBytes(StandardCharsets.US_ASCII);
-        }
-
-        public byte[] onChallenge(final byte[] encodedChallenge)
-        {
-            return ArrayUtil.EMPTY_BYTE_ARRAY;
-        }
-    };
-
-    private final CredentialsSupplier invalidChallengeResponseCredentialsSupplier = new CredentialsSupplier()
-    {
-        public byte[] encodedCredentials()
-        {
-            return "admin:adminC".getBytes(StandardCharsets.US_ASCII);
-        }
-
-        public byte[] onChallenge(final byte[] encodedChallenge)
-        {
-            return "admin:invalid".getBytes(StandardCharsets.US_ASCII);
-        }
-    };
 
     @BeforeEach
     void setUp()
@@ -140,9 +81,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         final long logPosition = leader.service().cluster().logPosition();
 
@@ -173,9 +112,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         final long logPosition = leader.service().cluster().logPosition();
 
@@ -200,9 +137,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
@@ -233,9 +168,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         cluster.node(0).isTerminationExpected(true);
         cluster.node(1).isTerminationExpected(true);
@@ -272,9 +205,7 @@ class ClusterBackupTest
         final int postSnapshotMessageCount = 7;
         final int totalMessageCount = preSnapshotMessageCount + postSnapshotMessageCount;
         cluster.connectClient();
-        cluster.sendMessages(preSnapshotMessageCount);
-        cluster.awaitResponseMessageCount(preSnapshotMessageCount);
-        cluster.awaitServicesMessageCount(preSnapshotMessageCount);
+        cluster.sendAndAwaitMessages(preSnapshotMessageCount);
 
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
@@ -317,10 +248,8 @@ class ClusterBackupTest
         final int postSnapshotMessageCount = 7;
         final int totalMessageCount = preSnapshotMessageCount + postSnapshotMessageCount;
 
-        cluster.connectClient(simpleCredentialsSupplier);
-        cluster.sendMessages(preSnapshotMessageCount);
-        cluster.awaitResponseMessageCount(preSnapshotMessageCount);
-        cluster.awaitServicesMessageCount(preSnapshotMessageCount);
+        cluster.connectClient(TestCluster.SIMPLE_CREDENTIALS_SUPPLIER);
+        cluster.sendAndAwaitMessages(preSnapshotMessageCount);
 
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
@@ -331,7 +260,7 @@ class ClusterBackupTest
 
         final long logPosition = leader.service().cluster().logPosition();
 
-        cluster.startClusterBackupNode(true, simpleCredentialsSupplier);
+        cluster.startClusterBackupNode(true, TestCluster.SIMPLE_CREDENTIALS_SUPPLIER);
 
         cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
         cluster.awaitBackupLiveLogPosition(logPosition);
@@ -363,10 +292,8 @@ class ClusterBackupTest
         final int postSnapshotMessageCount = 7;
         final int totalMessageCount = preSnapshotMessageCount + postSnapshotMessageCount;
 
-        cluster.connectClient(challengeResponseCredentialsSupplier);
-        cluster.sendMessages(preSnapshotMessageCount);
-        cluster.awaitResponseMessageCount(preSnapshotMessageCount);
-        cluster.awaitServicesMessageCount(preSnapshotMessageCount);
+        cluster.connectClient(TestCluster.CHALLENGE_RESPONSE_CREDENTIALS_SUPPLIER);
+        cluster.sendAndAwaitMessages(preSnapshotMessageCount);
 
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
@@ -377,7 +304,7 @@ class ClusterBackupTest
 
         final long logPosition = leader.service().cluster().logPosition();
 
-        cluster.startClusterBackupNode(true, challengeResponseCredentialsSupplier);
+        cluster.startClusterBackupNode(true, TestCluster.CHALLENGE_RESPONSE_CREDENTIALS_SUPPLIER);
 
         cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
         cluster.awaitBackupLiveLogPosition(logPosition);
@@ -404,7 +331,7 @@ class ClusterBackupTest
         systemTestWatcher.ignoreErrorsMatching(s -> s.contains("AUTHENTICATION_REJECTED"));
 
         cluster.awaitLeader();
-        final TestBackupNode testBackupNode = cluster.startClusterBackupNode(true, invalidSimpleCredentialsSupplier);
+        final TestBackupNode testBackupNode = cluster.startClusterBackupNode(true, INVALID_SIMPLE_CREDENTIALS_SUPPLIER);
 
         cluster.awaitBackupState(ClusterBackup.State.RESET_BACKUP);
 
@@ -425,7 +352,7 @@ class ClusterBackupTest
 
         cluster.awaitLeader();
         final TestBackupNode testBackupNode = cluster.startClusterBackupNode(
-            true, invalidChallengeResponseCredentialsSupplier);
+            true, INVALID_CHALLENGE_RESPONSE_CREDENTIALS_SUPPLIER);
 
         cluster.awaitBackupState(ClusterBackup.State.RESET_BACKUP);
 
@@ -445,9 +372,7 @@ class ClusterBackupTest
         final int postSnapshotMessageCount = 7;
         final int totalMessageCount = preSnapshotMessageCount + postSnapshotMessageCount;
         cluster.connectClient();
-        cluster.sendMessages(preSnapshotMessageCount);
-        cluster.awaitResponseMessageCount(preSnapshotMessageCount);
-        cluster.awaitServicesMessageCount(preSnapshotMessageCount);
+        cluster.sendAndAwaitMessages(preSnapshotMessageCount);
 
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
@@ -499,9 +424,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         final long logPosition = leader.service().cluster().logPosition();
         final TestBackupNode backupNode = cluster.startClusterBackupNode(true);
@@ -537,9 +460,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         cluster.stopNode(leaderOne);
 
@@ -569,9 +490,7 @@ class ClusterBackupTest
 
         final int messageCount = 10;
         final AeronCluster aeronCluster = cluster.connectClient();
-        cluster.sendMessages(messageCount);
-        cluster.awaitResponseMessageCount(messageCount);
-        cluster.awaitServicesMessageCount(messageCount);
+        cluster.sendAndAwaitMessages(messageCount);
 
         final long logPosition = leaderOne.service().cluster().logPosition();
 

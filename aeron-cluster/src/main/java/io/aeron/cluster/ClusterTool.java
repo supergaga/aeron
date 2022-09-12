@@ -81,7 +81,7 @@ import static org.agrona.SystemUtil.getDurationInNanos;
  *                           resume: resumes reading from the log.
  *                         shutdown: initiates an orderly stop of the cluster with a snapshot.
  *                            abort: stops the cluster without a snapshot.
- *      describe-latest-cm-snapshot: prints the contents of the latest consensus module snapshot.
+ *      describe-latest-cm-snapshot: prints the contents of the latest valid consensus module snapshot.
  * </pre>
  */
 public class ClusterTool
@@ -912,32 +912,14 @@ public class ClusterTool
      */
     public static void describeLatestConsensusModuleSnapshot(final PrintStream out, final File clusterDir)
     {
-        RecordingLog.Entry entry = null;
-        try (RecordingLog recordingLog = new RecordingLog(clusterDir, false))
+        final RecordingLog.Entry entry = findLatestValidSnapshot(clusterDir);
+        if (null == entry)
         {
-            final List<RecordingLog.Entry> entries = recordingLog.entries();
-            for (int i = entries.size() - 1; i >= 0; i--)
-            {
-                final RecordingLog.Entry e = entries.get(i);
-                if (RecordingLog.isValidSnapshot(e) && ConsensusModule.Configuration.SERVICE_ID == e.serviceId)
-                {
-                    entry = e;
-                    break;
-                }
-            }
-
-            if (null == entry)
-            {
-                out.println("Snapshot not found");
-                return;
-            }
+            out.println("Snapshot not found");
+            return;
         }
 
-        final ClusterNodeControlProperties properties;
-        try (ClusterMarkFile markFile = openMarkFile(clusterDir, null))
-        {
-            properties = markFile.loadControlProperties();
-        }
+        final ClusterNodeControlProperties properties = loadControlProperties(clusterDir);
 
         final AeronArchive.Context archiveCtx = new AeronArchive.Context()
             .controlRequestChannel("aeron:ipc")
@@ -961,13 +943,15 @@ public class ClusterTool
                     Thread.yield();
                 }
 
-                final ConsensusModuleSnapshotInspector inspector = new ConsensusModuleSnapshotInspector(image, out);
+                final ConsensusModuleSnapshotAdapter adapter = new ConsensusModuleSnapshotAdapter(
+                    image, new ConsensusModuleSnapshotPrinter(out));
+
                 while (true)
                 {
-                    final int fragments = inspector.poll();
+                    final int fragments = adapter.poll();
                     if (0 == fragments)
                     {
-                        if (inspector.isDone())
+                        if (adapter.isDone())
                         {
                             break;
                         }
@@ -981,6 +965,11 @@ public class ClusterTool
                         Thread.yield();
                     }
                 }
+
+                out.println("Consensus Module Snapshot End:" +
+                    " memberId=" + properties.memberId +
+                    " recordingId=" + entry.recordingId +
+                    " length=" + image.position());
             }
         }
     }
@@ -1073,6 +1062,45 @@ public class ClusterTool
             ClusterControl.ToggleState.ABORT,
             false,
             TimeUnit.SECONDS.toMillis(1));
+    }
+
+    /**
+     * Finds the latest valid snapshot from the log file.
+     *
+     * @param clusterDir where the cluster node is running.
+     * @return entry or {@code null} if not found.
+     */
+    static RecordingLog.Entry findLatestValidSnapshot(final File clusterDir)
+    {
+        try (RecordingLog recordingLog = new RecordingLog(clusterDir, false))
+        {
+            final List<RecordingLog.Entry> entries = recordingLog.entries();
+            for (int i = entries.size() - 1; i >= 0; i--)
+            {
+                final RecordingLog.Entry e = entries.get(i);
+                if (RecordingLog.isValidSnapshot(e) && ConsensusModule.Configuration.SERVICE_ID == e.serviceId)
+                {
+                    return e;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Load {@link ClusterNodeControlProperties} from the mark file.
+     *
+     * @param clusterDir where the cluster node is running.
+     * @return control properties.
+     */
+    static ClusterNodeControlProperties loadControlProperties(final File clusterDir)
+    {
+        final ClusterNodeControlProperties properties;
+        try (ClusterMarkFile markFile = openMarkFile(clusterDir, null))
+        {
+            properties = markFile.loadControlProperties();
+        }
+        return properties;
     }
 
     @SuppressWarnings("MethodLength")
@@ -1335,7 +1363,7 @@ public class ClusterTool
             "                           resume: resumes appending to the log.%n" +
             "                         shutdown: initiates an orderly stop of the cluster with a snapshot.%n" +
             "                            abort: stops the cluster without a snapshot.%n" +
-            "      describe-latest-cm-snapshot: prints the contents of the latest consensus module snapshot.%n");
+            "      describe-latest-cm-snapshot: prints the contents of the latest valid consensus module snapshot.%n");
         System.out.flush();
     }
 }

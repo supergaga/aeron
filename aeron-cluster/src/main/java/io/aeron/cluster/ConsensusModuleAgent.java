@@ -60,7 +60,7 @@ import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.M
 import static io.aeron.exceptions.AeronException.Category.WARN;
 import static java.lang.Math.min;
 
-final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
+final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler, ConsensusModuleSnapshotListener
 {
     static final long SLOW_TICK_INTERVAL_NS = TimeUnit.MILLISECONDS.toNanos(10);
     static final short APPEND_POSITION_FLAG_NONE = 0;
@@ -385,6 +385,136 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     {
         final String agentRoleName = ctx.agentRoleName();
         return null != agentRoleName ? agentRoleName : "consensus-module_" + ctx.clusterId() + "_" + memberId;
+    }
+
+    public void onLoadBeginSnapshot(
+        final int appVersion, final TimeUnit timeUnit, final DirectBuffer buffer, final int offset, final int length)
+    {
+        if (!ctx.appVersionValidator().isVersionCompatible(ctx.appVersion(), appVersion))
+        {
+            throw new ClusterException(
+                "incompatible version: " + SemanticVersion.toString(ctx.appVersion()) +
+                " snapshot=" + SemanticVersion.toString(appVersion),
+                AeronException.Category.FATAL);
+        }
+
+        if (timeUnit != clusterTimeUnit)
+        {
+            throw new ClusterException(
+                "incompatible time unit: " + clusterTimeUnit + " snapshot=" + timeUnit, AeronException.Category.FATAL);
+        }
+    }
+
+    public void onLoadEndSnapshot(final DirectBuffer buffer, final int offset, final int length)
+    {
+    }
+
+    public void onLoadClusterSession(
+        final long clusterSessionId,
+        final long correlationId,
+        final long openedPosition,
+        final long timeOfLastActivity,
+        final CloseReason closeReason,
+        final int responseStreamId,
+        final String responseChannel,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length)
+    {
+        final ClusterSession session = new ClusterSession(
+            clusterSessionId,
+            correlationId,
+            openedPosition,
+            timeOfLastActivity,
+            responseStreamId,
+            createResponseChannel(responseChannel),
+            closeReason);
+
+        addSession(session);
+
+        if (clusterSessionId >= nextSessionId)
+        {
+            nextSessionId = clusterSessionId + 1;
+        }
+    }
+
+    public void onLoadConsensusModuleState(
+        final long nextSessionId,
+        final long nextServiceSessionId,
+        final long logServiceSessionId,
+        final int pendingMessageCapacity,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length)
+    {
+        this.nextSessionId = nextSessionId;
+        pendingServiceMessageTrackers[0].loadState(nextServiceSessionId, logServiceSessionId, pendingMessageCapacity);
+    }
+
+    public void onLoadClusterMembers(
+        final int memberId,
+        final int highMemberId,
+        final String members,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length)
+    {
+        if (null == dynamicJoin && !ctx.clusterMembersIgnoreSnapshot())
+        {
+            if (NULL_VALUE == this.memberId)
+            {
+                this.memberId = memberId;
+                ctx.clusterMarkFile().memberId(memberId);
+            }
+
+            if (ClusterMember.EMPTY_MEMBERS == activeMembers)
+            {
+                activeMembers = ClusterMember.parse(members);
+                this.highMemberId = Math.max(ClusterMember.highMemberId(activeMembers), highMemberId);
+                rankedPositions = new long[ClusterMember.quorumThreshold(activeMembers.length)];
+                thisMember = clusterMemberByIdMap.get(memberId);
+
+                ClusterMember.addConsensusPublications(
+                    activeMembers,
+                    thisMember,
+                    ctx.consensusChannel(),
+                    ctx.consensusStreamId(),
+                    aeron,
+                    ctx.countedErrorHandler());
+            }
+        }
+    }
+
+    public void onLoadPendingMessageTracker(
+        final long nextServiceSessionId,
+        final long logServiceSessionId,
+        final int pendingMessageCapacity,
+        final int serviceId,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length)
+    {
+        if (serviceId < 0 || serviceId >= pendingServiceMessageTrackers.length)
+        {
+            throw new ClusterException(
+                "serviceId=" + serviceId + " invalid for serviceCount=" + pendingServiceMessageTrackers.length);
+        }
+
+        pendingServiceMessageTrackers[serviceId].loadState(
+            nextServiceSessionId, logServiceSessionId, pendingMessageCapacity);
+    }
+
+    public void onLoadPendingMessage(
+        final long clusterSessionId, final DirectBuffer buffer, final int offset, final int length)
+    {
+        final int index = PendingServiceMessageTracker.serviceId(clusterSessionId);
+        pendingServiceMessageTrackers[index].appendMessage(buffer, offset, length);
+    }
+
+    public void onLoadTimer(
+        final long correlationId, final long deadline, final DirectBuffer buffer, final int offset, final int length)
+    {
+        onScheduleTimer(correlationId, deadline);
     }
 
     void onSessionConnect(
@@ -958,7 +1088,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 final ClusterSession session = new ClusterSession(
                     NULL_VALUE, responseStreamId, createResponseChannel(responseChannel));
 
-                session.markAsBackupSession();
+                session.action(ClusterSession.Action.BACKUP);
                 session.asyncConnect(aeron);
 
                 final long timestamp = clusterClock.time();
@@ -973,10 +1103,46 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 }
                 else
                 {
-                    authenticator.onConnectRequest(
-                        session.id(), encodedCredentials, clusterTimeUnit.toMillis(timestamp));
+                    final long timestampMs = clusterTimeUnit.toMillis(timestamp);
+                    authenticator.onConnectRequest(session.id(), encodedCredentials, timestampMs);
                     pendingSessions.add(session);
                 }
+            }
+        }
+    }
+
+    public void onHeartbeatRequest(
+        final long correlationId,
+        final int responseStreamId,
+        final String responseChannel,
+        final byte[] encodedCredentials)
+    {
+        if (null == election && null == dynamicJoin)
+        {
+            if (Cluster.Role.LEADER != role)
+            {
+                consensusPublisher.heartbeatRequest(
+                    leaderMember.publication(),
+                    correlationId,
+                    responseStreamId,
+                    responseChannel,
+                    encodedCredentials);
+            }
+            else if (state == ConsensusModule.State.ACTIVE || state == ConsensusModule.State.SUSPENDED)
+            {
+                final ClusterSession session = new ClusterSession(
+                    NULL_VALUE, responseStreamId, createResponseChannel(responseChannel));
+
+                session.action(ClusterSession.Action.HEARTBEAT);
+                session.asyncConnect(aeron);
+
+                final long timestamp = clusterClock.time();
+                final long timestampNs = clusterTimeUnit.toNanos(timestamp);
+                final long timestampMs = clusterTimeUnit.toMillis(timestamp);
+
+                session.lastActivityNs(timestampNs, correlationId);
+                authenticator.onConnectRequest(session.id(), encodedCredentials, timestampMs);
+                pendingSessions.add(session);
             }
         }
     }
@@ -1139,16 +1305,19 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         {
             session.closing(CloseReason.SERVICE_ACTION);
 
-            if (Cluster.Role.LEADER == role && logPublisher.appendSessionClose(
-                memberId, session, leadershipTermId, clusterClock.time(), clusterClock.timeUnit()))
+            if (Cluster.Role.LEADER == role && ConsensusModule.State.ACTIVE == state)
             {
-                final String msg = CloseReason.SERVICE_ACTION.name();
-                egressPublisher.sendEvent(session, leadershipTermId, memberId, EventCode.CLOSED, msg);
-                session.closedLogPosition(logPublisher.position());
-                uncommittedClosedSessions.addLast(session);
-                sessionByIdMap.remove(clusterSessionId);
-                removeSession(sessions, clusterSessionId);
-                session.close(aeron, ctx.countedErrorHandler());
+                if (logPublisher.appendSessionClose(
+                    memberId, session, leadershipTermId, clusterClock.time(), clusterClock.timeUnit()))
+                {
+                    final String msg = CloseReason.SERVICE_ACTION.name();
+                    egressPublisher.sendEvent(session, leadershipTermId, memberId, EventCode.CLOSED, msg);
+                    session.closedLogPosition(logPublisher.position());
+                    uncommittedClosedSessions.addLast(session);
+                    sessionByIdMap.remove(clusterSessionId);
+                    removeSession(sessions, clusterSessionId);
+                    session.close(aeron, ctx.countedErrorHandler());
+                }
             }
         }
     }
@@ -1402,93 +1571,6 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 election.onMembershipChange(activeMembers, changeType, memberId, logPosition);
             }
         }
-    }
-
-    void onLoadSession(
-        final long clusterSessionId,
-        final long correlationId,
-        final long openedPosition,
-        final long timeOfLastActivity,
-        final CloseReason closeReason,
-        final int responseStreamId,
-        final String responseChannel)
-    {
-        final ClusterSession session = new ClusterSession(
-            clusterSessionId,
-            correlationId,
-            openedPosition,
-            timeOfLastActivity,
-            responseStreamId,
-            createResponseChannel(responseChannel),
-            closeReason);
-
-        addSession(session);
-
-        if (clusterSessionId >= nextSessionId)
-        {
-            nextSessionId = clusterSessionId + 1;
-        }
-    }
-
-    void onLoadConsensusModuleState(
-        final long nextSessionId,
-        final long nextServiceSessionId,
-        final long logServiceSessionId,
-        final int pendingMessageCapacity)
-    {
-        this.nextSessionId = nextSessionId;
-        pendingServiceMessageTrackers[0].loadState(nextServiceSessionId, logServiceSessionId, pendingMessageCapacity);
-    }
-
-    void onLoadClusterMembers(final int memberId, final int highMemberId, final String members)
-    {
-        if (null == dynamicJoin && !ctx.clusterMembersIgnoreSnapshot())
-        {
-            if (NULL_VALUE == this.memberId)
-            {
-                this.memberId = memberId;
-                ctx.clusterMarkFile().memberId(memberId);
-            }
-
-            if (ClusterMember.EMPTY_MEMBERS == activeMembers)
-            {
-                activeMembers = ClusterMember.parse(members);
-                this.highMemberId = Math.max(ClusterMember.highMemberId(activeMembers), highMemberId);
-                rankedPositions = new long[ClusterMember.quorumThreshold(activeMembers.length)];
-                thisMember = clusterMemberByIdMap.get(memberId);
-
-                ClusterMember.addConsensusPublications(
-                    activeMembers,
-                    thisMember,
-                    ctx.consensusChannel(),
-                    ctx.consensusStreamId(),
-                    aeron,
-                    ctx.countedErrorHandler());
-            }
-        }
-    }
-
-    void onLoadPendingMessageTrackerState(
-        final long nextServiceSessionId,
-        final long logServiceSessionId,
-        final int pendingMessageCapacity,
-        final int serviceId)
-    {
-        if (serviceId < 0 || serviceId >= pendingServiceMessageTrackers.length)
-        {
-            throw new ClusterException(
-                "serviceId=" + serviceId + " invalid for serviceCount=" + pendingServiceMessageTrackers.length);
-        }
-
-        pendingServiceMessageTrackers[serviceId].loadState(
-            nextServiceSessionId, logServiceSessionId, pendingMessageCapacity);
-    }
-
-    void onLoadPendingMessage(
-        final long clusterSessionId, final DirectBuffer buffer, final int offset, final int length)
-    {
-        final int index = PendingServiceMessageTracker.serviceId(clusterSessionId);
-        pendingServiceMessageTrackers[index].appendMessage(buffer, offset, length);
     }
 
     int addLogPublication()
@@ -2393,27 +2475,47 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
 
             if (session.state() == AUTHENTICATED)
             {
-                if (session.isBackupSession())
+                switch (session.action())
                 {
-                    final RecordingLog.Entry entry = recordingLog.findLastTerm();
-                    if (null != entry && consensusPublisher.backupResponse(
-                        session,
-                        commitPosition.id(),
-                        leaderMember.id(),
-                        entry,
-                        recoveryPlan,
-                        ClusterMember.encodeAsString(activeMembers)))
+                    case CLIENT:
                     {
-                        ArrayListUtil.fastUnorderedRemove(pendingSessions, i, lastIndex--);
-                        session.close(aeron, ctx.countedErrorHandler());
-                        workCount += 1;
+                        if (session.responsePublication().isConnected() && appendSessionAndOpen(session, nowNs))
+                        {
+                            ArrayListUtil.fastUnorderedRemove(pendingSessions, i, lastIndex--);
+                            addSession(session);
+                            workCount += 1;
+                        }
+                        break;
                     }
-                }
-                else if (appendSessionAndOpen(session, nowNs))
-                {
-                    ArrayListUtil.fastUnorderedRemove(pendingSessions, i, lastIndex--);
-                    addSession(session);
-                    workCount += 1;
+
+                    case BACKUP:
+                    {
+                        final RecordingLog.Entry entry = recordingLog.findLastTerm();
+                        if (null != entry && consensusPublisher.backupResponse(
+                            session,
+                            commitPosition.id(),
+                            leaderMember.id(),
+                            entry,
+                            recoveryPlan,
+                            ClusterMember.encodeAsString(activeMembers)))
+                        {
+                            ArrayListUtil.fastUnorderedRemove(pendingSessions, i, lastIndex--);
+                            session.close(aeron, ctx.countedErrorHandler());
+                            workCount += 1;
+                        }
+                        break;
+                    }
+
+                    case HEARTBEAT:
+                    {
+                        if (consensusPublisher.heartbeatResponse(session))
+                        {
+                            ArrayListUtil.fastUnorderedRemove(pendingSessions, i, lastIndex--);
+                            session.close(aeron, ctx.countedErrorHandler());
+                            workCount += 1;
+                        }
+                        break;
+                    }
                 }
             }
             else if (session.state() == REJECTED)
@@ -2648,6 +2750,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         {
             session.open(resultingPosition);
             session.timeOfLastActivityNs(nowNs);
+            sendSessionOpenEvent(session);
             return true;
         }
 
@@ -2726,14 +2829,14 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         try (Subscription subscription = aeron.addSubscription(replayChannel, streamId))
         {
             final Image image = awaitImage(sessionId, subscription);
-            final ConsensusModuleSnapshotLoader snapshotLoader = new ConsensusModuleSnapshotLoader(image, this);
+            final ConsensusModuleSnapshotAdapter adapter = new ConsensusModuleSnapshotAdapter(image, this);
 
             while (true)
             {
-                final int fragments = snapshotLoader.poll();
+                final int fragments = adapter.poll();
                 if (0 == fragments)
                 {
-                    if (snapshotLoader.isDone())
+                    if (adapter.isDone())
                     {
                         break;
                     }
@@ -2746,20 +2849,6 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 }
 
                 idle(fragments);
-            }
-
-            final int appVersion = snapshotLoader.appVersion();
-            if (!ctx.appVersionValidator().isVersionCompatible(ctx.appVersion(), appVersion))
-            {
-                throw new ClusterException(
-                    "incompatible version: " + SemanticVersion.toString(ctx.appVersion()) +
-                    " snapshot=" + SemanticVersion.toString(appVersion));
-            }
-
-            final TimeUnit timeUnit = snapshotLoader.timeUnit();
-            if (timeUnit != clusterTimeUnit)
-            {
-                throw new ClusterException("incompatible time unit: " + clusterTimeUnit + " snapshot=" + timeUnit);
             }
 
             for (final PendingServiceMessageTracker tracker : pendingServiceMessageTrackers)
@@ -3192,8 +3281,9 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         for (int i = 0, size = sessions.size(); i < size; i++)
         {
             final ClusterSession session = sessions.get(i);
+            final ClusterSession.State sessionState = session.state();
 
-            if (session.state() == OPEN || session.state() == CLOSED)
+            if (sessionState == OPEN || sessionState == CLOSING)
             {
                 snapshotTaker.snapshotSession(session);
             }
