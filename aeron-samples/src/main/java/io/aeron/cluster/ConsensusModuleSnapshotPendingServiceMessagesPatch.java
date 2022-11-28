@@ -17,21 +17,20 @@ package io.aeron.cluster;
 
 import io.aeron.Aeron;
 import io.aeron.ChannelUri;
-import io.aeron.CommonContext;
 import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
-import io.aeron.archive.client.RecordingDescriptorConsumer;
-import io.aeron.archive.client.RecordingSignalConsumer;
 import io.aeron.archive.codecs.RecordingSignal;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.codecs.ConsensusModuleEncoder;
 import io.aeron.cluster.codecs.MessageHeaderEncoder;
+import io.aeron.cluster.codecs.PendingMessageTrackerEncoder;
 import io.aeron.cluster.codecs.SessionMessageHeaderEncoder;
 import io.aeron.cluster.service.ClusterNodeControlProperties;
+import io.aeron.samples.archive.RecordingSignalCapture;
 import org.agrona.DirectBuffer;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.concurrent.status.CountersReader;
@@ -41,8 +40,9 @@ import java.util.concurrent.TimeUnit;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.CommonContext.IPC_CHANNEL;
-import static io.aeron.CommonContext.NULL_SESSION_ID;
 import static io.aeron.Publication.*;
+import static java.lang.Math.max;
+import static java.lang.Math.min;
 
 /**
  * A tool to patch the latest consensus module snapshot if it has divergence in the pending service messages state.
@@ -56,6 +56,8 @@ import static io.aeron.Publication.*;
 public class ConsensusModuleSnapshotPendingServiceMessagesPatch
 {
     static final int SNAPSHOT_REPLAY_STREAM_ID = 103;
+    static final int SNAPSHOT_RECORDING_STREAM_ID = 107;
+    static final String PATCH_CHANNEL = "aeron:ipc?alias=consensus-module-snapshot-patch";
 
     /**
      * Execute the code to patch the latest snapshot.
@@ -92,12 +94,21 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
         {
             final SnapshotReader snapshotReader = new SnapshotReader();
             replayLocalSnapshotRecording(aeron, archive, recordingId, snapshotReader);
-            final long targetNextServiceSessionId =
-                snapshotReader.logServiceSessionId + 1 + snapshotReader.pendingServiceMessageCount;
-            if (targetNextServiceSessionId != snapshotReader.nextServiceSessionId)
+
+            final long targetNextServiceSessionId = max(
+                max(snapshotReader.nextServiceSessionId, snapshotReader.maxClusterSessionId + 1),
+                snapshotReader.logServiceSessionId + 1 + snapshotReader.pendingServiceMessageCount);
+            final long targetLogServiceSessionId =
+                targetNextServiceSessionId - 1 - snapshotReader.pendingServiceMessageCount;
+
+            if (targetNextServiceSessionId != snapshotReader.nextServiceSessionId ||
+                targetLogServiceSessionId != snapshotReader.logServiceSessionId ||
+                0 != snapshotReader.pendingServiceMessageCount &&
+                (targetLogServiceSessionId + 1 != snapshotReader.minClusterSessionId ||
+                targetNextServiceSessionId - 1 != snapshotReader.maxClusterSessionId))
             {
                 final long tempRecordingId = createNewSnapshotRecording(
-                    aeron, archive, recordingId, targetNextServiceSessionId);
+                    aeron, archive, recordingId, targetLogServiceSessionId, targetNextServiceSessionId);
 
                 final long stopPosition = awaitRecordingStopPosition(archive, recordingId);
                 final long newStopPosition = awaitRecordingStopPosition(archive, tempRecordingId);
@@ -107,9 +118,11 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
                         stopPosition + ", actualStopPosition=" + newStopPosition);
                 }
 
+                recordingSignalCapture.reset();
                 archive.truncateRecording(recordingId, 0);
-                awaitRecordingSignal(archive, recordingSignalCapture, recordingId, RecordingSignal.DELETE);
+                recordingSignalCapture.awaitSignal(archive, recordingId, RecordingSignal.DELETE);
 
+                recordingSignalCapture.reset();
                 archive.replicate(
                     tempRecordingId,
                     recordingId,
@@ -117,18 +130,20 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
                     IPC_CHANNEL,
                     null);
 
-                awaitRecordingSignal(archive, recordingSignalCapture, recordingId, RecordingSignal.REPLICATE_END);
-                awaitRecordingSignal(archive, recordingSignalCapture, recordingId, RecordingSignal.STOP);
+                recordingSignalCapture.awaitSignal(archive, recordingId, RecordingSignal.EXTEND);
+                recordingSignalCapture.reset();
+                recordingSignalCapture.awaitSignal(archive, recordingId, RecordingSignal.STOP);
 
-                final long replicatedStopPosition = awaitRecordingStopPosition(archive, recordingId);
+                final long replicatedStopPosition = recordingSignalCapture.position();
                 if (stopPosition != replicatedStopPosition)
                 {
                     throw new ClusterException("incomplete replication of the new recording: expectedStopPosition=" +
                         stopPosition + ", replicatedStopPosition=" + replicatedStopPosition);
                 }
 
+                recordingSignalCapture.reset();
                 archive.purgeRecording(tempRecordingId);
-                awaitRecordingSignal(archive, recordingSignalCapture, tempRecordingId, RecordingSignal.DELETE);
+                recordingSignalCapture.awaitSignal(archive, tempRecordingId, RecordingSignal.DELETE);
 
                 return true;
             }
@@ -140,13 +155,12 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
     static void replayLocalSnapshotRecording(
         final Aeron aeron,
         final AeronArchive archive,
-        final long snapshotRecordingId,
+        final long recordingId,
         final ConsensusModuleSnapshotListener listener)
     {
         final String channel = IPC_CHANNEL;
         final int streamId = SNAPSHOT_REPLAY_STREAM_ID;
-        final int sessionId = (int)archive.startReplay(
-            snapshotRecordingId, 0, AeronArchive.NULL_LENGTH, channel, streamId);
+        final int sessionId = (int)archive.startReplay(recordingId, 0, AeronArchive.NULL_LENGTH, channel, streamId);
         try
         {
             final String replayChannel = ChannelUri.addSessionId(channel, sessionId);
@@ -183,7 +197,7 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
         }
         finally
         {
-            archive.stopAllReplays(snapshotRecordingId);
+            archive.stopAllReplays(recordingId);
         }
     }
 
@@ -191,24 +205,15 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
         final Aeron aeron,
         final AeronArchive archive,
         final long oldRecordingId,
+        final long targetLogServiceSessionId,
         final long targetNextServiceSessionId)
     {
-        final RecordingDescriptorCapture oldRecordingDescriptorCapture = loadRecordingDescriptor(
-            archive, oldRecordingId);
-
-        final ChannelUri channelUri = ChannelUri.parse(IPC_CHANNEL);
-        channelUri.put(CommonContext.ALIAS_PARAM_NAME, "snapshot-patch");
-        channelUri.put(CommonContext.MTU_LENGTH_PARAM_NAME, Integer.toString(oldRecordingDescriptorCapture.mtuLength));
-        channelUri.initialPosition(
-            0, oldRecordingDescriptorCapture.initialTermId, oldRecordingDescriptorCapture.termBufferLength);
-        final String channel = channelUri.toString();
-        final int streamId = oldRecordingDescriptorCapture.streamId;
-
-        try (ExclusivePublication snapshotPublication = archive.addRecordedExclusivePublication(channel, streamId))
+        try (ExclusivePublication publication = archive.addRecordedExclusivePublication(
+            PATCH_CHANNEL, SNAPSHOT_RECORDING_STREAM_ID))
         {
             try
             {
-                final int publicationSessionId = snapshotPublication.sessionId();
+                final int publicationSessionId = publication.sessionId();
                 final CountersReader countersReader = aeron.countersReader();
                 final int counterId = awaitRecordingCounter(publicationSessionId, countersReader);
                 final long newRecordingId = RecordingPos.getRecordingId(countersReader, counterId);
@@ -217,29 +222,17 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
                     aeron,
                     archive,
                     oldRecordingId,
-                    new SnapshotWriter(snapshotPublication, targetNextServiceSessionId));
+                    new SnapshotWriter(publication, targetLogServiceSessionId, targetNextServiceSessionId));
 
-                awaitRecordingComplete(countersReader, counterId, snapshotPublication.position(), newRecordingId);
+                awaitRecordingComplete(countersReader, counterId, publication.position(), newRecordingId);
 
                 return newRecordingId;
             }
             finally
             {
-                archive.stopRecording(snapshotPublication);
+                archive.stopRecording(publication);
             }
         }
-    }
-
-    private static RecordingDescriptorCapture loadRecordingDescriptor(
-        final AeronArchive archive, final long oldRecordingId)
-    {
-        final RecordingDescriptorCapture recordingDescriptorCapture = new RecordingDescriptorCapture();
-        if (1 != archive.listRecording(oldRecordingId, recordingDescriptorCapture))
-        {
-            throw new ClusterException("failed to read recording descriptor for id: " + oldRecordingId);
-        }
-
-        return recordingDescriptorCapture;
     }
 
     private static int awaitRecordingCounter(final int publicationSessionId, final CountersReader countersReader)
@@ -277,22 +270,6 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
         return stopPosition;
     }
 
-    private static void awaitRecordingSignal(
-        final AeronArchive archive,
-        final RecordingSignalCapture recordingSignalCapture,
-        final long recordingId,
-        final RecordingSignal expectedSignal)
-    {
-        recordingSignalCapture.reset();
-        while (recordingId != recordingSignalCapture.recordingId || expectedSignal != recordingSignalCapture.signal)
-        {
-            if (0 == archive.pollForRecordingSignals())
-            {
-                Thread.yield();
-            }
-        }
-    }
-
     /**
      * Entry point to launch the tool. Requires a single parameter of a cluster directory.
      *
@@ -311,8 +288,10 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
 
     private static final class SnapshotReader implements ConsensusModuleSnapshotListener
     {
-        private long nextServiceSessionId = NULL_SESSION_ID;
-        private long logServiceSessionId = NULL_SESSION_ID;
+        private long nextServiceSessionId = Long.MIN_VALUE;
+        private long logServiceSessionId = Long.MIN_VALUE;
+        private long minClusterSessionId = Long.MAX_VALUE;
+        private long maxClusterSessionId = Long.MIN_VALUE;
         private int pendingServiceMessageCount = 0;
 
         public void onLoadBeginSnapshot(
@@ -341,6 +320,8 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final long clusterSessionId, final DirectBuffer buffer, final int offset, final int length)
         {
             pendingServiceMessageCount++;
+            minClusterSessionId = min(minClusterSessionId, clusterSessionId);
+            maxClusterSessionId = max(maxClusterSessionId, clusterSessionId);
         }
 
         public void onLoadClusterMembers(
@@ -397,14 +378,21 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
         private final ExpandableArrayBuffer tempBuffer = new ExpandableArrayBuffer(1024);
         private final ConsensusModuleEncoder consensusModuleEncoder = new ConsensusModuleEncoder();
         private final SessionMessageHeaderEncoder sessionMessageHeaderEncoder = new SessionMessageHeaderEncoder();
+        private final PendingMessageTrackerEncoder pendingMessageTrackerEncoder = new PendingMessageTrackerEncoder();
         private final ExclusivePublication snapshotPublication;
         private final long targetNextServiceSessionId;
+        private final long targetLogServiceSessionId;
         private long nextClusterSessionId;
 
-        SnapshotWriter(final ExclusivePublication snapshotPublication, final long targetNextServiceSessionId)
+        SnapshotWriter(
+            final ExclusivePublication snapshotPublication,
+            final long targetLogServiceSessionId,
+            final long targetNextServiceSessionId)
         {
             this.snapshotPublication = snapshotPublication;
+            this.targetLogServiceSessionId = targetLogServiceSessionId;
             this.targetNextServiceSessionId = targetNextServiceSessionId;
+            nextClusterSessionId = targetLogServiceSessionId + 1;
         }
 
         public void onLoadBeginSnapshot(
@@ -414,7 +402,7 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final int offset,
             final int length)
         {
-            writeToASnapshot(buffer, offset, length);
+            writeToSnapshot(buffer, offset, length);
         }
 
         public void onLoadConsensusModuleState(
@@ -426,14 +414,13 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final int offset,
             final int length)
         {
-            nextClusterSessionId = logServiceSessionId + 1;
-
             tempBuffer.putBytes(0, buffer, offset, length);
             consensusModuleEncoder
                 .wrap(tempBuffer, MessageHeaderEncoder.ENCODED_LENGTH)
+                .logServiceSessionId(targetLogServiceSessionId)
                 .nextServiceSessionId(targetNextServiceSessionId);
 
-            writeToASnapshot(tempBuffer, 0, length);
+            writeToSnapshot(tempBuffer, 0, length);
         }
 
         public void onLoadClusterMembers(
@@ -444,7 +431,7 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final int offset,
             final int length)
         {
-            writeToASnapshot(buffer, offset, length);
+            writeToSnapshot(buffer, offset, length);
         }
 
         public void onLoadPendingMessage(
@@ -458,7 +445,7 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
                 .wrap(tempBuffer, MessageHeaderEncoder.ENCODED_LENGTH)
                 .clusterSessionId(nextClusterSessionId++);
 
-            writeToASnapshot(tempBuffer, 0, length);
+            writeToSnapshot(tempBuffer, 0, length);
         }
 
         public void onLoadClusterSession(
@@ -473,7 +460,7 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final int offset,
             final int length)
         {
-            writeToASnapshot(buffer, offset, length);
+            writeToSnapshot(buffer, offset, length);
         }
 
         public void onLoadTimer(
@@ -483,7 +470,7 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final int offset,
             final int length)
         {
-            writeToASnapshot(buffer, offset, length);
+            writeToSnapshot(buffer, offset, length);
         }
 
         public void onLoadPendingMessageTracker(
@@ -495,15 +482,28 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
             final int offset,
             final int length)
         {
-            writeToASnapshot(buffer, offset, length);
+            if (0 == serviceId)
+            {
+                tempBuffer.putBytes(0, buffer, offset, length);
+                pendingMessageTrackerEncoder
+                    .wrap(tempBuffer, MessageHeaderEncoder.ENCODED_LENGTH)
+                    .logServiceSessionId(targetLogServiceSessionId)
+                    .nextServiceSessionId(targetNextServiceSessionId);
+
+                writeToSnapshot(tempBuffer, 0, length);
+            }
+            else
+            {
+                writeToSnapshot(buffer, offset, length);
+            }
         }
 
         public void onLoadEndSnapshot(final DirectBuffer buffer, final int offset, final int length)
         {
-            writeToASnapshot(buffer, offset, length);
+            writeToSnapshot(buffer, offset, length);
         }
 
-        private void writeToASnapshot(final DirectBuffer buffer, final int offset, final int length)
+        private void writeToSnapshot(final DirectBuffer buffer, final int offset, final int length)
         {
             long result;
             while ((result = snapshotPublication.offer(buffer, offset, length)) < 0)
@@ -517,65 +517,6 @@ public class ConsensusModuleSnapshotPendingServiceMessagesPatch
 
                 Thread.yield();
             }
-        }
-    }
-
-    private static final class RecordingSignalCapture implements RecordingSignalConsumer
-    {
-        long recordingId;
-        RecordingSignal signal;
-
-        public void onSignal(
-            final long controlSessionId,
-            final long correlationId,
-            final long recordingId,
-            final long subscriptionId,
-            final long position,
-            final RecordingSignal signal)
-        {
-            if (NULL_VALUE != recordingId)
-            {
-                this.recordingId = recordingId;
-            }
-            this.signal = signal;
-        }
-
-        void reset()
-        {
-            recordingId = NULL_VALUE;
-            signal = null;
-        }
-    }
-
-    private static final class RecordingDescriptorCapture implements RecordingDescriptorConsumer
-    {
-        int initialTermId;
-        int termBufferLength;
-        int mtuLength;
-        int streamId;
-
-        public void onRecordingDescriptor(
-            final long controlSessionId,
-            final long correlationId,
-            final long recordingId,
-            final long startTimestamp,
-            final long stopTimestamp,
-            final long startPosition,
-            final long stopPosition,
-            final int initialTermId,
-            final int segmentFileLength,
-            final int termBufferLength,
-            final int mtuLength,
-            final int sessionId,
-            final int streamId,
-            final String strippedChannel,
-            final String originalChannel,
-            final String sourceIdentity)
-        {
-            this.initialTermId = initialTermId;
-            this.termBufferLength = termBufferLength;
-            this.mtuLength = mtuLength;
-            this.streamId = streamId;
         }
     }
 }

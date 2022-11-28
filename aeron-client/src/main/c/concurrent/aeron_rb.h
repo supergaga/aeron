@@ -23,7 +23,7 @@
 
 #pragma pack(push)
 #pragma pack(4)
-typedef struct aeron_rb_descriptor_stct
+struct aeron_rb_descriptor_stct
 {
     uint8_t begin_pad[(2 * AERON_CACHE_LINE_LENGTH)];
     volatile int64_t tail_position;
@@ -36,15 +36,15 @@ typedef struct aeron_rb_descriptor_stct
     uint8_t correlation_counter_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
     int64_t consumer_heartbeat;
     uint8_t consumer_heartbeat_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
-}
-aeron_rb_descriptor_t;
+};
+typedef struct aeron_rb_descriptor_stct aeron_rb_descriptor_t;
 
-typedef struct aeron_rb_record_descriptor_stct
+struct aeron_rb_record_descriptor_stct
 {
     volatile int32_t length;
     int32_t msg_type_id;
-}
-aeron_rb_record_descriptor_t;
+};
+typedef struct aeron_rb_record_descriptor_stct aeron_rb_record_descriptor_t;
 #pragma pack(pop)
 
 #define AERON_RB_TRAILER_LENGTH (sizeof(aeron_rb_descriptor_t))
@@ -58,15 +58,23 @@ aeron_rb_record_descriptor_t;
 #define AERON_RB_INVALID_MSG_TYPE_ID(id) ((id) < 1)
 #define AERON_RB_PADDING_MSG_TYPE_ID (-1)
 
-typedef enum aeron_rb_write_result_stct
+enum aeron_rb_write_result_stct
 {
     AERON_RB_SUCCESS = 0,
     AERON_RB_ERROR = -2,
     AERON_RB_FULL = -1
-}
-aeron_rb_write_result_t;
+};
+typedef enum aeron_rb_write_result_stct aeron_rb_write_result_t;
 
 typedef void (*aeron_rb_handler_t)(int32_t, const void *, size_t, void *);
+
+enum aeron_rb_read_action_stct
+{
+    AERON_RB_ABORT, AERON_RB_BREAK, AERON_RB_COMMIT, AERON_RB_CONTINUE
+};
+typedef enum aeron_rb_read_action_stct aeron_rb_read_action_t;
+
+typedef aeron_rb_read_action_t (*aeron_rb_controlled_handler_t)(int32_t, const void *, size_t, void *);
 
 #define AERON_RB_IS_CAPACITY_VALID(capacity, min_capacity) AERON_IS_POWER_OF_TWO(capacity) && (capacity) >= (min_capacity)
 

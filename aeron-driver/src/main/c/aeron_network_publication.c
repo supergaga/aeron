@@ -65,7 +65,7 @@ int aeron_network_publication_create(
     if (context->perform_storage_checks && context->usable_fs_space_func(context->aeron_dir) < log_length)
     {
         AERON_SET_ERR(
-            ENOSPC,
+            -AERON_ERROR_CODE_STORAGE_SPACE,
             "Insufficient usable storage for new log of length=%" PRId64 " in %s", log_length, context->aeron_dir);
         return -1;
     }
@@ -224,6 +224,7 @@ int aeron_network_publication_create(
     _pub->is_end_of_stream = false;
     _pub->track_sender_limits = false;
     _pub->has_sender_released = false;
+    _pub->has_received_sm_eos = false;
 
     _pub->short_sends_counter = aeron_system_counter_addr(system_counters, AERON_SYSTEM_COUNTER_SHORT_SENDS);
     _pub->heartbeats_sent_counter = aeron_system_counter_addr(system_counters, AERON_SYSTEM_COUNTER_HEARTBEATS_SENT);
@@ -618,6 +619,7 @@ void aeron_network_publication_on_status_message(
     aeron_network_publication_t *publication, const uint8_t *buffer, size_t length, struct sockaddr_storage *addr)
 {
     const int64_t time_ns = aeron_clock_cached_nano_time(publication->cached_clock);
+    const aeron_status_message_header_t *sm = (aeron_status_message_header_t *)buffer;
     publication->status_message_deadline_ns = time_ns + publication->connection_timeout_ns;
 
     if (!publication->has_receivers)
@@ -628,6 +630,13 @@ void aeron_network_publication_on_status_message(
     if (!publication->has_initial_connection)
     {
         publication->has_initial_connection = true;
+    }
+
+    if (!publication->has_received_sm_eos &&
+        aeron_send_channel_is_unicast(publication->endpoint) &&
+        sm->frame_header.flags & AERON_STATUS_MESSAGE_HEADER_EOS_FLAG)
+    {
+        AERON_PUT_ORDERED(publication->has_received_sm_eos, true);
     }
 
     aeron_counter_set_ordered(
@@ -657,7 +666,6 @@ void aeron_network_publication_on_rttm(
         uint8_t rttm_reply_buffer[sizeof(aeron_rttm_header_t)];
         aeron_rttm_header_t *rttm_out_header = (aeron_rttm_header_t *)rttm_reply_buffer;
         struct iovec iov;
-        int result;
         int64_t bytes_sent;
 
         rttm_out_header->frame_header.frame_length = sizeof(aeron_rttm_header_t);
@@ -673,8 +681,7 @@ void aeron_network_publication_on_rttm(
         iov.iov_base = rttm_reply_buffer;
         iov.iov_len = sizeof(aeron_rttm_header_t);
 
-
-        if (0 <= (result = aeron_send_channel_send(publication->endpoint, &iov, 1, &bytes_sent)))
+        if (0 <= aeron_send_channel_send(publication->endpoint, &iov, 1, &bytes_sent))
         {
             if (bytes_sent < (int64_t)iov.iov_len)
             {
@@ -992,7 +999,11 @@ void aeron_network_publication_on_time_event(
 
         case AERON_NETWORK_PUBLICATION_STATE_LINGER:
         {
-            if (now_ns > (publication->conductor_fields.time_of_last_activity_ns + publication->linger_timeout_ns))
+            bool has_received_sm_eos;
+            AERON_GET_VOLATILE(has_received_sm_eos, publication->has_received_sm_eos);
+
+            if (has_received_sm_eos ||
+                now_ns > (publication->conductor_fields.time_of_last_activity_ns + publication->linger_timeout_ns))
             {
                 aeron_driver_conductor_cleanup_network_publication(conductor, publication);
                 publication->conductor_fields.state = AERON_NETWORK_PUBLICATION_STATE_DONE;
@@ -1005,9 +1016,9 @@ void aeron_network_publication_on_time_event(
     }
 }
 
-extern void aeron_network_publication_add_subscriber_hook(void *clientd, int64_t *value_addr);
+extern void aeron_network_publication_add_subscriber_hook(void *clientd, volatile int64_t *value_addr);
 
-extern void aeron_network_publication_remove_subscriber_hook(void *clientd, int64_t *value_addr);
+extern void aeron_network_publication_remove_subscriber_hook(void *clientd, volatile int64_t *value_addr);
 
 extern bool aeron_network_publication_is_possibly_blocked(
     aeron_network_publication_t *publication, int64_t producer_position, int64_t consumer_position);

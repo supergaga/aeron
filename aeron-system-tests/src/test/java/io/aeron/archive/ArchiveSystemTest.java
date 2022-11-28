@@ -24,10 +24,7 @@ import io.aeron.driver.status.SystemCounterDescriptor;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.logbuffer.Header;
-import io.aeron.test.InterruptAfter;
-import io.aeron.test.InterruptingTestCallback;
-import io.aeron.test.SystemTestWatcher;
-import io.aeron.test.Tests;
+import io.aeron.test.*;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.*;
 import org.agrona.collections.MutableBoolean;
@@ -46,10 +43,8 @@ import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Stream;
 
-import static io.aeron.archive.ArchiveTests.awaitConnectedReply;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
-import static org.agrona.BufferUtil.allocateDirectAligned;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
@@ -72,8 +67,6 @@ class ArchiveSystemTest
     private static final int PUBLISH_STREAM_ID = 1033;
     private static final int MAX_FRAGMENT_SIZE = 1024;
     private static final int REPLAY_STREAM_ID = 101;
-
-    private final UnsafeBuffer buffer = new UnsafeBuffer(allocateDirectAligned(4096, FrameDescriptor.FRAME_ALIGNMENT));
     private final Random rnd = new Random();
     private final long seed = System.nanoTime();
 
@@ -131,13 +124,15 @@ class ArchiveSystemTest
             .spiesSimulateConnection(true)
             .dirDeleteOnStart(true);
 
-        final Archive.Context archiveContext = new Archive.Context()
+        final Archive.Context archiveContext = TestContexts.localhostArchive()
             .catalogCapacity(ArchiveSystemTests.CATALOG_CAPACITY)
             .fileSyncLevel(SYNC_LEVEL)
             .deleteArchiveOnStart(true)
             .archiveDir(new File(SystemUtil.tmpDirName(), "archive-test"))
             .segmentFileLength(segmentFileLength)
             .threadingMode(archiveThreadingMode)
+            .recordingEventsChannel("aeron:udp?control-mode=dynamic|control=localhost:8030")
+            .recordingEventsEnabled(true)
             .idleStrategySupplier(YieldingIdleStrategy::new);
         try
         {
@@ -406,7 +401,8 @@ class ArchiveSystemTest
         final long connectCorrelationId = client.nextCorrelationId();
         assertTrue(archiveProxy.connect(CONTROL_RESPONSE_URI, CONTROL_RESPONSE_STREAM_ID, connectCorrelationId));
 
-        awaitConnectedReply(controlResponse, connectCorrelationId, (sessionId) -> controlSessionId = sessionId);
+        ArchiveTests.awaitConnectResponse(
+            controlResponse, connectCorrelationId, (sessionId) -> controlSessionId = sessionId);
         verifyEmptyDescriptorList(archiveProxy);
 
         final long startRecordingCorrelationId = client.nextCorrelationId();
@@ -529,6 +525,7 @@ class ArchiveSystemTest
     {
         startPosition = publication.position();
 
+        final UnsafeBuffer buffer = new UnsafeBuffer(new byte[4096]);
         buffer.setMemory(0, 1024, (byte)'z');
         buffer.putStringAscii(32, "TEST");
 

@@ -16,9 +16,13 @@
 package io.aeron.archive.client;
 
 import io.aeron.*;
-import io.aeron.archive.codecs.*;
+import io.aeron.archive.codecs.ControlResponseCode;
+import io.aeron.archive.codecs.RecordingSignal;
+import io.aeron.archive.codecs.RecordingSignalEventDecoder;
+import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.ConcurrentConcludeException;
+import io.aeron.exceptions.ConfigurationException;
 import io.aeron.exceptions.TimeoutException;
 import io.aeron.security.CredentialsSupplier;
 import io.aeron.security.NullCredentialsSupplier;
@@ -425,22 +429,23 @@ public final class AeronArchive implements AutoCloseable
         {
             ensureOpen();
 
-            if (!controlResponsePoller.subscription().isConnected())
+            final ControlResponsePoller poller = controlResponsePoller;
+            if (!poller.subscription().isConnected())
             {
                 return NOT_CONNECTED_MSG;
             }
 
-            if (controlResponsePoller.poll() != 0 && controlResponsePoller.isPollComplete())
+            if (poller.poll() != 0 && poller.isPollComplete())
             {
-                if (controlResponsePoller.controlSessionId() == controlSessionId)
+                if (poller.controlSessionId() == controlSessionId)
                 {
-                    if (controlResponsePoller.code() == ControlResponseCode.ERROR)
+                    if (poller.code() == ControlResponseCode.ERROR)
                     {
-                        return controlResponsePoller.errorMessage();
+                        return poller.errorMessage();
                     }
-                    else if (controlResponsePoller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID)
+                    else if (poller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID)
                     {
-                        dispatchRecordingSignal();
+                        dispatchRecordingSignal(poller);
                     }
                 }
             }
@@ -468,7 +473,8 @@ public final class AeronArchive implements AutoCloseable
         {
             ensureOpen();
 
-            if (!controlResponsePoller.subscription().isConnected())
+            final ControlResponsePoller poller = controlResponsePoller;
+            if (!poller.subscription().isConnected())
             {
                 if (null != context.errorHandler())
                 {
@@ -479,16 +485,16 @@ public final class AeronArchive implements AutoCloseable
                     throw new ArchiveException(NOT_CONNECTED_MSG);
                 }
             }
-            else if (controlResponsePoller.poll() != 0 && controlResponsePoller.isPollComplete())
+            else if (poller.poll() != 0 && poller.isPollComplete())
             {
-                if (controlResponsePoller.controlSessionId() == controlSessionId)
+                if (poller.controlSessionId() == controlSessionId)
                 {
-                    if (controlResponsePoller.code() == ControlResponseCode.ERROR)
+                    if (poller.code() == ControlResponseCode.ERROR)
                     {
                         final ArchiveException ex = new ArchiveException(
-                            controlResponsePoller.errorMessage(),
-                            (int)controlResponsePoller.relevantId(),
-                            controlResponsePoller.correlationId());
+                            poller.errorMessage(),
+                            (int)poller.relevantId(),
+                            poller.correlationId());
 
                         if (null != context.errorHandler())
                         {
@@ -499,9 +505,9 @@ public final class AeronArchive implements AutoCloseable
                             throw ex;
                         }
                     }
-                    else if (controlResponsePoller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID)
+                    else if (poller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID)
                     {
-                        dispatchRecordingSignal();
+                        dispatchRecordingSignal(poller);
                     }
                 }
             }
@@ -525,16 +531,17 @@ public final class AeronArchive implements AutoCloseable
         {
             ensureOpen();
 
-            if (controlResponsePoller.poll() != 0 && controlResponsePoller.isPollComplete())
+            final ControlResponsePoller poller = controlResponsePoller;
+            if (poller.poll() != 0 && poller.isPollComplete())
             {
-                if (controlResponsePoller.controlSessionId() == controlSessionId)
+                if (poller.controlSessionId() == controlSessionId)
                 {
-                    if (controlResponsePoller.code() == ControlResponseCode.ERROR)
+                    if (poller.code() == ControlResponseCode.ERROR)
                     {
                         final ArchiveException ex = new ArchiveException(
-                            controlResponsePoller.errorMessage(),
-                            (int)controlResponsePoller.relevantId(),
-                            controlResponsePoller.correlationId());
+                            poller.errorMessage(),
+                            (int)poller.relevantId(),
+                            poller.correlationId());
 
                         if (null != context.errorHandler())
                         {
@@ -545,9 +552,9 @@ public final class AeronArchive implements AutoCloseable
                             throw ex;
                         }
                     }
-                    else if (controlResponsePoller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID)
+                    else if (poller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID)
                     {
-                        dispatchRecordingSignal();
+                        dispatchRecordingSignal(poller);
                         return 1;
                     }
                 }
@@ -1106,8 +1113,7 @@ public final class AeronArchive implements AutoCloseable
                 replayStreamId,
                 replayParams,
                 lastCorrelationId,
-                controlSessionId
-            ))
+                controlSessionId))
             {
                 throw new ArchiveException("failed to send bounded replay request");
             }
@@ -1121,9 +1127,10 @@ public final class AeronArchive implements AutoCloseable
     }
 
     /**
-     * Stop a replay session.
+     * Stop an existing replay session.
      *
-     * @param replaySessionId to stop replay for.
+     * @param replaySessionId to stop replay for which would have been returned from
+     *                       {@link #startReplay(long, long, long, String, int)}.
      */
     public void stopReplay(final long replaySessionId)
     {
@@ -1697,7 +1704,7 @@ public final class AeronArchive implements AutoCloseable
      * directly and no longer require the replay from the source. This would require a multicast live destination.
      * <p>
      * Errors will be reported asynchronously and can be checked for with {@link AeronArchive#pollForErrorResponse()}
-     * or {@link AeronArchive#checkForErrorResponse()}. Follow progress with {@link RecordingSignalAdapter}.
+     * or {@link AeronArchive#checkForErrorResponse()}.
      *
      * @param srcRecordingId     recording id which must exist in the source archive.
      * @param dstRecordingId     recording to extend in the destination, otherwise {@link io.aeron.Aeron#NULL_VALUE}.
@@ -1752,7 +1759,7 @@ public final class AeronArchive implements AutoCloseable
      * directly and no longer require the replay from the source. This would require a multicast live destination.
      * <p>
      * Errors will be reported asynchronously and can be checked for with {@link AeronArchive#pollForErrorResponse()}
-     * or {@link AeronArchive#checkForErrorResponse()}. Follow progress with {@link RecordingSignalAdapter}.
+     * or {@link AeronArchive#checkForErrorResponse()}.
      * <p>
      * Stop recording this stream when the position of the destination reaches the specified stop position.
      *
@@ -1816,7 +1823,7 @@ public final class AeronArchive implements AutoCloseable
      * directly and no longer require the replay from the source. This would require a multicast live destination.
      * <p>
      * Errors will be reported asynchronously and can be checked for with {@link AeronArchive#pollForErrorResponse()}
-     * or {@link AeronArchive#checkForErrorResponse()}. Follow progress with {@link RecordingSignalAdapter}.
+     * or {@link AeronArchive#checkForErrorResponse()}.
      *
      * @param srcRecordingId     recording id which must exist in the source archive.
      * @param dstRecordingId     recording to extend in the destination, otherwise {@link io.aeron.Aeron#NULL_VALUE}.
@@ -1877,7 +1884,7 @@ public final class AeronArchive implements AutoCloseable
      * directly and no longer require the replay from the source. This would require a multicast live destination.
      * <p>
      * Errors will be reported asynchronously and can be checked for with {@link AeronArchive#pollForErrorResponse()}
-     * or {@link AeronArchive#checkForErrorResponse()}. Follow progress with {@link RecordingSignalAdapter}.
+     * or {@link AeronArchive#checkForErrorResponse()}.
      *
      * @param srcRecordingId     recording id which must exist in the source archive.
      * @param dstRecordingId     recording to extend in the destination, otherwise {@link io.aeron.Aeron#NULL_VALUE}.
@@ -1942,7 +1949,7 @@ public final class AeronArchive implements AutoCloseable
      * directly and no longer require the replay from the source. This would require a multicast live destination.
      * <p>
      * Errors will be reported asynchronously and can be checked for with {@link AeronArchive#pollForErrorResponse()}
-     * or {@link AeronArchive#checkForErrorResponse()}. Follow progress with {@link RecordingSignalAdapter}.
+     * or {@link AeronArchive#checkForErrorResponse()}.
      * <p>
      * The ReplicationParams is free to be reused when this call completes.
      *
@@ -2238,10 +2245,10 @@ public final class AeronArchive implements AutoCloseable
 
             if (poller.isPollComplete())
             {
-                if (controlResponsePoller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID &&
-                    controlResponsePoller.controlSessionId() == controlSessionId)
+                if (poller.templateId() == RecordingSignalEventDecoder.TEMPLATE_ID &&
+                    poller.controlSessionId() == controlSessionId)
                 {
-                    dispatchRecordingSignal();
+                    dispatchRecordingSignal(poller);
                     continue;
                 }
 
@@ -2443,15 +2450,15 @@ public final class AeronArchive implements AutoCloseable
         }
     }
 
-    private void dispatchRecordingSignal()
+    private void dispatchRecordingSignal(final ControlResponsePoller poller)
     {
         context.recordingSignalConsumer().onSignal(
-            controlResponsePoller.controlSessionId(),
-            controlResponsePoller.correlationId(),
-            controlResponsePoller.recordingId(),
-            controlResponsePoller.subscriptionId(),
-            controlResponsePoller.position(),
-            controlResponsePoller.recordingSignal());
+            poller.controlSessionId(),
+            poller.correlationId(),
+            poller.recordingId(),
+            poller.subscriptionId(),
+            poller.position(),
+            poller.recordingSignal());
     }
 
     private void invokeInvokers()
@@ -2530,11 +2537,6 @@ public final class AeronArchive implements AutoCloseable
         public static final String CONTROL_CHANNEL_PROP_NAME = "aeron.archive.control.channel";
 
         /**
-         * Channel for sending control messages to an archive.
-         */
-        public static final String CONTROL_CHANNEL_DEFAULT = "aeron:udp?endpoint=localhost:8010";
-
-        /**
          * Stream id within a channel for sending control messages to an archive.
          */
         public static final String CONTROL_STREAM_ID_PROP_NAME = "aeron.archive.control.stream.id";
@@ -2582,11 +2584,6 @@ public final class AeronArchive implements AutoCloseable
         public static final String CONTROL_RESPONSE_CHANNEL_PROP_NAME = "aeron.archive.control.response.channel";
 
         /**
-         * Default channel for receiving control response messages from an archive.
-         */
-        public static final String CONTROL_RESPONSE_CHANNEL_DEFAULT = "aeron:udp?endpoint=localhost:0";
-
-        /**
          * Stream id within a channel for receiving control messages from an archive.
          */
         public static final String CONTROL_RESPONSE_STREAM_ID_PROP_NAME = "aeron.archive.control.response.stream.id";
@@ -2625,9 +2622,9 @@ public final class AeronArchive implements AutoCloseable
         public static final String RECORDING_EVENTS_ENABLED_PROP_NAME = "aeron.archive.recording.events.enabled";
 
         /**
-         * Channel enabled for recording progress events of recordings from an archive which defaults to true.
+         * Channel enabled for recording progress events of recordings from an archive which defaults to false.
          */
-        public static final boolean RECORDING_EVENTS_ENABLED_DEFAULT = true;
+        public static final boolean RECORDING_EVENTS_ENABLED_DEFAULT = false;
 
         /**
          * Sparse term buffer indicator for control streams.
@@ -2712,15 +2709,13 @@ public final class AeronArchive implements AutoCloseable
         }
 
         /**
-         * The value {@link #CONTROL_CHANNEL_DEFAULT} or system property
-         * {@link #CONTROL_CHANNEL_PROP_NAME} if set.
+         * The value of system property {@link #CONTROL_CHANNEL_PROP_NAME} if set, null otherwise
          *
-         * @return {@link #CONTROL_CHANNEL_DEFAULT} or system property
-         * {@link #CONTROL_CHANNEL_PROP_NAME} if set.
+         * @return system property {@link #CONTROL_CHANNEL_PROP_NAME} if set.
          */
         public static String controlChannel()
         {
-            return System.getProperty(CONTROL_CHANNEL_PROP_NAME, CONTROL_CHANNEL_DEFAULT);
+            return System.getProperty(CONTROL_CHANNEL_PROP_NAME);
         }
 
         /**
@@ -2760,15 +2755,13 @@ public final class AeronArchive implements AutoCloseable
         }
 
         /**
-         * The value {@link #CONTROL_RESPONSE_CHANNEL_DEFAULT} or system property
-         * {@link #CONTROL_RESPONSE_CHANNEL_PROP_NAME} if set.
+         * The value of system property {@link #CONTROL_RESPONSE_CHANNEL_PROP_NAME} if set, null otherwise.
          *
-         * @return {@link #CONTROL_RESPONSE_CHANNEL_DEFAULT} or system property
-         * {@link #CONTROL_RESPONSE_CHANNEL_PROP_NAME} if set.
+         * @return of system property {@link #CONTROL_RESPONSE_CHANNEL_PROP_NAME} if set.
          */
         public static String controlResponseChannel()
         {
-            return System.getProperty(CONTROL_RESPONSE_CHANNEL_PROP_NAME, CONTROL_RESPONSE_CHANNEL_DEFAULT);
+            return System.getProperty(CONTROL_RESPONSE_CHANNEL_PROP_NAME);
         }
 
         /**
@@ -2784,15 +2777,13 @@ public final class AeronArchive implements AutoCloseable
         }
 
         /**
-         * The value {@link #RECORDING_EVENTS_CHANNEL_DEFAULT} or system property
-         * {@link #RECORDING_EVENTS_CHANNEL_PROP_NAME} if set.
+         * The value of system property {@link #RECORDING_EVENTS_CHANNEL_PROP_NAME} if set, null otherwise.
          *
-         * @return {@link #RECORDING_EVENTS_CHANNEL_DEFAULT} or system property
-         * {@link #RECORDING_EVENTS_CHANNEL_PROP_NAME} if set.
+         * @return system property {@link #RECORDING_EVENTS_CHANNEL_PROP_NAME} if set.
          */
         public static String recordingEventsChannel()
         {
-            return System.getProperty(RECORDING_EVENTS_CHANNEL_PROP_NAME, RECORDING_EVENTS_CHANNEL_DEFAULT);
+            return System.getProperty(RECORDING_EVENTS_CHANNEL_PROP_NAME);
         }
 
         /**
@@ -2816,7 +2807,7 @@ public final class AeronArchive implements AutoCloseable
         public static boolean recordingEventsEnabled()
         {
             final String propValue = System.getProperty(RECORDING_EVENTS_ENABLED_PROP_NAME);
-            return null != propValue ? "true".equals(propValue) : RECORDING_EVENTS_ENABLED_DEFAULT;
+            return null != propValue ? Boolean.parseBoolean(propValue) : RECORDING_EVENTS_ENABLED_DEFAULT;
         }
     }
 
@@ -2880,6 +2871,16 @@ public final class AeronArchive implements AutoCloseable
             if (0 != IS_CONCLUDED_UPDATER.getAndSet(this, 1))
             {
                 throw new ConcurrentConcludeException();
+            }
+
+            if (null == controlRequestChannel)
+            {
+                throw new ConfigurationException("AeronArchive.Context.controlRequestChannel must be set");
+            }
+
+            if (null == controlResponseChannel)
+            {
+                throw new ConfigurationException("AeronArchive.Context.controlResponseChannel must be set");
             }
 
             if (null == aeron)

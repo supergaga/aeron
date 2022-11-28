@@ -50,6 +50,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.CommonContext.*;
+import static io.aeron.archive.Archive.Configuration.MARK_FILE_UPDATE_INTERVAL_MS;
 import static io.aeron.archive.Archive.Configuration.RECORDING_SEGMENT_SUFFIX;
 import static io.aeron.archive.Archive.segmentFileName;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
@@ -67,7 +68,6 @@ abstract class ArchiveConductor
     extends SessionWorker<Session>
     implements AvailableImageHandler, UnavailableCounterHandler
 {
-    private static final long MARK_FILE_UPDATE_INTERVAL_MS = TimeUnit.SECONDS.toMillis(1);
     private static final EnumSet<StandardOpenOption> FILE_OPTIONS = EnumSet.of(READ, WRITE);
     private static final String DELETE_SUFFIX = ".del";
 
@@ -476,18 +476,7 @@ abstract class ArchiveConductor
 
             if (null != subscription)
             {
-                for (final RecordingSession session : recordingSessionByIdMap.values())
-                {
-                    if (subscription == session.subscription())
-                    {
-                        session.abort();
-                    }
-                }
-
-                if (0 == subscriptionRefCountMap.decrementAndGet(subscription.registrationId()))
-                {
-                    subscription.close();
-                }
+                abortRecordingSessionAndCloseSubscription(subscription);
 
                 controlSession.sendOkResponse(correlationId, controlResponseProxy);
             }
@@ -523,19 +512,7 @@ abstract class ArchiveConductor
         final Subscription subscription = removeRecordingSubscription(subscriptionId);
         if (null != subscription)
         {
-            for (final RecordingSession session : recordingSessionByIdMap.values())
-            {
-                if (subscription == session.subscription())
-                {
-                    session.abort();
-                }
-            }
-
-            if (subscriptionRefCountMap.decrementAndGet(subscriptionId) <= 0)
-            {
-                CloseHelper.close(errorHandler, subscription);
-            }
-
+            abortRecordingSessionAndCloseSubscription(subscription);
             return true;
         }
 
@@ -1056,15 +1033,10 @@ abstract class ArchiveConductor
                 if (null != subscription)
                 {
                     found = 1;
-
-                    for (final RecordingSession session : recordingSessionByIdMap.values())
+                    if (0 == subscriptionRefCountMap.decrementAndGet(subscriptionId))
                     {
-                        if (subscription == session.subscription())
-                        {
-                            session.abort();
-                        }
+                        subscription.close();
                     }
-                    subscriptionRefCountMap.decrementAndGet(subscriptionId);
                 }
             }
 
@@ -1437,6 +1409,22 @@ abstract class ArchiveConductor
             recordingId, correlationId, deleteList, controlSession, controlResponseProxy, errorHandler));
 
         return count;
+    }
+
+    private void abortRecordingSessionAndCloseSubscription(final Subscription subscription)
+    {
+        for (final RecordingSession session : recordingSessionByIdMap.values())
+        {
+            if (subscription == session.subscription())
+            {
+                session.abort();
+            }
+        }
+
+        if (0 == subscriptionRefCountMap.decrementAndGet(subscription.registrationId()))
+        {
+            subscription.close();
+        }
     }
 
     private int findTermOffsetForStart(

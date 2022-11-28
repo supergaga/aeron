@@ -1,12 +1,6 @@
 Aeron
 =====
 
-<a href="https://foojay.io/works-with-openjdk/">
-   <img align="right" 
-        src="https://github.com/foojayio/badges/raw/main/works_with_openjdk/Works-with-OpenJDK.png"   
-        width="100">
-</a>
-
 [![GitHub](https://img.shields.io/github/license/real-logic/Aeron.svg)](https://github.com/real-logic/aeron/blob/master/LICENSE)
 [![Javadocs](https://www.javadoc.io/badge/io.aeron/aeron-all.svg)](https://www.javadoc.io/doc/io.aeron/aeron-all)
 
@@ -16,7 +10,7 @@ Aeron
 [![Code Quality: C/C++](https://img.shields.io/lgtm/grade/cpp/g/real-logic/aeron.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/real-logic/aeron/context:cpp)
 
 Efficient reliable UDP unicast, UDP multicast, and IPC message transport. Java, C, and C++ clients are available in this
-repository, and a [.NET client](https://github.com/AdaptiveConsulting/Aeron.NET) is available from a 3rd party. All
+repository, and a [.NET client](https://github.com/AdaptiveConsulting/Aeron.NET) is available. All
 clients can exchange messages across machines, or on the same machine via IPC, very efficiently. Message streams can be
 recorded by the [Archive](https://github.com/real-logic/aeron/tree/master/aeron-archive) module to persistent storage
 for later, or real-time, replay. Aeron [Cluster](https://github.com/real-logic/aeron/tree/master/aeron-cluster)
@@ -38,11 +32,18 @@ StrangeLoop 2014. Things have advanced quite a bit with performance and features
 For the latest version information and changes see the [Change Log](https://github.com/real-logic/aeron/wiki/Change-Log)
 with Java **downloads** at [Maven Central](http://search.maven.org/#search%7Cga%7C1%7Caeron).
 
-Commercial support, training, and development on Aeron is available from
-[sales@real-logic.co.uk](mailto:sales@real-logic.co.uk?subject=Aeron). Premium features are available to customers on
-commercial support which include transport bindings for Solarflare/Xilinx ef_vi, Mellanox VMA, and AWS DPDK for further
-reduction in latency and increased throughput. Secure communications is available with ATS (Aeron Transport Security)
-for encrypted streams.
+Aeron is owned and operated by [Adaptive Financial Consulting](https://weareadaptive.com/).
+Originally created by Martin Thompson and Todd Montgomery, the Aeron team joined Adaptive in 2022.
+
+Aeron is free and open source but if your team needs support, we are here to help.
+
+We provide a range of services including:
+* Training for development and operations with Aeron and Aeron Cluster.
+* Consulting, for example if you’re not sure how to design your system or need help tuning your system.
+* We also offer a number of proprietary enhancements on top of Aeron and Aeron Cluster such as kernel bypass (ef_vi, AWS DPDK, and VMA) for increased performance, and blazing fast encryption with ATS.
+* If you’re building a new trading system, we have experienced Aeron developers who can help.
+
+Please get in touch at [sales@aeron.io](mailto:sales@aeron.io?subject=Aeron) if you would like to learn more about any of these.
 
 ### How do I use Aeron?
 

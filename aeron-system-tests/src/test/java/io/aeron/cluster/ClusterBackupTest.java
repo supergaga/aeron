@@ -18,18 +18,24 @@ package io.aeron.cluster;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.samples.archive.SampleAuthenticator;
 import io.aeron.security.AuthenticatorSupplier;
-import io.aeron.test.*;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SlowTest;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
 import io.aeron.test.cluster.TestBackupNode;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.cluster.TestNode;
 import org.agrona.collections.MutableBoolean;
 import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.errors.ErrorLogReader;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
+import static io.aeron.test.SystemTestWatcher.UNKNOWN_HOST_FILTER;
 import static io.aeron.test.cluster.TestCluster.*;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
@@ -41,13 +47,6 @@ class ClusterBackupTest
 {
     @RegisterExtension
     final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
-
-    @BeforeEach
-    void setUp()
-    {
-        systemTestWatcher.ignoreErrorsMatching(
-            (s) -> s.contains("ats_gcm_decrypt final_ex: error:00000000:lib(0):func(0):reason(0)"));
-    }
 
     @Test
     @InterruptAfter(30)
@@ -70,9 +69,10 @@ class ClusterBackupTest
         assertFalse(node.service().wasSnapshotLoaded());
     }
 
-    @Test
     @InterruptAfter(30)
-    void shouldBackupClusterNoSnapshotsAndNonEmptyLog()
+    @ParameterizedTest()
+    @EnumSource(value = ClusterBackup.SourceType.class)
+    void shouldBackupClusterNoSnapshotsAndNonEmptyLog(final ClusterBackup.SourceType sourceType)
     {
         final TestCluster cluster = aCluster().withStaticNodes(3).start();
         systemTestWatcher.cluster(cluster);
@@ -85,7 +85,7 @@ class ClusterBackupTest
 
         final long logPosition = leader.service().cluster().logPosition();
 
-        cluster.startClusterBackupNode(true);
+        cluster.startClusterBackupNode(true, sourceType);
 
         cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
         cluster.awaitBackupLiveLogPosition(logPosition);
@@ -519,6 +519,37 @@ class ClusterBackupTest
 
         assertEquals(messageCount + 5, node.service().messageCount());
         assertFalse(node.service().wasSnapshotLoaded());
+    }
+
+    @InterruptAfter(30)
+    @ParameterizedTest()
+    @EnumSource(value = ClusterBackup.SourceType.class)
+    void shouldBackupClusterWithInvalidNameResolution(final ClusterBackup.SourceType sourceType)
+    {
+        final int backupNodeId = 3;
+        final TestCluster cluster = aCluster()
+            .withStaticNodes(3)
+            .withMemberSpecificInvalidNameResolution(backupNodeId)
+            .start();
+        systemTestWatcher.cluster(cluster);
+        systemTestWatcher.ignoreErrorsMatching(UNKNOWN_HOST_FILTER);
+
+        final TestNode leader = cluster.awaitLeader();
+
+        final int messageCount = 10;
+        cluster.connectClient();
+        cluster.sendAndAwaitMessages(messageCount);
+
+        final long logPosition = leader.service().cluster().logPosition();
+
+        cluster.startClusterBackupNode(true, sourceType);
+
+        cluster.awaitBackupNodeErrors();
+
+        cluster.restoreByMemberNameResolution(backupNodeId);
+
+        cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
+        cluster.awaitBackupLiveLogPosition(logPosition);
     }
 
     private static void awaitErrorLogged(final TestBackupNode testBackupNode, final String expectedErrorMessage)

@@ -34,6 +34,7 @@ import io.aeron.cluster.service.ClusterTerminationException;
 import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
+import io.aeron.exceptions.TimeoutException;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
@@ -50,6 +51,7 @@ import org.agrona.collections.LongArrayList;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.AgentTerminationException;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
@@ -97,12 +99,13 @@ public final class TestNode implements AutoCloseable
                 .terminationHook(ClusterTests.terminationHook(
                 context.isTerminationExpected, context.hasMemberTerminated));
             consensusModule = ConsensusModule.launch(context.consensusModuleContext);
+            final File baseDir = context.consensusModuleContext.clusterDir().getParentFile();
+            dataCollector.addForCleanup(baseDir);
 
             containers = new ClusteredServiceContainer[services.length];
-            final File baseDir = context.consensusModuleContext.clusterDir().getParentFile();
+            final File servicesDir = new File(baseDir, "services");
             for (int i = 0; i < services.length; i++)
             {
-                final File clusterDir = new File(baseDir, "service" + i);
                 final ClusteredServiceContainer.Context ctx = context.serviceContainerContext.clone();
                 ctx.aeronDirectoryName(aeronDirectoryName)
                     .archiveContext(context.aeronArchiveContext.clone()
@@ -110,13 +113,13 @@ public final class TestNode implements AutoCloseable
                         .controlResponseChannel("aeron:ipc"))
                     .terminationHook(ClusterTests.terminationHook(
                         context.isTerminationExpected, context.hasServiceTerminated[i]))
-                    .clusterDir(clusterDir)
+                    .clusterDir(servicesDir)
                     .clusteredService(services[i])
                     .serviceId(i);
                 containers[i] = ClusteredServiceContainer.launch(ctx);
-                dataCollector.add(clusterDir.toPath());
             }
 
+            dataCollector.add(servicesDir.toPath());
             dataCollector.add(consensusModule.context().clusterDir().toPath());
             dataCollector.add(archive.context().archiveDir().toPath());
             dataCollector.add(mediaDriver.context().aeronDirectory().toPath());
@@ -131,6 +134,7 @@ public final class TestNode implements AutoCloseable
             {
                 ex.addSuppressed(e);
             }
+
             throw ex;
         }
     }
@@ -206,6 +210,14 @@ public final class TestNode implements AutoCloseable
             return Cluster.Role.get(roleCounter);
         }
         return Cluster.Role.FOLLOWER;
+    }
+
+    public void awaitElectionState(final ElectionState electionState)
+    {
+        while (electionState() != electionState)
+        {
+            Tests.sleep(1);
+        }
     }
 
     ElectionState electionState()
@@ -289,7 +301,22 @@ public final class TestNode implements AutoCloseable
 
     public long errors()
     {
-        return countersReader().getCounterValue(SystemCounterDescriptor.ERRORS.id());
+        final CountersReader countersReader = countersReader();
+        long errors = countersReader.getCounterValue(SystemCounterDescriptor.ERRORS.id());
+
+        final AtomicCounter consensusModuleCounter = consensusModule.context().errorCounter();
+        errors += countersReader.getCounterValue(consensusModuleCounter.id());
+
+        for (final ClusteredServiceContainer serviceContainer : containers)
+        {
+            final AtomicCounter serviceErrorCounter = serviceContainer.context().errorCounter();
+            errors += countersReader.getCounterValue(serviceErrorCounter.id());
+        }
+
+        final AtomicCounter archiveErrorCounter = archive.context().errorCounter();
+        errors += countersReader.getCounterValue(archiveErrorCounter.id());
+
+        return errors;
     }
 
     public ClusterMembership clusterMembership()
@@ -538,6 +565,26 @@ public final class TestNode implements AutoCloseable
         public void onRoleChange(final Cluster.Role newRole)
         {
             roleChangedTo = newRole;
+        }
+
+        public void awaitServiceMessageCount(final int messageCount, final Runnable keepAlive, final Object node)
+        {
+            int count;
+            while ((count = messageCount()) < messageCount)
+            {
+                Thread.yield();
+                if (Thread.interrupted())
+                {
+                    throw new TimeoutException("count=" + count + " awaiting=" + messageCount + " node=" + node);
+                }
+
+                if (hasReceivedUnexpectedMessage())
+                {
+                    fail("service received unexpected message");
+                }
+
+                keepAlive.run();
+            }
         }
     }
 

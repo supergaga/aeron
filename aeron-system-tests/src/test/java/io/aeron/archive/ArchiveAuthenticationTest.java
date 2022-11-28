@@ -27,6 +27,8 @@ import io.aeron.security.SessionProxy;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.TestContexts;
+import io.aeron.test.Tests;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.SystemUtil;
@@ -344,7 +346,7 @@ class ArchiveAuthenticationTest
                 .aeronDirectoryName(aeronDirectoryName));
 
         aeronArchive = AeronArchive.connect(
-            new AeronArchive.Context()
+            TestContexts.localhostAeronArchive()
                 .credentialsSupplier(credentialsSupplier)
                 .aeron(aeron));
     }
@@ -358,7 +360,7 @@ class ArchiveAuthenticationTest
             .spiesSimulateConnection(false)
             .dirDeleteOnStart(true);
 
-        final Archive.Context archiveCtx = new Archive.Context()
+        final Archive.Context archiveCtx = TestContexts.localhostArchive()
             .catalogCapacity(CATALOG_CAPACITY)
             .aeronDirectoryName(aeronDirectoryName)
             .deleteArchiveOnStart(true)
@@ -390,13 +392,13 @@ class ArchiveAuthenticationTest
             Publication publication = aeron.addPublication(RECORDED_CHANNEL, RECORDED_STREAM_ID))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = ArchiveSystemTests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
 
             offer(publication, messageCount, messagePrefix);
             consume(subscription, messageCount, messagePrefix);
 
             final long currentPosition = publication.position();
-            awaitPosition(counters, counterId, currentPosition);
+            Tests.awaitPosition(counters, counterId, currentPosition);
         }
 
         aeronArchive.stopRecording(subscriptionId);

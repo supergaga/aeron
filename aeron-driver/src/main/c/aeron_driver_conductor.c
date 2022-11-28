@@ -908,6 +908,7 @@ void aeron_client_delete(aeron_driver_conductor_t *conductor, aeron_client_t *cl
     for (size_t i = 0; i < client->counter_links.length; i++)
     {
         aeron_counter_link_t *link = &client->counter_links.array[i];
+        aeron_driver_conductor_on_unavailable_counter(conductor, link->registration_id, link->counter_id);
         aeron_counters_manager_free(&conductor->counters_manager, link->counter_id);
     }
 
@@ -2444,11 +2445,26 @@ void aeron_driver_conductor_on_unavailable_image(
     }
 }
 
-void aeron_driver_conductor_on_command(int32_t msg_type_id, const void *message, size_t length, void *clientd)
+static bool aeron_driver_conductor_not_accepting_client_commands(aeron_driver_conductor_t *conductor)
+{
+    aeron_mpsc_rb_t *sender_rb = conductor->context->sender_proxy->command_queue;
+    aeron_mpsc_rb_t *receiver_rb = conductor->context->receiver_proxy->command_queue;
+    return
+        ((sender_rb->capacity - aeron_mpsc_rb_size(sender_rb)) <= AERON_COMMAND_RB_RESERVE) ||
+        ((receiver_rb->capacity - aeron_mpsc_rb_size(receiver_rb)) <= AERON_COMMAND_RB_RESERVE);
+}
+
+aeron_rb_read_action_t aeron_driver_conductor_on_command(
+    int32_t msg_type_id, const void *message, size_t length, void *clientd)
 {
     aeron_driver_conductor_t *conductor = (aeron_driver_conductor_t *)clientd;
     int64_t correlation_id = 0;
     int result = 0;
+
+    if (aeron_driver_conductor_not_accepting_client_commands(conductor))
+    {
+        return AERON_RB_ABORT;
+    }
 
     conductor->context->to_driver_interceptor_func(msg_type_id, message, length, clientd);
 
@@ -2727,17 +2743,27 @@ void aeron_driver_conductor_on_command(int32_t msg_type_id, const void *message,
     if (result < 0)
     {
         int os_errno = aeron_errcode();
-        int code = os_errno < 0 ? -os_errno : AERON_ERROR_CODE_GENERIC_ERROR;
+        int code = AERON_ERROR_CODE_GENERIC_ERROR;
+        if (os_errno < 0)
+        {
+            code = -os_errno;
+        }
+        else if (AERON_FILEUTIL_ERROR_ENOSPC == os_errno)
+        {
+            code = AERON_ERROR_CODE_STORAGE_SPACE;
+        }
         aeron_driver_conductor_on_error(conductor, code, aeron_errmsg(), strlen(aeron_errmsg()), correlation_id);
         aeron_driver_conductor_log_error(conductor);
     }
 
-    return;
+    return AERON_RB_CONTINUE;
 
 malformed_command:
     AERON_SET_ERR(
         -AERON_ERROR_CODE_MALFORMED_COMMAND, "command=%d too short: length=%" PRIu64, msg_type_id, (uint64_t)length);
     aeron_driver_conductor_log_error(conductor);
+
+    return AERON_RB_CONTINUE;
 }
 
 void aeron_driver_conductor_on_command_queue(void *clientd, void *item)
@@ -2783,6 +2809,16 @@ void aeron_driver_conductor_track_time(aeron_driver_conductor_t *conductor, int6
     }
 }
 
+static void aeron_driver_conductor_on_rb_command_queue(
+    int32_t msg_type_id,
+    const void *message,
+    size_t size,
+    void *clientd)
+{
+    aeron_command_base_t *cmd = (aeron_command_base_t *)message;
+    cmd->func(clientd, cmd);
+}
+
 int aeron_driver_conductor_do_work(void *clientd)
 {
     aeron_driver_conductor_t *conductor = (aeron_driver_conductor_t *)clientd;
@@ -2791,11 +2827,11 @@ int aeron_driver_conductor_do_work(void *clientd)
     const int64_t now_ms = aeron_clock_cached_epoch_time(conductor->context->cached_clock);
     int work_count = 0;
 
-    work_count += (int)aeron_mpsc_rb_read(
+    work_count += (int)aeron_mpsc_rb_controlled_read(
         &conductor->to_driver_commands, aeron_driver_conductor_on_command, conductor, AERON_COMMAND_DRAIN_LIMIT);
-    work_count += (int)aeron_mpsc_concurrent_array_queue_drain(
+    work_count += (int)aeron_mpsc_rb_read(
         conductor->conductor_proxy.command_queue,
-        aeron_driver_conductor_on_command_queue,
+        aeron_driver_conductor_on_rb_command_queue,
         conductor,
         AERON_COMMAND_DRAIN_LIMIT);
     work_count += conductor->name_resolver.do_work_func(&conductor->name_resolver, now_ms);
@@ -3585,10 +3621,6 @@ int aeron_driver_conductor_on_add_network_subscription(
                 command->stream_id == image->stream_id &&
                 aeron_publication_image_is_accepting_subscriptions(image))
             {
-                char source_identity[AERON_MAX_PATH];
-                size_t source_identity_length = aeron_format_source_identity(
-                    source_identity, sizeof(source_identity), &image->source_address);
-
                 if (aeron_driver_conductor_link_subscribable(
                     conductor,
                     link,
@@ -3598,8 +3630,8 @@ int aeron_driver_conductor_on_add_network_subscription(
                     image->stream_id,
                     aeron_publication_image_join_position(image),
                     now_ns,
-                    source_identity_length,
-                    source_identity,
+                    image->source_identity_length,
+                    image->source_identity,
                     image->log_file_name_length,
                     image->log_file_name) < 0)
                 {
@@ -4278,8 +4310,6 @@ void aeron_driver_conductor_on_delete_receive_destination(void *clientd, void *i
 
     aeron_udp_channel_delete((aeron_udp_channel_t *)command->channel);
     aeron_receive_destination_delete((aeron_receive_destination_t *)command->destination, &conductor->counters_manager);
-
-    aeron_driver_receiver_proxy_on_delete_cmd(conductor->context->receiver_proxy, (aeron_command_base_t *)command);
 }
 
 void aeron_driver_conductor_on_delete_send_destination(void *clientd, void *cmd)
@@ -4533,21 +4563,18 @@ void aeron_driver_conductor_on_create_publication_image(void *clientd, void *ite
         return;
     }
 
+    aeron_receive_channel_endpoint_inc_image_ref_count(endpoint);
     conductor->publication_images.array[conductor->publication_images.length++].image = image;
     int64_t now_ns = aeron_clock_cached_nano_time(conductor->context->cached_clock);
 
     for (size_t i = 0, length = conductor->network_subscriptions.length; i < length; i++)
     {
-        char source_identity[AERON_MAX_PATH];
         aeron_subscription_link_t *link = &conductor->network_subscriptions.array[i];
 
         if (!aeron_subscription_link_matches_allowing_wildcard(link, endpoint, command->stream_id, command->session_id))
         {
             continue;
         }
-
-        size_t source_identity_length = aeron_format_source_identity(
-            source_identity, sizeof(source_identity), &command->src_address);
 
         if (aeron_driver_conductor_link_subscribable(
             conductor,
@@ -4558,8 +4585,8 @@ void aeron_driver_conductor_on_create_publication_image(void *clientd, void *ite
             command->stream_id,
             join_position,
             now_ns,
-            source_identity_length,
-            source_identity,
+            image->source_identity_length,
+            image->source_identity,
             image->log_file_name_length,
             image->log_file_name) < 0)
         {
@@ -4568,7 +4595,6 @@ void aeron_driver_conductor_on_create_publication_image(void *clientd, void *ite
     }
 
     aeron_driver_receiver_proxy_on_add_publication_image(conductor->context->receiver_proxy, endpoint, image);
-    aeron_driver_receiver_proxy_on_delete_cmd(conductor->context->receiver_proxy, item);
 }
 
 void aeron_driver_conductor_on_linger_buffer(void *clientd, void *item)
@@ -4633,7 +4659,7 @@ void aeron_driver_conductor_on_re_resolve_control(void *clientd, void *item)
     {
         AERON_APPEND_ERR("%s", "");
         aeron_driver_conductor_log_error(conductor);
-        goto cleanup;
+        return;
     }
 
     if (0 != memcmp(&resolved_addr, &cmd->existing_addr, sizeof(struct sockaddr_storage)))
@@ -4641,9 +4667,6 @@ void aeron_driver_conductor_on_re_resolve_control(void *clientd, void *item)
         aeron_driver_receiver_proxy_on_resolution_change(
             conductor->context->receiver_proxy, cmd->endpoint_name, cmd->endpoint, cmd->destination, &resolved_addr);
     }
-
-cleanup:
-    aeron_driver_receiver_proxy_on_delete_cmd(conductor->context->receiver_proxy, item);
 }
 
 void aeron_driver_conductor_on_receive_endpoint_removed(void *clientd, void *item)
@@ -4664,11 +4687,9 @@ void aeron_driver_conductor_on_receive_endpoint_removed(void *clientd, void *ite
         aeron_receive_channel_endpoint_close(endpoint);
         aeron_receive_channel_endpoint_receiver_release(endpoint);
     }
-
-    aeron_driver_receiver_proxy_on_delete_cmd(conductor->context->receiver_proxy, cmd);
 }
 
-extern void aeron_driver_subscribable_null_hook(void *clientd, int64_t *value_addr);
+extern void aeron_driver_subscribable_null_hook(void *clientd, volatile int64_t *value_addr);
 
 extern bool aeron_driver_conductor_is_subscribable_linked(
     aeron_subscription_link_t *link, aeron_subscribable_t *subscribable);
@@ -4709,30 +4730,7 @@ extern aeron_network_publication_t *aeron_driver_conductor_find_network_publicat
 extern aeron_network_publication_t *aeron_driver_conductor_find_network_publication_by_tag(
     aeron_driver_conductor_t *conductor, int64_t tag_id);
 
-extern aeron_publication_image_t *aeron_driver_conductor_find_publication_image(
-    aeron_driver_conductor_t *conductor, aeron_receive_channel_endpoint_t *endpoint, int32_t stream_id);
-
 extern void aeron_driver_init_subscription_channel(size_t uri_length, const char *uri, aeron_subscription_link_t *link);
-
-extern void aeron_driver_conductor_on_available_image(
-    aeron_driver_conductor_t *conductor,
-    int64_t correlation_id,
-    int32_t stream_id,
-    int32_t session_id,
-    const char *log_file_name,
-    size_t log_file_name_length,
-    int32_t subscriber_position_id,
-    int64_t subscriber_registration_id,
-    const char *source_identity,
-    size_t source_identity_length);
-
-extern void aeron_driver_conductor_on_unavailable_image(
-    aeron_driver_conductor_t *conductor,
-    int64_t correlation_id,
-    int64_t subscription_registration_id,
-    int32_t stream_id,
-    const char *channel,
-    size_t channel_length);
 
 extern void aeron_duty_cycle_stall_tracker_update(void *state, int64_t now_ns);
 extern void aeron_duty_cycle_stall_tracker_measure_and_update(void *state, int64_t now_ns);

@@ -23,19 +23,27 @@ import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.client.ControlledEgressListener;
 import io.aeron.cluster.client.EgressListener;
-import io.aeron.cluster.codecs.*;
-import io.aeron.log.EventLogExtension;
+import io.aeron.cluster.codecs.AdminRequestEncoder;
+import io.aeron.cluster.codecs.AdminRequestType;
+import io.aeron.cluster.codecs.AdminResponseCode;
+import io.aeron.cluster.codecs.AdminResponseEncoder;
+import io.aeron.cluster.codecs.MessageHeaderDecoder;
+import io.aeron.cluster.codecs.MessageHeaderEncoder;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.security.AuthorisationService;
-import io.aeron.test.*;
+import io.aeron.test.EventLogExtension;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SlowTest;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.cluster.TestNode;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.Hashing;
 import org.agrona.collections.MutableBoolean;
 import org.agrona.collections.MutableInteger;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -52,13 +60,22 @@ import static io.aeron.cluster.service.Cluster.Role.LEADER;
 import static io.aeron.logbuffer.FrameDescriptor.computeMaxMessageLength;
 import static io.aeron.test.SystemTestWatcher.UNKNOWN_HOST_FILTER;
 import static io.aeron.test.Tests.awaitAvailableWindow;
-import static io.aeron.test.cluster.ClusterTests.*;
-import static io.aeron.test.cluster.TestCluster.*;
+import static io.aeron.test.cluster.ClusterTests.NO_OP_MSG;
+import static io.aeron.test.cluster.ClusterTests.REGISTER_TIMER_MSG;
+import static io.aeron.test.cluster.ClusterTests.startPublisherThread;
+import static io.aeron.test.cluster.TestCluster.aCluster;
+import static io.aeron.test.cluster.TestCluster.awaitElectionClosed;
+import static io.aeron.test.cluster.TestCluster.awaitElectionState;
+import static io.aeron.test.cluster.TestCluster.awaitLossOfLeadership;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
-import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.agrona.BitUtil.SIZE_OF_INT;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SlowTest
 @ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
@@ -68,13 +85,6 @@ class ClusterTest
     final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
 
     private TestCluster cluster = null;
-
-    @BeforeEach
-    void setUp()
-    {
-        systemTestWatcher.ignoreErrorsMatching(
-            (s) -> s.contains("ats_gcm_decrypt final_ex: error:00000000:lib(0):func(0):reason(0)"));
-    }
 
     @Test
     @InterruptAfter(30)
@@ -187,6 +197,9 @@ class ClusterTest
         systemTestWatcher.cluster(cluster);
 
         final TestNode leader = cluster.awaitLeader();
+        TestCluster.awaitElectionClosed(cluster.node(0));
+        TestCluster.awaitElectionClosed(cluster.node(1));
+        TestCluster.awaitElectionClosed(cluster.node(2));
 
         cluster.node(0).isTerminationExpected(true);
         cluster.node(1).isTerminationExpected(true);
@@ -874,9 +887,8 @@ class ClusterTest
         TestNode followerB = followers.get(1);
 
         cluster.connectClient();
-        final long backoffIntervalNs = MICROSECONDS.toNanos(500);
-        final Thread messageThread = startPublisherThread(cluster, messageCounter, backoffIntervalNs);
 
+        final Thread messageThread = startPublisherThread(cluster, messageCounter);
         try
         {
             cluster.stopNode(followerB);
@@ -901,9 +913,7 @@ class ClusterTest
         cluster.awaitActiveSessionCount(0);
 
         assertEquals(0L, leader.errors());
-
         assertEquals(0L, followerA.errors());
-
         assertEquals(0L, followerB.errors());
     }
 
@@ -1002,10 +1012,17 @@ class ClusterTest
         cluster.stopAllNodes();
 
         final TestNode oldLeader = cluster.startStaticNode(leader.index(), false);
+        oldLeader.awaitElectionState(ElectionState.CANVASS);
+
         final TestNode oldFollower1 = cluster.startStaticNode(followers.get(0).index(), true);
+        oldFollower1.awaitElectionState(ElectionState.CLOSED);
+
         final TestNode oldFollower2 = cluster.startStaticNode(followers.get(1).index(), true);
 
-        cluster.awaitLeader();
+        final TestNode newLeader = cluster.awaitLeader();
+        assertEquals(newLeader.index(), oldLeader.index());
+
+        cluster.followers(2);
         cluster.awaitServicesMessageCount(messageCount);
 
         assertEquals(0L, oldLeader.errors());
@@ -1977,6 +1994,27 @@ class ClusterTest
 
         cluster.restartAllNodes(false);
         cluster.awaitServicesMessageCount(1024);
+    }
+
+    @Test
+    void shouldHandleReusingCorrelationIdsAcrossASnapshot()
+    {
+        cluster = aCluster().withSegmentFileLength(512 * 1024).start();
+        systemTestWatcher.cluster(cluster);
+
+        cluster.awaitLeader();
+        cluster.connectClient();
+        final int messageLength1 = cluster.msgBuffer().putStringWithoutLengthAscii(0, REGISTER_TIMER_MSG);
+        cluster.pollUntilMessageSent(messageLength1);
+        cluster.awaitResponseMessageCount(1);
+
+        cluster.awaitTimerEventCount(1);
+
+        final int messageLength2 = cluster.msgBuffer().putStringWithoutLengthAscii(0, REGISTER_TIMER_MSG);
+        cluster.pollUntilMessageSent(messageLength2);
+        cluster.awaitResponseMessageCount(2);
+
+        cluster.awaitTimerEventCount(1);
     }
 
     private void shouldCatchUpAfterFollowerMissesMessage(final String message)

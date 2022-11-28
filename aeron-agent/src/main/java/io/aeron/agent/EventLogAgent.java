@@ -30,8 +30,10 @@ import org.agrona.concurrent.SleepingMillisIdleStrategy;
 
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Constructor;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.ServiceLoader;
 
 import static io.aeron.agent.ConfigOption.*;
 import static io.aeron.agent.EventConfiguration.*;
@@ -145,7 +147,16 @@ public final class EventLogAgent
             configOptions.get(ENABLED_CLUSTER_EVENT_CODES),
             configOptions.get(DISABLED_CLUSTER_EVENT_CODES));
 
-        if (DRIVER_EVENT_CODES.isEmpty() && ARCHIVE_EVENT_CODES.isEmpty() && CLUSTER_EVENT_CODES.isEmpty())
+        final ArrayList<ComponentLogger> loggers = new ArrayList<>();
+        for (final ComponentLogger componentLogger : ServiceLoader.load(ComponentLogger.class))
+        {
+            loggers.add(componentLogger);
+        }
+
+        if (DRIVER_EVENT_CODES.isEmpty() &&
+            ARCHIVE_EVENT_CODES.isEmpty() &&
+            CLUSTER_EVENT_CODES.isEmpty() &&
+            loggers.stream().allMatch(ComponentLogger::isEventCodesEmpty))
         {
             return;
         }
@@ -167,6 +178,11 @@ public final class EventLogAgent
         agentBuilder = addDriverInstrumentation(agentBuilder);
         agentBuilder = addArchiveInstrumentation(agentBuilder);
         agentBuilder = addClusterInstrumentation(agentBuilder);
+
+        for (final ComponentLogger componentLogger : ServiceLoader.load(ComponentLogger.class))
+        {
+            agentBuilder = componentLogger.addInstrumentation(agentBuilder);
+        }
 
         logTransformer = agentBuilder.installOn(instrumentation);
 
@@ -459,7 +475,7 @@ public final class EventLogAgent
             ClusterEventCode.REPLAY_NEW_LEADERSHIP_TERM,
             "ConsensusModuleAgent",
             ClusterInterceptor.ReplayNewLeadershipTerm.class,
-            "logReplayNewLeadershipTermEvent");
+            "logOnReplayNewLeadershipTermEvent");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -467,7 +483,7 @@ public final class EventLogAgent
             ClusterEventCode.APPEND_POSITION,
             "ConsensusModuleAgent",
             ClusterInterceptor.AppendPosition.class,
-            "onAppendPosition");
+            "logOnAppendPosition");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -475,7 +491,7 @@ public final class EventLogAgent
             ClusterEventCode.COMMIT_POSITION,
             "ConsensusModuleAgent",
             ClusterInterceptor.CommitPosition.class,
-            "logCommitPosition");
+            "logOnCommitPosition");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -483,7 +499,7 @@ public final class EventLogAgent
             ClusterEventCode.ADD_PASSIVE_MEMBER,
             "ConsensusModuleAgent",
             ClusterInterceptor.AddPassiveMember.class,
-            "logAddPassiveMember");
+            "logOnAddPassiveMember");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -522,14 +538,6 @@ public final class EventLogAgent
         tempBuilder = addEventInstrumentation(
             tempBuilder,
             CLUSTER_EVENT_CODES,
-            ClusterEventCode.NEW_LEADERSHIP_TERM,
-            "ConsensusModuleAgent",
-            ClusterInterceptor.NewLeadershipTerm.class,
-            "logNewLeadershipTerm");
-
-        tempBuilder = addEventInstrumentation(
-            tempBuilder,
-            CLUSTER_EVENT_CODES,
             ClusterEventCode.STATE_CHANGE,
             "ConsensusModuleAgent",
             ClusterInterceptor.ConsensusModuleStateChange.class,
@@ -546,10 +554,18 @@ public final class EventLogAgent
         tempBuilder = addEventInstrumentation(
             tempBuilder,
             CLUSTER_EVENT_CODES,
+            ClusterEventCode.NEW_LEADERSHIP_TERM,
+            "ConsensusModuleAgent",
+            ClusterInterceptor.NewLeadershipTerm.class,
+            "logOnNewLeadershipTerm");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            CLUSTER_EVENT_CODES,
             ClusterEventCode.CANVASS_POSITION,
             "ConsensusModuleAgent",
             ClusterInterceptor.CanvassPosition.class,
-            "onCanvassPosition");
+            "logOnCanvassPosition");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -557,7 +573,7 @@ public final class EventLogAgent
             ClusterEventCode.REQUEST_VOTE,
             "ConsensusModuleAgent",
             ClusterInterceptor.RequestVote.class,
-            "onRequestVote");
+            "logOnRequestVote");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -565,7 +581,7 @@ public final class EventLogAgent
             ClusterEventCode.CATCHUP_POSITION,
             "ConsensusModuleAgent",
             ClusterInterceptor.CatchupPosition.class,
-            "onCatchupPosition");
+            "logOnCatchupPosition");
 
         tempBuilder = addEventInstrumentation(
             tempBuilder,
@@ -573,12 +589,28 @@ public final class EventLogAgent
             ClusterEventCode.STOP_CATCHUP,
             "ConsensusModuleAgent",
             ClusterInterceptor.StopCatchup.class,
-            "onStopCatchup");
+            "logOnStopCatchup");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            CLUSTER_EVENT_CODES,
+            ClusterEventCode.TERMINATION_POSITION,
+            "ConsensusModuleAgent",
+            ClusterInterceptor.TerminationPosition.class,
+            "logOnTerminationPosition");
+
+        tempBuilder = addEventInstrumentation(
+            tempBuilder,
+            CLUSTER_EVENT_CODES,
+            ClusterEventCode.TERMINATION_ACK,
+            "ConsensusModuleAgent",
+            ClusterInterceptor.TerminationAck.class,
+            "logOnTerminationAck");
 
         return tempBuilder;
     }
 
-    private static <E extends Enum<E>> AgentBuilder addEventInstrumentation(
+    static <E extends Enum<E>> AgentBuilder addEventInstrumentation(
         final AgentBuilder agentBuilder,
         final EnumSet<E> enabledEvents,
         final E code,

@@ -16,6 +16,7 @@
 package io.aeron.cluster;
 
 import io.aeron.cluster.service.Cluster;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SlowTest;
@@ -26,7 +27,7 @@ import io.aeron.test.cluster.TestNode;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.collections.IntArrayList;
 import org.agrona.collections.LongArrayList;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -37,17 +38,16 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.junit.jupiter.api.Assertions.*;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ServiceIpcIngressMessageTest
 {
     @RegisterExtension
     final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
 
-    @BeforeEach
-    void setUp()
+    @AfterEach
+    void tearDown()
     {
-        systemTestWatcher.ignoreErrorsMatching(
-            (s) -> s.contains("ats_gcm_decrypt final_ex: error:00000000:lib(0):func(0):reason(0)"));
+        TestNode.MessageTrackingService.delaySessionMessageProcessing(false);
     }
 
     @Test
@@ -238,19 +238,17 @@ class ServiceIpcIngressMessageTest
         final ExpandableArrayBuffer msgBuffer = cluster.msgBuffer();
 
         int messageCount = 0;
-        for (int i = 0; i < 10; i++)
+        TestNode.MessageTrackingService.delaySessionMessageProcessing(true);
+        for (int i = 0; i < 1999; i++)
         {
             msgBuffer.putInt(0, ++messageCount, LITTLE_ENDIAN);
             cluster.pollUntilMessageSent(SIZE_OF_INT);
         }
-        cluster.awaitResponseMessageCount(messageCount * serviceCount);
-        awaitMessageCounts(cluster, messageCount);
-        assertTrackedMessages(cluster, -1, messageCount);
-
         cluster.takeSnapshot(leader);
         cluster.awaitSnapshotCount(1);
+        TestNode.MessageTrackingService.delaySessionMessageProcessing(false);
 
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 567; i++)
         {
             msgBuffer.putInt(0, ++messageCount, LITTLE_ENDIAN);
             cluster.pollUntilMessageSent(SIZE_OF_INT);
@@ -326,14 +324,14 @@ class ServiceIpcIngressMessageTest
         assertEquals(
             messageCount,
             clientMessages.size(),
-            () -> "Invalid client message count: " + leader);
+            () -> "Invalid client message count on leader: " + leader);
         assertEquals(
             messageCount * 3 * numberOfTrackingServices,
             serviceMessages.size(),
-            () -> "Invalid service message count: " + leader);
+            () -> "Invalid service message count on leader: " + leader);
         assertEquals(messageCount * 2 * numberOfTrackingServices,
             timers.size(),
-            () -> "Invalid timer event count: " + leader);
+            () -> "Invalid timer event count on leader: " + leader);
 
         for (int i = 0; i < 3; i++)
         {
@@ -358,22 +356,22 @@ class ServiceIpcIngressMessageTest
             final IntArrayList actualClientMessages = trackingService.clientMessages();
             if (!expectedClientMessages.equals(actualClientMessages))
             {
-                fail("memberId=" + node.index() + ", role=" + node.role() + ": Client messages diverged:\n expected=" +
-                    expectedClientMessages + "\n   actual=" + actualClientMessages);
+                fail("memberId=" + node.index() + ", role=" + node.role() + ": Client messages diverged: expected=" +
+                    expectedClientMessages.size() + ", actual=" + actualClientMessages.size());
             }
 
             final IntArrayList actualServiceMessages = trackingService.serviceMessages();
             if (!expectedServiceMessages.equals(actualServiceMessages))
             {
-                fail("memberId=" + node.index() + ", role=" + node.role() + ": Service messages diverged:\n expected=" +
-                    expectedServiceMessages + "\n   actual=" + actualServiceMessages);
+                fail("memberId=" + node.index() + ", role=" + node.role() + ": Service messages diverged: expected=" +
+                    expectedServiceMessages.size() + ", actual=" + actualServiceMessages.size());
             }
 
             final LongArrayList actualTimers = trackingService.timers();
             if (!expectedTimers.equals(actualTimers))
             {
-                fail("memberId=" + node.index() + ", role=" + node.role() + ": Timers diverged:\n expected=" +
-                    expectedTimers + "\n   actual=" + actualTimers);
+                fail("memberId=" + node.index() + ", role=" + node.role() + ": Timers diverged: expected=" +
+                    expectedTimers.size() + ", actual=" + actualTimers.size());
             }
         }
     }

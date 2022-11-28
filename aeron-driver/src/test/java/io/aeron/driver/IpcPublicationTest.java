@@ -38,7 +38,7 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.mock;
 
-public class IpcPublicationTest
+class IpcPublicationTest
 {
     private static final long CLIENT_ID = 7L;
     private static final int STREAM_ID = 1010;
@@ -53,7 +53,7 @@ public class IpcPublicationTest
 
     @SuppressWarnings("unchecked")
     @BeforeEach
-    public void setUp()
+    void setUp()
     {
         final RingBuffer toDriverCommands = new ManyToOneRingBuffer(new UnsafeBuffer(
             ByteBuffer.allocate(Configuration.CONDUCTOR_BUFFER_LENGTH_DEFAULT)));
@@ -65,13 +65,18 @@ public class IpcPublicationTest
             metaDataBuffer, counterBuffer, StandardCharsets.US_ASCII);
         final SystemCounters systemCounters = new SystemCounters(countersManager);
 
+        final SenderProxy senderProxy = mock(SenderProxy.class);
+        final ReceiverProxy receiverProxy = mock(ReceiverProxy.class);
+
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .tempBuffer(new UnsafeBuffer(new byte[METADATA_LENGTH]))
             .ipcTermBufferLength(TERM_BUFFER_LENGTH)
             .toDriverCommands(toDriverCommands)
             .logFactory(new TestLogFactory())
             .clientProxy(mock(ClientProxy.class))
-            .driverCommandQueue(mock(ManyToOneConcurrentArrayQueue.class))
+            .senderProxy(senderProxy)
+            .receiverProxy(receiverProxy)
+            .driverCommandQueue(new ManyToOneConcurrentArrayQueue<>(256))
             .epochClock(SystemEpochClock.INSTANCE)
             .cachedEpochClock(new CachedEpochClock())
             .cachedNanoClock(new CachedNanoClock())
@@ -96,26 +101,26 @@ public class IpcPublicationTest
     }
 
     @Test
-    public void shouldStartWithPublisherLimitSetToZero()
+    void shouldStartWithPublisherLimitSetToZero()
     {
         assertThat(publisherLimit.get(), is(0L));
     }
 
     @Test
-    public void shouldKeepPublisherLimitZeroOnNoSubscriptionUpdate()
+    void shouldKeepPublisherLimitZeroOnNoSubscriptionUpdate()
     {
         ipcPublication.updatePublisherLimit();
         assertThat(publisherLimit.get(), is(0L));
     }
 
     @Test
-    public void shouldHaveJoiningPositionZeroWhenNoSubscriptions()
+    void shouldHaveJoiningPositionZeroWhenNoSubscriptions()
     {
         assertThat(ipcPublication.joinPosition(), is(0L));
     }
 
     @Test
-    public void shouldIncrementPublisherLimitOnSubscription()
+    void shouldIncrementPublisherLimitOnSubscription()
     {
         driverProxy.addSubscription(CommonContext.IPC_CHANNEL, STREAM_ID);
         driverConductor.doWork();

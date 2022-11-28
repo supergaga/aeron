@@ -16,10 +16,15 @@
 package io.aeron.archive;
 
 import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.Counter;
 import io.aeron.RethrowingErrorHandler;
+import io.aeron.exceptions.ConfigurationException;
 import io.aeron.security.AuthorisationService;
 import io.aeron.security.AuthorisationServiceSupplier;
+import io.aeron.test.TestContexts;
 import org.agrona.concurrent.status.AtomicCounter;
+import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,27 +32,35 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 
-import static io.aeron.archive.Archive.Configuration.AUTHORISATION_SERVICE_SUPPLIER_PROP_NAME;
-import static io.aeron.archive.Archive.Configuration.DEFAULT_AUTHORISATION_SERVICE_SUPPLIER;
+import static io.aeron.archive.Archive.Configuration.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class ArchiveContextTests
+class ArchiveContextTest
 {
-    private final Archive.Context context = new Archive.Context();
+    private final Archive.Context context = TestContexts.localhostArchive();
+    private static final int ARCHIVE_CONTROL_SESSIONS_COUNTER_ID = 928234;
 
     @BeforeEach
     void beforeEach(final @TempDir Path tempDir)
     {
         final Aeron aeron = mock(Aeron.class);
+        final CountersReader countersReader = mock(CountersReader.class);
+        final Counter counter = mock(Counter.class);
         final Aeron.Context aeronContext = new Aeron.Context();
         aeronContext.subscriberErrorHandler(RethrowingErrorHandler.INSTANCE);
         aeronContext.aeronDirectoryName("test-archive-config");
         when(aeron.context()).thenReturn(aeronContext);
+        when(aeron.countersReader()).thenReturn(countersReader);
+        when(countersReader.getCounterTypeId(ARCHIVE_CONTROL_SESSIONS_COUNTER_ID))
+            .thenReturn(ARCHIVE_CONTROL_SESSIONS_TYPE_ID);
+        when(counter.id()).thenReturn(ARCHIVE_CONTROL_SESSIONS_COUNTER_ID);
+
         context
             .aeron(aeron)
             .errorCounter(mock(AtomicCounter.class))
+            .controlSessionsCounter(counter)
             .archiveDir(tempDir.resolve("archive-test").toFile());
     }
 
@@ -126,6 +139,62 @@ class ArchiveContextTests
         {
             System.clearProperty(AUTHORISATION_SERVICE_SUPPLIER_PROP_NAME);
         }
+    }
+
+    @Test
+    void shouldThrowIfReplicationChannelIsNotSet()
+    {
+        context.replicationChannel(null);
+        assertThrows(ConfigurationException.class, context::conclude);
+    }
+
+    @Test
+    void shouldDeriveArchiveClientContextResponseChannelFromArchiveControlChannel()
+    {
+        context.controlChannel("aeron:udp?endpoint=127.0.0.2:23005");
+        context.conclude();
+        assertEquals("aeron:udp?endpoint=127.0.0.2:0", context.archiveClientContext().controlResponseChannel());
+    }
+
+    @Test
+    void shouldThrowConfigurationExceptionIfUnableToDeriveArchiveClientContextResponseChannelDueToEndpointFormat()
+    {
+        context.controlChannel("aeron:udp?endpoint=some_logical_name");
+        assertThrows(ConfigurationException.class, context::conclude);
+    }
+
+    @Test
+    void shouldThrowConfigurationExceptionIfUnableToDeriveArchiveClientContextResponseChannelDueToEndpointNull()
+    {
+        context.controlChannel("aeron:udp?control-mode=dynamic|control=192.168.0.1:12345");
+        assertThrows(ConfigurationException.class, context::conclude);
+    }
+
+    @Test
+    void shouldThrowIllegalStateExceptionIfThereIsAnActiveMarkFile()
+    {
+        context.conclude();
+        assertNotNull(context.archiveMarkFile());
+        assertNotEquals(0, context.archiveMarkFile().activityTimestampVolatile());
+
+        final Archive.Context anotherContext = TestContexts.localhostArchive()
+            .archiveDir(context.archiveDir())
+            .errorHandler(context.errorHandler())
+            .aeron(context.aeron());
+
+        final RuntimeException exception = assertThrowsExactly(RuntimeException.class, anotherContext::conclude);
+        final Throwable cause = exception.getCause();
+        assertInstanceOf(IllegalStateException.class, cause);
+        assertEquals("active Mark file detected", cause.getMessage());
+    }
+
+    @Test
+    void shouldValidateThatSessionCounterIsOfTheCorrectType()
+    {
+        when(context.aeron().countersReader().getCounterTypeId(ARCHIVE_CONTROL_SESSIONS_COUNTER_ID))
+            .thenReturn(AeronCounters.ARCHIVE_ERROR_COUNT_TYPE_ID);
+
+        assertThrows(ConfigurationException.class, context::conclude);
     }
 
     public static class TestAuthorisationSupplier implements AuthorisationServiceSupplier

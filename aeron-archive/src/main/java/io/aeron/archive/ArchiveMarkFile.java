@@ -35,6 +35,8 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 
+import static io.aeron.archive.Archive.Configuration.LIVENESS_TIMEOUT_MS;
+
 /**
  * Used to mark the presence of a running {@link Archive} in a directory to guard it.
  */
@@ -85,7 +87,7 @@ public class ArchiveMarkFile implements AutoCloseable
             alignedTotalFileLength(ctx),
             ctx.errorBufferLength(),
             ctx.epochClock(),
-            0);
+            LIVENESS_TIMEOUT_MS);
 
         encode(ctx);
         updateActivityTimestamp(ctx.epochClock().time());
@@ -317,7 +319,7 @@ public class ArchiveMarkFile implements AutoCloseable
             (4 * VarAsciiEncodingEncoder.lengthEncodingLength()) +
             ctx.controlChannel().length() +
             ctx.localControlChannel().length() +
-            ctx.recordingEventsChannel().length() +
+            (null != ctx.recordingEventsChannel() ? ctx.recordingEventsChannel().length() : 0) +
             ctx.aeronDirectoryName().length();
 
         if (headerLength > HEADER_LENGTH)

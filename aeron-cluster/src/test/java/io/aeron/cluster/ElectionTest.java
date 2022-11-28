@@ -74,7 +74,7 @@ public class ElectionTest
         when(aeron.addCounter(anyInt(), anyString())).thenReturn(electionStateCounter);
         when(aeron.addSubscription(anyString(), anyInt())).thenReturn(subscription);
         when(consensusModuleAgent.logRecordingId()).thenReturn(RECORDING_ID);
-        when(consensusModuleAgent.addLogPublication()).thenReturn(LOG_SESSION_ID);
+        when(consensusModuleAgent.addLogPublication(anyLong())).thenReturn(LOG_SESSION_ID);
         when(subscription.imageBySessionId(anyInt())).thenReturn(logImage);
 
         when(clusterMarkFile.candidateTermId()).thenAnswer((invocation) -> markFileCandidateTermId.get());
@@ -515,7 +515,7 @@ public class ElectionTest
         final long candidateTermId = leadershipTermId + 1;
         when(consensusModuleAgent.role()).thenReturn(Cluster.Role.CANDIDATE);
         election.onVote(
-            candidateTermId, leadershipTermId, logPosition, candidateMember.id(), clusterMembers[0].id(), false);
+            candidateTermId, leadershipTermId, logPosition, candidateMember.id(), clusterMembers[0].id(), true);
         election.onVote(
             candidateTermId, leadershipTermId, logPosition, candidateMember.id(), clusterMembers[2].id(), true);
         election.doWork(clock.nanoTime());
@@ -591,8 +591,6 @@ public class ElectionTest
 
         election.onCanvassPosition(leadershipTermId, logPosition, leadershipTermId, 0, VERSION);
 
-        election.doWork(clock.increment(1));
-
         clock.increment(ctx.electionTimeoutNs());
         election.doWork(clock.nanoTime());
         inOrder.verify(electionStateCounter).setOrdered(ElectionState.NOMINATE.code());
@@ -600,8 +598,6 @@ public class ElectionTest
         clock.increment(ctx.electionTimeoutNs());
         election.doWork(clock.nanoTime());
         inOrder.verify(electionStateCounter).setOrdered(ElectionState.CANDIDATE_BALLOT.code());
-
-        election.doWork(clock.increment(1));
 
         final long candidateTermId = leadershipTermId + 2;
         election.onVote(

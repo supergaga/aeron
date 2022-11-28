@@ -13,9 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.aeron.log;
+package io.aeron.test;
 
-import io.aeron.test.Tests;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -34,6 +33,7 @@ public class EventLogExtension implements BeforeEachCallback, AfterEachCallback
     {
         final String className = context.getTestClass().map(Class::getSimpleName).orElse("<UNKNOWN>");
         final String methodName = context.getTestMethod().map(Method::getName).orElse(context.getDisplayName());
+
         Tests.startLogCollecting("TEST: " + className + "." + methodName);
     }
 

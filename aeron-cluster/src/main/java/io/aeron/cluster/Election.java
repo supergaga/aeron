@@ -468,14 +468,14 @@ class Election
                     {
                         throw new ClusterException(
                             "invalid newLeadershipTerm - this.appendPosition=" + appendPosition +
-                            " < termBaseLogPosition = " + termBaseLogPosition +
-                            " and nextLeadershipTermId = " + nextLeadershipTermId +
-                            ", logLeadershipTermId = " + logLeadershipTermId +
-                            ", nextTermBaseLogPosition = " + nextTermBaseLogPosition +
-                            ", nextLogPosition = " + nextLogPosition + ", leadershipTermId = " + leadershipTermId +
-                            ", termBaseLogPosition = " + termBaseLogPosition + ", logPosition = " + logPosition +
-                            ", leaderRecordingId = " + leaderRecordingId + ", leaderMemberId = " + leaderMemberId +
-                            ", logSessionId = " + logSessionId + ", isStartup = " + isStartup);
+                            " < termBaseLogPosition=" + termBaseLogPosition +
+                            " and nextLeadershipTermId=" + nextLeadershipTermId +
+                            ", logLeadershipTermId=" + logLeadershipTermId +
+                            ", nextTermBaseLogPosition=" + nextTermBaseLogPosition +
+                            ", nextLogPosition=" + nextLogPosition + ", leadershipTermId=" + leadershipTermId +
+                            ", termBaseLogPosition=" + termBaseLogPosition + ", logPosition=" + logPosition +
+                            ", leaderRecordingId=" + leaderRecordingId + ", leaderMemberId=" + leaderMemberId +
+                            ", logSessionId=" + logSessionId + ", isStartup=" + isStartup);
                     }
                 }
                 else
@@ -579,17 +579,16 @@ class Election
         final long newPosition)
     {
         consensusModuleAgent.truncateLogEntry(logLeadershipTermId, newPosition);
-        throw new ClusterEvent(
-            "Truncating Cluster Log - memberId=" + memberId +
-                " state=" + state +
-                " this.logLeadershipTermId=" + logLeadershipTermId +
-                " this.leadershipTermId=" + leadershipTermId +
-                " this.candidateTermId=" + candidateTermId +
-                " this.commitPosition=" + commitPosition +
-                " this.logPosition=" + logPosition +
-                " this.appendPosition=" + appendPosition +
-                " oldPosition=" + oldPosition +
-                " newPosition=" + newPosition);
+        throw new ClusterEvent("Truncating Cluster Log - memberId=" + memberId +
+            " state=" + state +
+            " this.logLeadershipTermId=" + logLeadershipTermId +
+            " this.leadershipTermId=" + leadershipTermId +
+            " this.candidateTermId=" + candidateTermId +
+            " this.commitPosition=" + commitPosition +
+            " this.logPosition=" + logPosition +
+            " this.appendPosition=" + appendPosition +
+            " oldPosition=" + oldPosition +
+            " newPosition=" + newPosition);
     }
 
     private int init(final long nowNs)
@@ -678,11 +677,10 @@ class Election
             return workCount;
         }
 
-        final long canvassDeadlineNs =
-            timeOfLastStateChangeNs + (isExtendedCanvass ? ctx.startupCanvassTimeoutNs() : ctx.electionTimeoutNs());
+        final long deadlineNs = timeOfLastStateChangeNs + (isExtendedCanvass ? ctx.startupCanvassTimeoutNs() : 0);
 
         if (ClusterMember.isUnanimousCandidate(clusterMembers, thisMember) ||
-            (ClusterMember.isQuorumCandidate(clusterMembers, thisMember) && nowNs >= canvassDeadlineNs))
+            (ClusterMember.isQuorumCandidate(clusterMembers, thisMember) && nowNs >= deadlineNs))
         {
             final long delayNs = (long)(ctx.random().nextDouble() * (ctx.electionTimeoutNs() >> 1));
             nominationDeadlineNs = nowNs + delayNs;
@@ -711,8 +709,7 @@ class Election
     {
         int workCount = 0;
 
-        if (ClusterMember.hasWonVoteOnFullCount(clusterMembers, candidateTermId) ||
-            ClusterMember.hasMajorityVoteWithCanvassMembers(clusterMembers, candidateTermId))
+        if (ClusterMember.hasWonVote(clusterMembers, candidateTermId))
         {
             leaderMember = thisMember;
             leadershipTermId = candidateTermId;
@@ -721,17 +718,7 @@ class Election
         }
         else if (nowNs >= (timeOfLastStateChangeNs + ctx.electionTimeoutNs()))
         {
-            if (ClusterMember.hasMajorityVote(clusterMembers, candidateTermId))
-            {
-                leaderMember = thisMember;
-                leadershipTermId = candidateTermId;
-                state(LEADER_LOG_REPLICATION, nowNs);
-            }
-            else
-            {
-                state(CANVASS, nowNs);
-            }
-
+            state(CANVASS, nowNs);
             workCount++;
         }
         else
@@ -1237,7 +1224,7 @@ class Election
             .rejoin(Boolean.FALSE)
             .socketRcvbufLength(logChannelUri)
             .receiverWindowLength(logChannelUri)
-            .alias("log")
+            .alias("log-cm")
             .build();
 
         return aeron.addSubscription(channel, ctx.logStreamId());
@@ -1248,9 +1235,9 @@ class Election
         if (newState != state)
         {
             logStateChange(
+                thisMember.id(),
                 state,
                 newState,
-                thisMember.id(),
                 null != leaderMember ? leaderMember.id() : -1,
                 candidateTermId,
                 leadershipTermId,
@@ -1276,7 +1263,7 @@ class Election
                     break;
 
                 case LEADER_LOG_REPLICATION:
-                    logSessionId = consensusModuleAgent.addLogPublication();
+                    logSessionId = consensusModuleAgent.addLogPublication(appendPosition);
                     break;
 
                 case LEADER_INIT:
@@ -1423,9 +1410,9 @@ class Election
     }
 
     private void logStateChange(
+        final int memberId,
         final ElectionState oldState,
         final ElectionState newState,
-        final int memberId,
         final int leaderId,
         final long candidateTermId,
         final long leadershipTermId,
@@ -1443,7 +1430,7 @@ class Election
             " logLeadershipTermId=" + logLeadershipTermId +
             " appendPosition=" + appendPosition +
             " catchupPosition=" + catchupPosition);
-        */
+         */
     }
 
     int thisMemberId()

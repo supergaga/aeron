@@ -213,12 +213,17 @@ public final class DriverConductor implements Agent
 
         int workCount = 0;
         workCount += processTimers(nowNs);
-        workCount += clientCommandAdapter.receive();
         workCount += driverCmdQueue.drain(Runnable::run, Configuration.COMMAND_DRAIN_LIMIT);
+        workCount += clientCommandAdapter.receive();
         workCount += trackStreamPositions(workCount, nowNs);
         workCount += nameResolver.doWork(cachedEpochClock.time());
 
         return workCount;
+    }
+
+    boolean notAcceptingClientCommands()
+    {
+        return senderProxy.isApplyingBackpressure() || receiverProxy.isApplyingBackpressure();
     }
 
     void onCreatePublicationImage(
@@ -284,6 +289,7 @@ public final class DriverConductor implements Agent
 
                 final boolean treatAsMulticast = subscription.group() == INFER ?
                     channelEndpoint.udpChannel(transportIndex).isMulticast() : subscription.group() == FORCE_TRUE;
+                final String sourceIdentity = Configuration.sourceIdentity(sourceAddress);
 
                 final PublicationImage image = new PublicationImage(
                     registrationId,
@@ -302,13 +308,13 @@ public final class DriverConductor implements Agent
                     hwmPos,
                     rcvPos,
                     sourceAddress,
+                    sourceIdentity,
                     congestionControl);
 
                 channelEndpoint.incRefImages();
                 publicationImages.add(image);
                 receiverProxy.newPublicationImage(channelEndpoint, image);
 
-                final String sourceIdentity = Configuration.sourceIdentity(sourceAddress);
                 for (int i = 0, size = subscriberPositions.size(); i < size; i++)
                 {
                     final SubscriberPosition position = subscriberPositions.get(i);
@@ -1624,7 +1630,7 @@ public final class DriverConductor implements Agent
                     registrationId,
                     position.id(),
                     image.rawLog().fileName(),
-                    Configuration.sourceIdentity(image.sourceAddress()));
+                    image.sourceIdentity());
             }
         }
     }

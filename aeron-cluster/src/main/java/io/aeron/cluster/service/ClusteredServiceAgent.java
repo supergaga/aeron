@@ -24,6 +24,7 @@ import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
 import io.aeron.driver.Configuration;
 import io.aeron.driver.DutyCycleTracker;
+import io.aeron.exceptions.AeronEvent;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.TimeoutException;
 import io.aeron.logbuffer.BufferClaim;
@@ -106,11 +107,13 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
     private final Collection<ClientSession> unmodifiableClientSessions = Collections.unmodifiableCollection(sessions);
     private final BoundedLogAdapter logAdapter;
     private final DutyCycleTracker dutyCycleTracker;
+    private final String subscriptionAlias;
     private String activeLifecycleCallbackName;
     private ReadableCounter commitPosition;
     private ActiveLogEvent activeLogEvent;
     private Role role = Role.FOLLOWER;
     private TimeUnit timeUnit = null;
+    private long requestedAckPosition = NULL_POSITION;
 
     ClusteredServiceAgent(final ClusteredServiceContainer.Context ctx)
     {
@@ -126,6 +129,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
         epochClock = ctx.epochClock();
         nanoClock = ctx.nanoClock();
         dutyCycleTracker = ctx.dutyCycleTracker();
+        subscriptionAlias = "log-sc-" + ctx.serviceId();
 
         final String channel = ctx.controlChannel();
         consensusModuleProxy = new ConsensusModuleProxy(aeron.addPublication(channel, ctx.consensusModuleStreamId()));
@@ -136,6 +140,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
     public void onStart()
     {
         closeHandlerRegistrationId = aeron.addCloseHandler(this::abort);
+        aeron.addUnavailableCounterHandler(this::counterUnavailable);
         final CountersReader counters = aeron.countersReader();
         commitPosition = awaitCommitPositionCounter(counters, ctx.clusterId());
 
@@ -403,6 +408,11 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
         terminationPosition = logPosition;
     }
 
+    void onRequestServiceAck(final long logPosition)
+    {
+        requestedAckPosition = logPosition;
+    }
+
     void onSessionMessage(
         final long logPosition,
         final long clusterSessionId,
@@ -507,7 +517,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
     {
         if (!ctx.appVersionValidator().isVersionCompatible(ctx.appVersion(), appVersion))
         {
-            ctx.errorHandler().onError(new ClusterException(
+            ctx.countedErrorHandler().onError(new ClusterException(
                 "incompatible version: " + SemanticVersion.toString(ctx.appVersion()) +
                 " log=" + SemanticVersion.toString(appVersion)));
             throw new AgentTerminationException();
@@ -760,7 +770,11 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
             disconnectEgress(ctx.countedErrorHandler());
         }
 
-        Subscription logSubscription = aeron.addSubscription(activeLog.channel, activeLog.streamId);
+        final String channel = new ChannelUriStringBuilder(activeLog.channel)
+            .alias(subscriptionAlias)
+            .build();
+
+        Subscription logSubscription = aeron.addSubscription(channel, activeLog.streamId);
         try
         {
             final Image image = awaitImage(activeLog.sessionId, logSubscription);
@@ -835,7 +849,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
             counterId = ClusterCounters.find(counters, COMMIT_POSITION_TYPE_ID, clusterId);
         }
 
-        return new ReadableCounter(counters, counterId);
+        return new ReadableCounter(counters, counters.getCounterRegistrationId(counterId), counterId);
     }
 
     private void loadSnapshot(final long recordingId)
@@ -998,6 +1012,14 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
             lastSlowTickNs = nowNs;
             final long nowMs = epochClock.time();
 
+            if (commitPosition.isClosed())
+            {
+                ctx.errorLog().record(new AeronEvent(
+                    "commit-pos counter unexpectedly closed, terminating", AeronException.Category.WARN));
+
+                throw new ClusterTerminationException(true);
+            }
+
             if (null != aeronAgentInvoker)
             {
                 aeronAgentInvoker.invoke();
@@ -1040,6 +1062,21 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
             }
 
             terminate(logPosition == terminationPosition);
+        }
+
+        if (NULL_POSITION != requestedAckPosition && logPosition >= requestedAckPosition)
+        {
+            if (logPosition > requestedAckPosition)
+            {
+                ctx.countedErrorHandler().onError(new ClusterEvent(
+                    "service terminate: logPosition=" + logPosition +
+                    " > requestedAckPosition=" + terminationPosition));
+            }
+
+            if (consensusModuleProxy.ack(logPosition, clusterTime, ackId++, NULL_VALUE, serviceId))
+            {
+                requestedAckPosition = NULL_POSITION;
+            }
         }
     }
 
@@ -1112,6 +1149,17 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentHotFields impleme
         catch (final InterruptedException ignore)
         {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private void counterUnavailable(final CountersReader countersReader, final long registrationId, final int counterId)
+    {
+        final ReadableCounter commitPosition = this.commitPosition;
+        if (null != commitPosition &&
+            commitPosition.counterId() == counterId &&
+            commitPosition.registrationId() == registrationId)
+        {
+            commitPosition.close();
         }
     }
 
