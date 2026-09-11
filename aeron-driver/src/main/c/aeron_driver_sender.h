@@ -24,6 +24,7 @@
 #include "concurrent/aeron_distinct_error_log.h"
 
 #if !defined(HAVE_STRUCT_MMSGHDR)
+#define HAVE_STRUCT_MMSGHDR
 struct mmsghdr
 {
     struct msghdr msg_hdr;
