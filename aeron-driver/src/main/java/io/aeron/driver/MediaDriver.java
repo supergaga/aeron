@@ -123,7 +123,6 @@ import static io.aeron.driver.Configuration.validateUntetheredTimeouts;
 import static io.aeron.driver.Configuration.validateValueRange;
 import static io.aeron.driver.reports.LossReportUtil.mapLossReport;
 import static io.aeron.driver.status.SystemCounterDescriptor.AERON_VERSION;
-import static io.aeron.driver.status.SystemCounterDescriptor.NATIVE_RESOURCE_AGENT_PROXY_FAILS;
 import static io.aeron.driver.status.SystemCounterDescriptor.BYTES_CURRENTLY_MAPPED;
 import static io.aeron.driver.status.SystemCounterDescriptor.CONDUCTOR_CYCLE_TIME_THRESHOLD_EXCEEDED;
 import static io.aeron.driver.status.SystemCounterDescriptor.CONDUCTOR_MAX_CYCLE_TIME;
@@ -132,6 +131,7 @@ import static io.aeron.driver.status.SystemCounterDescriptor.CONTROL_PROTOCOL_VE
 import static io.aeron.driver.status.SystemCounterDescriptor.ERRORS;
 import static io.aeron.driver.status.SystemCounterDescriptor.NAME_RESOLVER_MAX_TIME;
 import static io.aeron.driver.status.SystemCounterDescriptor.NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED;
+import static io.aeron.driver.status.SystemCounterDescriptor.NATIVE_RESOURCE_AGENT_PROXY_FAILS;
 import static io.aeron.driver.status.SystemCounterDescriptor.RECEIVER_CYCLE_TIME_THRESHOLD_EXCEEDED;
 import static io.aeron.driver.status.SystemCounterDescriptor.RECEIVER_MAX_CYCLE_TIME;
 import static io.aeron.driver.status.SystemCounterDescriptor.RECEIVER_PROXY_FAILS;
@@ -628,6 +628,8 @@ public final class MediaDriver implements AutoCloseable
         private int publicationReservedSessionIdHigh = Configuration.publicationReservedSessionIdHigh();
         private int lossReportBufferLength = Configuration.lossReportBufferLength();
         private int sendToStatusMessagePollRatio = Configuration.sendToStatusMessagePollRatio();
+        private int receiverPollToSlowWorkRatio = Configuration.receiverPollToSlowWorkRatio();
+        private int receiverImagesPerDutyCycleLimit = Configuration.receiverImagesPerDutyCycleLimit();
         private int resourceFreeLimit = Configuration.resourceFreeLimit();
         private int maxResend = Configuration.maxResend();
 
@@ -826,6 +828,13 @@ public final class MediaDriver implements AutoCloseable
                 validateValueRange(
                     nakUnicastRetryDelayRatio, 1, Long.MAX_VALUE, "nakUnicastRetryDelayRatio");
                 Math.multiplyExact(nakUnicastDelayNs, nakUnicastRetryDelayRatio);
+
+                validateValueRange(
+                    sendToStatusMessagePollRatio, 1, Integer.MAX_VALUE, "sendToStatusMessagePollRatio");
+                validateValueRange(
+                    receiverPollToSlowWorkRatio, 1, Integer.MAX_VALUE, "receiverPollToSlowWorkRatio");
+                validateValueRange(
+                    receiverImagesPerDutyCycleLimit, 1, Integer.MAX_VALUE, "receiverImagesPerDutyCycleLimit");
 
                 validateSessionIdRange(publicationReservedSessionIdLow, publicationReservedSessionIdHigh);
 
@@ -3372,6 +3381,54 @@ public final class MediaDriver implements AutoCloseable
         }
 
         /**
+         * {@return Get the ratio of receiving data to slow work (e.g. draining command queue, sending pending status messages
+         * etc.) in the {@link Receiver}}.
+         * @since 1.54.0
+         */
+        public int receiverPollToSlowWorkRatio()
+        {
+            return receiverPollToSlowWorkRatio;
+        }
+
+        /**
+         * Set the ratio of receiving data to slow work (e.g. draining command queue, sending pending status messages
+         * etc.) in the {@link Receiver}.
+         *
+         * @param ratio to use.
+         * @return this for fluent API.
+         * @since 1.54.0
+         */
+        public Context receiverPollToSlowWorkRatio(final int ratio)
+        {
+            this.receiverPollToSlowWorkRatio = ratio;
+            return this;
+        }
+
+        /**
+         * {@return Get the limit on number of {@code PublicationImage}s that the {@link Receiver} can process in a
+         * single duty cycle}.
+         * @since 1.54.0
+         */
+        public int receiverImagesPerDutyCycleLimit()
+        {
+            return receiverImagesPerDutyCycleLimit;
+        }
+
+        /**
+         * Set the ratio of receiving data to slow work (e.g. draining command queue, sending pending status messages
+         * etc.) in the {@link Receiver}.
+         *
+         * @param limit to use.
+         * @return this for fluent API.
+         * @since 1.54.0
+         */
+        public Context receiverImagesPerDutyCycleLimit(final int limit)
+        {
+            this.receiverImagesPerDutyCycleLimit = limit;
+            return this;
+        }
+
+        /**
          * Get the group tag (gtag) to be sent in Status Messages from the Receiver.
          *
          * @return group tag value or null if not set.
@@ -4988,6 +5045,8 @@ public final class MediaDriver implements AutoCloseable
                 "\n    resolverInterface='" + resolverInterface + '\'' +
                 "\n    resolverBootstrapNeighbor='" + resolverBootstrapNeighbor + '\'' +
                 "\n    sendToStatusMessagePollRatio=" + sendToStatusMessagePollRatio +
+                "\n    receivePollToSlowWorkRatio=" + receiverPollToSlowWorkRatio +
+                "\n    receiverImagesPerDutyCycleLimit=" + receiverImagesPerDutyCycleLimit +
                 "\n    unicastFeedbackDelayGenerator=" + unicastFeedbackDelayGenerator +
                 "\n    multicastFeedbackDelayGenerator=" + multicastFeedbackDelayGenerator +
                 "\n    retransmitUnicastDelayGenerator=" + retransmitUnicastDelayGenerator +
