@@ -748,7 +748,7 @@ public final class PublicationImage
         do
         {
             final int frameLength = FrameDescriptor.frameLength(buffer, offset);
-            if (frameLength <= 0)
+            if (frameLength < DataHeaderFlyweight.HEADER_LENGTH)
             {
                 break;
             }
