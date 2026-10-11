@@ -3160,8 +3160,25 @@ aeron_rb_read_action_t aeron_driver_conductor_on_command(
         case AERON_COMMAND_ADD_COUNTER:
         {
             aeron_counter_command_t *command = (aeron_counter_command_t *)message;
+            const size_t min_command_length = sizeof(aeron_counter_command_t) + 2 * sizeof(int32_t);
 
-            if (length < sizeof(aeron_counter_command_t))
+            if (length < min_command_length)
+            {
+                goto malformed_command;
+            }
+
+            int32_t key_length;
+            size_t aligned_key_length;
+            memcpy(&key_length, (uint8_t *)message + sizeof(aeron_counter_command_t), sizeof(int32_t));
+            if (key_length < 0 ||
+                length < min_command_length + (aligned_key_length = AERON_ALIGN(key_length, sizeof(int32_t))))
+            {
+                goto malformed_command;
+            }
+
+            int32_t label_length;
+            memcpy(&label_length, (uint8_t *)message + sizeof(aeron_counter_command_t) + sizeof(int32_t) + aligned_key_length, sizeof(int32_t));
+            if (label_length < 0 || length < min_command_length + aligned_key_length + (size_t)label_length)
             {
                 goto malformed_command;
             }
@@ -3217,8 +3234,25 @@ aeron_rb_read_action_t aeron_driver_conductor_on_command(
         case AERON_COMMAND_ADD_STATIC_COUNTER:
         {
             aeron_static_counter_command_t *command = (aeron_static_counter_command_t *)message;
+            const size_t min_command_length = sizeof(aeron_static_counter_command_t) + 2 * sizeof(int32_t);
 
-            if (length < sizeof(aeron_static_counter_command_t))
+            if (length < min_command_length)
+            {
+                goto malformed_command;
+            }
+
+            int32_t key_length;
+            size_t aligned_key_length;
+            memcpy(&key_length, (uint8_t *)message + sizeof(aeron_static_counter_command_t), sizeof(int32_t));
+            if (key_length < 0 ||
+                length < min_command_length + (aligned_key_length = AERON_ALIGN(key_length, sizeof(int32_t))))
+            {
+                goto malformed_command;
+            }
+
+            int32_t label_length;
+            memcpy(&label_length, (uint8_t *)message + sizeof(aeron_static_counter_command_t) + sizeof(int32_t) + aligned_key_length, sizeof(int32_t));
+            if (label_length < 0 || length < min_command_length + aligned_key_length + (size_t)label_length)
             {
                 goto malformed_command;
             }
