@@ -676,7 +676,7 @@ int32_t aeron_publication_image_validate_packet(
     do
     {
         aeron_data_header_t *frame = (aeron_data_header_t *)(buffer + offset);
-        if (frame->frame_header.frame_length <= 0)
+        if (frame->frame_header.frame_length < (int32_t)AERON_DATA_HEADER_LENGTH)
         {
             break;
         }
