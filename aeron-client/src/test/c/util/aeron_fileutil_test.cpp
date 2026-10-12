@@ -266,11 +266,14 @@ TEST_F(FileUtilTest, rawLogMapExistingShouldRejectFileShorterThanMetadata)
     aeron_mapped_raw_log_t mapped_raw_log = {};
     const char *file = "test_raw_log_map_existing_short_file.log";
     aeron_mapped_file_t mapped_file = { nullptr, 100 };
-    ASSERT_EQ(0, aeron_map_new_file(&mapped_file, file, true, AERON_PAGE_MIN_SIZE)) << aeron_errmsg();
+    ASSERT_EQ(0, aeron_map_new_file(&mapped_file, file, true, AERON_LOGBUFFER_META_DATA_LENGTH)) << aeron_errmsg();
     ASSERT_EQ(0, aeron_unmap(&mapped_file)) << aeron_errmsg();
 
     EXPECT_EQ(-1, aeron_raw_log_map_existing(&mapped_raw_log, file, false));
     EXPECT_EQ(EINVAL, aeron_errcode());
+    std::string expected = "Raw log file length less than min length of ";
+    expected.append(std::to_string(AERON_LOGBUFFER_MIN_FILE_SIZE));
+    EXPECT_NE(std::string::npos, std::string(aeron_errmsg()).find(file));
     EXPECT_EQ(nullptr, mapped_raw_log.mapped_file.addr);
     EXPECT_EQ(0, remove(file));
 }

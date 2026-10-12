@@ -1327,12 +1327,12 @@ int aeron_raw_log_map_existing(aeron_mapped_raw_log_t *mapped_raw_log, const cha
         return -1;
     }
 
-    if (file_length < AERON_LOGBUFFER_META_DATA_LENGTH)
+    if (file_length < (int64_t)AERON_LOGBUFFER_MIN_FILE_SIZE)
     {
         AERON_SET_ERR(
             EINVAL,
             "Raw log file length less than min length of %d: length=%" PRId64 ", filename: %s",
-            (int)AERON_LOGBUFFER_META_DATA_LENGTH,
+            (int64_t)AERON_LOGBUFFER_MIN_FILE_SIZE,
             file_length,
             path);
 #if !defined(_MSC_VER)
