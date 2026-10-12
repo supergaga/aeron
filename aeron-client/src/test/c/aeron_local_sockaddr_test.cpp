@@ -111,3 +111,28 @@ TEST_F(LocalSockaddrTest, shouldRejectNullAddressBuffer)
     EXPECT_EQ(-1, aeron_local_sockaddr_find_addrs(&m_reader, CHANNEL_STATUS_ID, &address_vec, 1));
     EXPECT_EQ(EINVAL, aeron_errcode());
 }
+
+TEST_F(LocalSockaddrTest, shouldReturnAddressCountWithoutWritingToVectorWhenMaxSizeIsReached)
+{
+    allocateLocalSockaddr(1, "127.0.0.1:40123", AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE);
+    allocateLocalSockaddr(2, "127.0.0.1:40124", AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE);
+    allocateLocalSockaddr(3, "127.0.0.1:40125", AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE);
+
+    uint8_t buffers[3][AERON_CLIENT_MAX_LOCAL_ADDRESS_STR_LEN] = {};
+    aeron_iovec_t address_vec[3];
+    for (int i = 0; i < 3; i++)
+    {
+        address_vec[i].iov_base = buffers[i];
+        address_vec[i].iov_len = sizeof(buffers[i]);
+    }
+
+    EXPECT_EQ(3, aeron_local_sockaddr_find_addrs(&m_reader, CHANNEL_STATUS_ID, address_vec, 0));
+
+    for (auto & i : address_vec)
+    {
+        for (size_t j = 0; j < AERON_CLIENT_MAX_LOCAL_ADDRESS_STR_LEN; j++)
+        {
+            ASSERT_EQ(0, i.iov_base[j]) << "byte " << j << " was overwritten";
+        }
+    }
+}
