@@ -17,6 +17,10 @@
 #include "gtest/gtest.h"
 
 #include "ChannelUriStringBuilder.h"
+extern "C"
+{
+#include "uri/aeron_uri.h"
+}
 
 using namespace aeron;
 
@@ -207,18 +211,38 @@ TEST(ChannelUriStringBuilderTest, shouldClearOnlyRejoin)
     ASSERT_EQ(builder.build(), "aeron:udp?reliable=true");
 }
 
-TEST(ChannelUriStringBuilderTest, shouldWrapTermIdOfInitialPosition)
+class InitialPositionTest : public testing::TestWithParam<std::tuple<std::int64_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t>>
+{
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    InitialPositionTests,
+    InitialPositionTest,
+    testing::Values(
+        std::make_tuple(64 * 1024, INT32_MAX, 64 * 1024, INT32_MIN, 0),
+        std::make_tuple(0, -5, 1024 * 1024, -5, 0),
+        std::make_tuple(4 * 1024 * 1024 + 256, -19, 128 * 1024, 13, 256)
+    ));
+
+TEST_P(InitialPositionTest, shouldWrapTermIdOfInitialPosition)
 {
     ChannelUriStringBuilder builder;
 
-    std::int32_t termLength = 64 * 1024;
-    std::int64_t position = termLength;
+    std::int64_t position = std::get<0>(GetParam());
+    std::int32_t initialTermId = std::get<1>(GetParam());
+    std::int32_t termLength = std::get<2>(GetParam());
+    std::int32_t expectedTermId = std::get<3>(GetParam());
+    std::int32_t expectedTermOffset = std::get<4>(GetParam());
 
     builder
         .media(IPC_MEDIA)
-        .initialPosition(position, INT32_MAX, termLength);
+        .initialPosition(position, initialTermId, termLength);
 
-    ASSERT_EQ(
-        builder.build(),
-        "aeron:ipc?term-length=65536|init-term-id=2147483647|term-id=-2147483648|term-offset=0");
+    auto channel = builder.build();
+
+    aeron_uri_t uri;
+    EXPECT_EQ(0, aeron_uri_parse(channel.length(), channel.c_str(), &uri));
+    EXPECT_STREQ(std::to_string(initialTermId).c_str(), aeron_uri_find_param_value(&uri.params.ipc.additional_params, AERON_URI_INITIAL_TERM_ID_KEY));
+    EXPECT_STREQ(std::to_string(expectedTermId).c_str(), aeron_uri_find_param_value(&uri.params.ipc.additional_params, AERON_URI_TERM_ID_KEY));
+    EXPECT_STREQ(std::to_string(expectedTermOffset).c_str(), aeron_uri_find_param_value(&uri.params.ipc.additional_params, AERON_URI_TERM_OFFSET_KEY));
 }
