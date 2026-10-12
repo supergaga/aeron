@@ -82,7 +82,7 @@ channel (e.g. replay channel for Archive). (https://github.com/aeron-io/aeron/is
 * **[Java]** Upgrade to `ByteBuddy` 1.18.14.
 * **[Java]** Upgrade to `Versions` 0.65.0.
 * **[Java]** Upgrade to `jackson-dataformat-cbor` 3.2.3.
-* **[C]** Upgrade to `CMake` 4.4.3.
+* **[C]** Upgrade to `CMake` 4.4.4.
 
 == 1.53.3 (2026-09-25)
 
