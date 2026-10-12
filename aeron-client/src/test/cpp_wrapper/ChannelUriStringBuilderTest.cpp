@@ -245,4 +245,5 @@ TEST_P(InitialPositionTest, shouldWrapTermIdOfInitialPosition)
     EXPECT_STREQ(std::to_string(initialTermId).c_str(), aeron_uri_find_param_value(&uri.params.ipc.additional_params, AERON_URI_INITIAL_TERM_ID_KEY));
     EXPECT_STREQ(std::to_string(expectedTermId).c_str(), aeron_uri_find_param_value(&uri.params.ipc.additional_params, AERON_URI_TERM_ID_KEY));
     EXPECT_STREQ(std::to_string(expectedTermOffset).c_str(), aeron_uri_find_param_value(&uri.params.ipc.additional_params, AERON_URI_TERM_OFFSET_KEY));
+    aeron_uri_close(&uri);
 }
