@@ -104,7 +104,7 @@ channel (e.g. replay channel for Archive). (https://github.com/aeron-io/aeron/is
 * **[Java]** Upgrade to https://github.com/aeron-io/simple-binary-encoding/releases/tag/1.41.0[SBE 1.41.0].
 * **[Java]** Upgrade to `Gradle` 9.8.1.
 * **[Java]** Upgrade to `Mockito` 5.24.0.
-* **[Java]** Upgrade to `ByteBuddy` 1.18.14.
+* **[Java]** Upgrade to `ByteBuddy` 1.18.15.
 * **[Java]** Upgrade to `Versions` 0.66.0.
 * **[Java]** Upgrade to `jackson-dataformat-cbor` 3.2.3.
 * **[Java]** Upgrade to `ASM` 9.11.
