@@ -5639,7 +5639,7 @@ int aeron_driver_conductor_on_remove_send_destination(
     aeron_driver_conductor_schedule_client_command(conductor, (aeron_driver_conductor_client_command_t *)async_client_command);
 
     async_client_command->async_resolve.uri_param_name = AERON_UDP_CHANNEL_ENDPOINT_KEY;
-    async_client_command->async_resolve.is_re_resolution = true;
+    async_client_command->async_resolve.is_re_resolution = false;
     COPY_ENDPOINT_NAME(async_client_command->async_resolve.endpoint_name, uri_params.params.udp.endpoint);
 
     async_client_command->base.execute = aeron_driver_conductor_execute_remove_send_destination;
