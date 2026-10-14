@@ -46,14 +46,6 @@
 #include <linux/sockios.h>
 #endif
 
-#if !defined(HAVE_STRUCT_MMSGHDR)
-struct mmsghdr
-{
-    struct msghdr msg_hdr;
-    unsigned int msg_len;
-};
-#endif
-
 #if defined(HAVE_SENDMSG_X) || defined(HAVE_RECVMSG_X)
 struct msghdr_x
 {
