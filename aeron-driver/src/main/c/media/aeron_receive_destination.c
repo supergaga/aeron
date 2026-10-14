@@ -14,11 +14,6 @@
  * limitations under the License.
  */
 
-#if defined(__linux__)
-#define _BSD_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include "util/aeron_error.h"
 #include "aeron_driver_receiver.h"
 #include "aeron_position.h"

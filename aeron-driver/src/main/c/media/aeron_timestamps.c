@@ -14,11 +14,6 @@
  * limitations under the License.
  */
 
-#if defined(__linux__)
-#define _BSD_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include "protocol/aeron_udp_protocol.h"
 #include "aeron_timestamps.h"
 #include "aeron_udp_channel.h"
