@@ -14,19 +14,18 @@
  * limitations under the License.
  */
 
-#include "util/aeron_platform.h"
-
 #if defined(__linux__)
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 #endif
+
+#include "util/aeron_platform.h"
 
 #include <stdio.h>
 #include <inttypes.h>
 #if !defined(AERON_COMPILER_MSVC)
 #include <unistd.h>
 #endif
-
 
 #include "util/aeron_math.h"
 #include "util/aeron_arrayutil.h"
