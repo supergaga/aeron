@@ -219,6 +219,7 @@ typedef struct aeron_driver_context_stct
     size_t socket_sndbuf;                                   /* aeron.socket.so_sndbuf = 0 */
     int32_t socket_tos;                                     /* aeron.socket.tos = -1 */
     size_t send_to_sm_poll_ratio;                           /* aeron.send.to.status.poll.ratio = 6 */
+    size_t receiver_poll_to_slow_work_ratio;                /* aeron.receiver.poll.to.slow.work.ratio = 10 */
     size_t initial_window_length;                           /* aeron.rcv.initial.window.length = 128KB */
     size_t loss_report_length;                              /* aeron.loss.report.buffer.length = 1MB */
     size_t file_page_size;                                  /* aeron.file.page.size = 4KB */
@@ -226,6 +227,7 @@ typedef struct aeron_driver_context_stct
     int32_t publication_reserved_session_id_low;            /* aeron.publication.reserved.session.id.low = -1 */
     int32_t publication_reserved_session_id_high;           /* aeron.publication.reserved.session.id.high = 1000 */
     uint8_t multicast_ttl;                                  /* aeron.socket.multicast.ttl = 0 */
+    int32_t receiver_images_per_duty_cycle_limit;           /* aeron.receiver.images.per.duty.cycle.limit = 16 */
     uint32_t receiver_io_vector_capacity;                   /* aeron.receiver.io.vector.capacity = 4 */
     uint32_t sender_io_vector_capacity;                     /* aeron.sender.io.vector.capacity = 4 */
     uint32_t network_publication_max_messages_per_send;     /* aeron.network.publication.max.messages.per.send = 4 */
