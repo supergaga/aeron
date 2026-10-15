@@ -751,12 +751,21 @@ aeron_udp_channel_transport_bindings_t *aeron_driver_context_get_udp_channel_tra
     aeron_driver_context_t *context);
 
 /**
- * The threshold beyond which individual channel/socket polling will swap to using selectors
+ * The threshold beyond which individual channel/socket polling will swap to using selectors.
  */
 #define AERON_UDP_CHANNEL_TRANSPORT_POLLER_ITERATION_THRESHOLD_ENV_VAR "AERON_UDP_CHANNEL_TRANSPORT_POLLER_ITERATION_THRESHOLD"
 
 int aeron_driver_context_set_udp_channel_transport_poller_iteration_threshold(aeron_driver_context_t *context, size_t value);
 size_t aeron_driver_context_get_udp_channel_transport_poller_iteration_threshold(aeron_driver_context_t *context);
+
+/**
+ * The max number of loop iterations over a single socket before polling the next one. If a socket has data it will be
+ * polled up to the limit number of times.
+ */
+#define AERON_UDP_CHANNEL_TRANSPORT_POLLER_SOCKET_POLL_LIMIT_ENV_VAR "AERON_UDP_CHANNEL_TRANSPORT_POLLER_SOCKET_POLL_LIMIT"
+
+int aeron_driver_context_set_udp_channel_transport_poller_socket_poll_limit(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_udp_channel_transport_poller_socket_poll_limit(aeron_driver_context_t *context);
 
 #define AERON_UDP_CHANNEL_OUTGOING_INTERCEPTORS_ENV_VAR "AERON_UDP_CHANNEL_OUTGOING_INTERCEPTORS"
 #define AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR "AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS"
