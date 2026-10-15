@@ -2045,7 +2045,7 @@ public final class Configuration
     }
 
     /**
-     * {@return Limit on number of {@code PublicationImage}s that the {@link Receiver} can process in a single duty cycle}.
+     * {@return Limit the number of {@code PublicationImage}s that the {@link Receiver} can process in a single duty cycle}.
      * @see #RECEIVER_IMAGES_PER_DUTY_CYCLE_LIMIT_PROP_NAME
      * @since 1.54.0
      */
