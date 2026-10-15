@@ -312,7 +312,7 @@ public final class Configuration
      */
     @Config
     public static final String RECEIVER_POLL_TO_SLOW_WORK_RATIO_PROP_NAME =
-        "aeron.driver.receiver.poll.to.slow.work.ratio";
+        "aeron.receiver.poll.to.slow.work.ratio";
 
     /**
      * The default ratio of receiving data to slow work (e.g. draining command queue, sending pending status messages
@@ -332,7 +332,7 @@ public final class Configuration
      */
     @Config
     public static final String RECEIVER_IMAGES_PER_DUTY_CYCLE_LIMIT_PROP_NAME =
-        "aeron.driver.receiver.images.per.duty.cycle.limit";
+        "aeron.receiver.images.per.duty.cycle.limit";
 
     /**
      * The default limit on number of {@code PublicationImage}s that the {@link Receiver} can process in a single duty
