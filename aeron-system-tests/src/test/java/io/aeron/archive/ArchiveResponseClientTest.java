@@ -248,8 +248,6 @@ public class ArchiveResponseClientTest
     @InterruptAfter(10)
     void shouldStartReplayUsingResponseChannelInTheInvokerMode(final String replayChannel)
     {
-        TestMediaDriver.notSupportedOnCMediaDriver("ThreadingMode.INVOKER");
-
         tearDown();
 
         driver = TestMediaDriver.launch(driverCtx.clone()

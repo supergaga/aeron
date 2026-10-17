@@ -1242,6 +1242,7 @@ class ArchiveTest
                     .controlResponseChannel(responseChannel)
                     .controlResponseStreamId(9191)
                     .aeron(aeron)
+                    .ownsAeronClient(false)
                     .agentInvoker(archive.invoker()));
 
             AeronArchive aeronArchive;
