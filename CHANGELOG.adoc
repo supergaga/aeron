@@ -38,6 +38,8 @@ now `AERON_THREAD_AFFINITY_FAIL_ON_VALIDATION_ERRORS`
 
 === Changelog
 
+* **[Archive/Java]** Fix SIGSEGV when closing sessions after the archive's Aeron client times out. (https://github.com/aeron-io/aeron/pull/2204[#2204])
+* **[Cluster]** Fix 15s deadlock when the clustered service's Aeron client times out. (https://github.com/aeron-io/aeron/pull/2205[#2205])
 * **[Archive/Java]** Invoke `AgentInvokers` while waiting for the replay control publication to connect when starting replay using response channels.
 * **[Archive/C]** Invoke the client while waiting in the archive client's publication, subscription and replay wait loops. (https://github.com/aeron-io/aeron/pull/2203[#2203])
 * **[Archive/C]** Release the archive lock when polling for recording signals fails. (https://github.com/aeron-io/aeron/pull/2202[#2202])
