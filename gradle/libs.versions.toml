@@ -1,6 +1,6 @@
 [versions]
 agrona = "2.7.0"
-asciidoctorj = "2.5.13"
+asciidoctorj = "3.0.1"
 asm = "9.11"
 byteBuddy = "1.18.15"
 checkstyle = "12.3.1"
