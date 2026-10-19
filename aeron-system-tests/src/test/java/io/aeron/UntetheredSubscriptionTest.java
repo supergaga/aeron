@@ -550,8 +550,6 @@ class UntetheredSubscriptionTest
     void imageShouldCompleteDrainStateEvenIfThereAreNonActiveUntetheredSubscriptions(
         final String pubChannel, final String subChannel, final String untetheredSubChannel, final String windowSize)
     {
-        TestMediaDriver.notSupportedOnCMediaDriver("pending fixes");
-
         launch(pubChannel, TimeUnit.MILLISECONDS.toNanos(750));
 
         final AtomicInteger unavailableImageCount = new AtomicInteger();
