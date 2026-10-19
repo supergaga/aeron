@@ -134,6 +134,7 @@ channel (e.g. replay channel for Archive). (https://github.com/aeron-io/aeron/is
 * **[Java]** Upgrade to `ASM` 9.11.
 * **[Java]** Upgrade to `JGit` 7.8.0.202609011348-r.
 * **[Java]** Upgrade to `AsciidoctorJ` 3.0.1.
+* **[Java]** Upgrade to `JSON` 20260814.
 * **[C]** Upgrade to `CMake` 4.4.4.
 
 == 1.53.3 (2026-09-25)
