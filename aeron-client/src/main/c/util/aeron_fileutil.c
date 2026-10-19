@@ -50,7 +50,6 @@
 
 #if defined(AERON_COMPILER_MSVC)
 
-#include <windows.h>
 #include <winternl.h>
 #include <stdbool.h>
 #include <stdint.h>
