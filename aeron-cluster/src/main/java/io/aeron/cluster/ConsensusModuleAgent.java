@@ -2511,6 +2511,14 @@ final class ConsensusModuleAgent
                 }
                 workCount += ingressAdapter.poll();
             }
+            else if (ConsensusModule.State.SNAPSHOT == state)
+            {
+                if (0 == serviceCount && logPublisher.position() <= commitPosition.getPlain())
+                {
+                    snapshotOnServiceAck(commitPosition.getPlain(), clusterClock.time(), ServiceAck.EMPTY_SERVICE_ACKS);
+                    workCount += 1;
+                }
+            }
 
             workCount += updateLeaderPosition(nowNs);
         }
@@ -2651,14 +2659,6 @@ final class ConsensusModuleAgent
             }
 
             return 1;
-        }
-        else if (ConsensusModule.State.SNAPSHOT == state)
-        {
-            if (0 == serviceCount && logPublisher.position() <= commitPosition.getWeak())
-            {
-                final long timestamp = clusterClock.time();
-                snapshotOnServiceAck(commitPosition.getWeak(), timestamp, ServiceAck.EMPTY_SERVICE_ACKS);
-            }
         }
         else if (ConsensusModule.State.SUSPENDED == state)
         {
