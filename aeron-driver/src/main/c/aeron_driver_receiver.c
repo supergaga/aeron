@@ -53,14 +53,14 @@ int aeron_driver_receiver_init(
         receiver->recv_buffers.iov[i].iov_base = receiver->recv_buffers.buffers[i] + offset;
         receiver->recv_buffers.iov[i].iov_len = AERON_DRIVER_RECEIVER_MAX_UDP_PACKET_LENGTH;
 
-        receiver->mmsghdr[i].msg_hdr.msg_name = &receiver->recv_buffers.addrs[i];
-        receiver->mmsghdr[i].msg_hdr.msg_namelen = sizeof(receiver->recv_buffers.addrs[i]);
-        receiver->mmsghdr[i].msg_hdr.msg_iov = &receiver->recv_buffers.iov[i];
-        receiver->mmsghdr[i].msg_hdr.msg_iovlen = 1;
-        receiver->mmsghdr[i].msg_hdr.msg_flags = 0;
-        receiver->mmsghdr[i].msg_hdr.msg_control = NULL;
-        receiver->mmsghdr[i].msg_hdr.msg_controllen = 0;
-        receiver->mmsghdr[i].msg_len = 0;
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_name = &receiver->recv_buffers.addrs[i];
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_namelen = sizeof(receiver->recv_buffers.addrs[i]);
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_iov = &receiver->recv_buffers.iov[i];
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_iovlen = 1;
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_flags = 0;
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_control = NULL;
+        receiver->recv_buffers.mmsghdr[i].msg_hdr.msg_controllen = 0;
+        receiver->recv_buffers.mmsghdr[i].msg_len = 0;
     }
 
     if (aeron_udp_channel_data_paths_init(
@@ -253,7 +253,7 @@ int aeron_driver_receiver_do_work(void *clientd)
     int64_t bytes_received = 0;
     int poll_result = receiver->poller_poll_func(
         &receiver->poller,
-        receiver->mmsghdr,
+        receiver->recv_buffers.mmsghdr,
         receiver->recv_buffers.vector_capacity,
         &bytes_received,
         receiver->data_paths.recv_func,

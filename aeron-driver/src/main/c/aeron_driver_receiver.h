@@ -63,6 +63,7 @@ typedef struct aeron_driver_receiver_stct
         uint8_t *buffers[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
         struct iovec iov[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
         struct sockaddr_storage addrs[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
+        struct mmsghdr mmsghdr[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
     }
     recv_buffers;
 
@@ -82,7 +83,6 @@ typedef struct aeron_driver_receiver_stct
     }
     pending_setups;
 
-    struct mmsghdr mmsghdr[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
     aeron_udp_channel_data_paths_t data_paths;
 
     aeron_driver_context_t *context;
