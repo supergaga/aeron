@@ -436,17 +436,12 @@ static inline int aeron_udp_channel_transport_recvmsg(
         char buf[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX][CMSG_SPACE(sizeof(struct timespec))],
         sizeof(struct cmsghdr));
 
-    for (int i = 0; i < (int)vlen; i++)
+    if (transport->timestamp_flags)
     {
-        if (transport->timestamp_flags)
+        for (int i = 0; i < (int)vlen; i++)
         {
             msgvec[i].msg_hdr.msg_control = (void *)buf[i];
             msgvec[i].msg_hdr.msg_controllen = CMSG_LEN(sizeof(struct timespec));
-        }
-        else
-        {
-            msgvec[i].msg_hdr.msg_control = NULL;
-            msgvec[i].msg_hdr.msg_controllen = 0;
         }
     }
 #endif
@@ -491,6 +486,13 @@ static inline int aeron_udp_channel_transport_recvmsg(
             msgvec[i].msg_hdr.msg_name,
             media_rcv_timestamp);
         *bytes_rcved += msgvec[i].msg_len;
+
+        msgvec[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
+#if defined(HAS_MEDIA_RCV_TIMESTAMPS)
+        msgvec[i].msg_hdr.msg_control = NULL;
+        msgvec[i].msg_hdr.msg_controllen = 0;
+#endif
+
         work_count++;
     }
 
@@ -583,17 +585,12 @@ int aeron_udp_channel_transport_recvmmsg(
             char buf[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX][CMSG_SPACE(sizeof(struct timespec))],
             sizeof(struct cmsghdr));
 
-        for (int i = 0; i < (int)vlen; i++)
+        if (transport->timestamp_flags)
         {
-            if (transport->timestamp_flags)
+            for (int i = 0; i < (int)vlen; i++)
             {
                 msgvec[i].msg_hdr.msg_control = (void *)buf[i];
                 msgvec[i].msg_hdr.msg_controllen = CMSG_LEN(sizeof(struct timespec));
-            }
-            else
-            {
-                msgvec[i].msg_hdr.msg_control = NULL;
-                msgvec[i].msg_hdr.msg_controllen = 0;
             }
         }
 #endif
@@ -625,7 +622,7 @@ int aeron_udp_channel_transport_recvmmsg(
         }
         else
         {
-            for (size_t i = 0, length = (size_t)result; i < length; i++)
+            for (int i = 0; i < result; i++)
             {
 #if defined(HAS_MEDIA_RCV_TIMESTAMPS)
                 struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msgvec[i].msg_hdr);
@@ -649,6 +646,12 @@ int aeron_udp_channel_transport_recvmmsg(
                     msgvec[i].msg_hdr.msg_name,
                     media_rcv_timestamp);
                 *bytes_rcved += msgvec[i].msg_len;
+
+                msgvec[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
+#if defined(HAS_MEDIA_RCV_TIMESTAMPS)
+                msgvec[i].msg_hdr.msg_control = NULL;
+                msgvec[i].msg_hdr.msg_controllen = 0;
+#endif
             }
 
             return result;
