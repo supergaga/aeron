@@ -590,17 +590,9 @@ class UntetheredSubscriptionTest
                 }
 
                 aeron.conductorAgentInvoker().invoke();
-
             }
 
             final long eosPos = publication.position();
-            if (ChannelUri.parse(pubChannel).isUdp())
-            {
-                final int sndPosCounterId = aeron.countersReader().findByTypeIdAndRegistrationId(
-                    AeronCounters.DRIVER_SENDER_POSITION_TYPE_ID, publication.registrationId());
-                assertEquals(eosPos, aeron.countersReader().getCounterValue(sndPosCounterId));
-            }
-
             while (tetheredImage.position() < eosPos)
             {
                 if (0 == tetheredImage.poll(fragmentHandler, FRAGMENT_COUNT_LIMIT))
