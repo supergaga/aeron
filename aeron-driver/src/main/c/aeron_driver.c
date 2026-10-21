@@ -900,6 +900,16 @@ int aeron_driver_init(aeron_driver_t **driver, aeron_driver_context_t *context)
         goto error;
     }
 
+    if (_driver->context->network_publication_max_messages_per_send > _driver->context->sender_io_vector_capacity)
+    {
+        AERON_SET_ERR(
+            EINVAL,
+            "network_publication_max_messages_per_send may not exceed sender_io_vector_capacity (%" PRIu32 "): value=%" PRIu32,
+            _driver->context->sender_io_vector_capacity,
+            _driver->context->network_publication_max_messages_per_send);
+        goto error;
+    }
+
     if (aeron_driver_validate_sufficient_socket_buffer_lengths(_driver) < 0)
     {
         goto error;

@@ -32,6 +32,9 @@ extern "C"
 #define PUB_URI "aeron:udp?endpoint=localhost:24325"
 #define STREAM_ID (117)
 
+using testing::_;
+using testing::HasSubstr;
+
 class CSystemTest : public CSystemTestBase, public testing::TestWithParam<std::tuple<const char *>>
 {
 protected:
@@ -1714,4 +1717,24 @@ TEST_F(CClientHeartbeatTest, shouldFindClientHeartbeatCounterInLastCounterSlot)
 
     aeron_close(client);
     aeron_context_close(context);
+}
+
+TEST_P(CSystemTest, shouldValidatePublicationVectorCapacityAgainst)
+{
+    aeron_driver_context_t *context = nullptr;
+    aeron_driver_t *driver = nullptr;
+    char aeron_dir[AERON_MAX_PATH] = { 0 };
+    aeron_temp_filename(aeron_dir, sizeof(aeron_dir));
+
+    ASSERT_EQ(aeron_driver_context_init(&context), 0);
+    aeron_driver_context_set_dir(context, aeron_dir);
+    aeron_driver_context_set_sender_io_vector_capacity(context, 2);
+    aeron_driver_context_set_network_publication_max_messages_per_send(context, 5);
+
+    EXPECT_EQ(-1, aeron_driver_init(&driver, context));
+    EXPECT_EQ(nullptr, driver);
+    EXPECT_EQ(EINVAL, aeron_errcode());
+    EXPECT_THAT(aeron_errmsg(), HasSubstr("network_publication_max_messages_per_send may not exceed sender_io_vector_capacity (2): value=5"));
+
+    aeron_driver_context_close(context);
 }
