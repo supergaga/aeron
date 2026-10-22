@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         java: [ '17', '21', '25' ]
-        os: ['ubuntu-24.04', 'windows-latest', 'macos-15']
+        os: ['ubuntu-26.04', 'windows-latest', 'macos-15']
     steps:
       - name: Use faster temporary storage (Windows)
         if: runner.os == 'Windows'
@@ -159,7 +159,7 @@ jobs:
       fail-fast: false
       matrix:
         java: [ '17' ]
-        os: [ 'ubuntu-24.04' ]
+        os: [ 'ubuntu-26.04' ]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -206,9 +206,9 @@ jobs:
           name: crash-logs-topology-${{ matrix.os }}-java-${{ matrix.java }}
           path: ${{ steps.copy_test_logs.outputs.file }}
 
-  cpp-gcc-2404-build:
+  cpp-gcc-build:
     name: C++ GCC ${{ matrix.version }} (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -268,12 +268,12 @@ jobs:
 
   cpp-gcc-rocky-build:
     name: C++ Rocky 9
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        version: [ '13' ]
+        version: [ '14' ]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -298,9 +298,9 @@ jobs:
           name: crash-logs-gcc-rhel-${{ matrix.version }}
           path: ${{ steps.copy_test_logs.outputs.file }}
 
-  cpp-clang-ubuntu-2404-build:
+  cpp-clang-ubuntu-build:
     name: C++ Clang ${{ matrix.version }} (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -333,7 +333,7 @@ jobs:
           echo 'Acquire::Retries "${INSTALL_COMPILER_RETRIES}";' | sudo tee -a /etc/apt/apt.conf.d/99retries
           sudo mkdir -p /etc/apt/keyrings/
           curl --retry ${INSTALL_COMPILER_RETRIES} https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          echo "deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/resolute/ llvm-toolchain-resolute-${{ matrix.version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
           sudo apt-get install -y clang-${{ matrix.version }} libbsd-dev uuid-dev
       - name: Setup small temp file system
@@ -362,7 +362,7 @@ jobs:
 
   cpp-clang-debug-build:
     name: C++ Clang ${{ matrix.version }} debug build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -395,7 +395,7 @@ jobs:
           echo 'Acquire::Retries "${INSTALL_COMPILER_RETRIES}";' | sudo tee -a /etc/apt/apt.conf.d/99retries
           sudo mkdir -p /etc/apt/keyrings/
           curl --retry ${INSTALL_COMPILER_RETRIES} https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          echo "deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/resolute/ llvm-toolchain-resolute-${{ matrix.version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
           sudo apt-get install -y clang-${{ matrix.version }} libbsd-dev uuid-dev
       - name: Build
