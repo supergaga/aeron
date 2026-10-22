@@ -207,7 +207,7 @@ jobs:
           path: ${{ steps.copy_test_logs.outputs.file }}
 
   cpp-gcc-build:
-    name: C++ GCC ${{ matrix.version }} (Ubuntu 24.04)
+    name: C++ GCC ${{ matrix.version }} (Ubuntu 26.04)
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
@@ -263,7 +263,7 @@ jobs:
         if: always() && steps.copy_test_logs.outputs.file == 'build/distributions/test_logs.tbz2'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: crash-logs-gcc-2404-${{ matrix.version }}
+          name: crash-logs-gcc-${{ matrix.version }}
           path: ${{ steps.copy_test_logs.outputs.file }}
 
   cpp-gcc-rocky-build:
@@ -295,17 +295,79 @@ jobs:
         if: always() && steps.copy_test_logs.outputs.file == 'build/distributions/test_logs.tbz2'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: crash-logs-gcc-rhel-${{ matrix.version }}
+          name: crash-logs-gcc-rocky-${{ matrix.version }}
+          path: ${{ steps.copy_test_logs.outputs.file }}
+
+  cpp-clang-ubuntu-2404-build:
+    name: C++ Clang ${{ matrix.version }} (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ '17', '18', '19', '20' ]
+    env:
+      CC: clang-${{ matrix.version }}
+      CXX: clang++-${{ matrix.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+      - name: Setup java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: 'zulu'
+          java-version: ${{ env.JAVA_VERSION }}
+      - name: Setup BUILD_JAVA_HOME & BUILD_JAVA_VERSION
+        run: |
+          java -Xinternalversion
+          echo "BUILD_JAVA_HOME=${JAVA_HOME}" >> $GITHUB_ENV
+          echo "BUILD_JAVA_VERSION=${{ env.JAVA_VERSION }}" >> $GITHUB_ENV
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        with:
+          cache-provider: basic
+      - name: Install compiler
+        run: |
+          echo 'Acquire::Retries "${INSTALL_COMPILER_RETRIES}";' | sudo tee -a /etc/apt/apt.conf.d/99retries
+          sudo mkdir -p /etc/apt/keyrings/
+          curl --retry ${INSTALL_COMPILER_RETRIES} https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm-snapshot.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-${{ matrix.version }} libbsd-dev uuid-dev
+      - name: Setup small temp file system
+        run: |
+          sudo mkdir -p /mnt/tmp_aeron_dir
+          sudo mount -t tmpfs -o size=50M,mode=777 tmpfs /mnt/tmp_aeron_dir
+      - name: Build
+        run: cppbuild/cppbuild --c-warnings-as-errors --cxx-warnings-as-errors
+      - name: Remove small temp file system
+        if: always()
+        run: |
+          sudo umount /mnt/tmp_aeron_dir
+          sudo rm -rf /mnt/tmp_aeron_dir
+      - name: Copy test logs
+        id: copy_test_logs
+        if: failure()
+        run: |
+          echo "file=build/distributions/test_logs.tbz2" >> $GITHUB_OUTPUT
+          ./gradlew tarTestLogs
+      - name: Upload crash logs
+        if: always() && steps.copy_test_logs.outputs.file == 'build/distributions/test_logs.tbz2'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crash-logs-clang-2404-${{ matrix.version }}
           path: ${{ steps.copy_test_logs.outputs.file }}
 
   cpp-clang-ubuntu-build:
-    name: C++ Clang ${{ matrix.version }} (Ubuntu 24.04)
+    name: C++ Clang ${{ matrix.version }} (Ubuntu 26.04)
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        version: [ '17', '18', '19', '20', '21', '22', '23' ]
+        version: [ '21', '22', '23' ]
     env:
       CC: clang-${{ matrix.version }}
       CXX: clang++-${{ matrix.version }}
@@ -357,7 +419,7 @@ jobs:
         if: always() && steps.copy_test_logs.outputs.file == 'build/distributions/test_logs.tbz2'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: crash-logs-clang-2404-${{ matrix.version }}
+          name: crash-logs-clang-${{ matrix.version }}
           path: ${{ steps.copy_test_logs.outputs.file }}
 
   cpp-clang-debug-build:
