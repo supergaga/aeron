@@ -461,10 +461,10 @@ int aeron_agent_stop(aeron_agent_runner_t *runner)
         return -1;
     }
 
+    AERON_SET_RELEASE(runner->running, false);
+
     if (AERON_AGENT_STATE_STARTED == runner->state)
     {
-        AERON_SET_RELEASE(runner->running, false);
-
         runner->state = AERON_AGENT_STATE_STOPPING;
 
         int pthread_result;
@@ -476,15 +476,9 @@ int aeron_agent_stop(aeron_agent_runner_t *runner)
 
         runner->state = AERON_AGENT_STATE_STOPPED;
     }
-    else if (AERON_AGENT_STATE_MANUAL == runner->state || AERON_AGENT_STATE_INITED == runner->state)
+    else if (AERON_AGENT_STATE_MANUAL == runner->state)
     {
-        AERON_SET_RELEASE(runner->running, false);
         runner->state = AERON_AGENT_STATE_STOPPED;
-    }
-    else
-    {
-        AERON_SET_ERR(EINVAL, "cannot stop runner in state: %" PRIu8, runner->state);
-        return -1;
     }
 
     return 0;

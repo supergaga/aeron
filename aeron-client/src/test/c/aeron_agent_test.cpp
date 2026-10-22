@@ -104,7 +104,6 @@ TEST_F(AgentTest, shouldRejectInitIfRoleNameIsNull)
 TEST_F(AgentTest, shouldRejectInitIfDoWorkIsNull)
 {
     aeron_agent_on_start_func_t on_start = [](void *state, const char *role_name){};
-    aeron_agent_do_work_func_t do_work = [](void *){ return 0; };
     aeron_agent_on_close_func_t on_close = [](void *){};
 
     aeron_agent_runner_t runner;
@@ -267,31 +266,22 @@ INSTANTIATE_TEST_SUITE_P(
     StateTest2,
     testing::Values(
         AERON_AGENT_STATE_UNUSED,
+        AERON_AGENT_STATE_INITED,
         AERON_AGENT_STATE_STOPPING,
         AERON_AGENT_STATE_STOPPED));
 
-TEST_P(StateTest2, foo)
+TEST_P(StateTest2, shouldMarkAsNotRunningWhenStoppingInUnexpectedStates)
 {
     aeron_agent_runner_t runner;
     runner.running = true;
     runner.state = GetParam();
 
-    EXPECT_EQ(-1, aeron_agent_stop(&runner));
-    EXPECT_EQ(EINVAL, aeron_errcode());
-    EXPECT_THAT(aeron_errmsg(), testing::HasSubstr("cannot stop runner in state"));
-    EXPECT_TRUE(runner.running);
-    EXPECT_EQ(GetParam(), runner.state);
-}
-
-TEST_F(AgentTest, shouldStopAgentInInitedState)
-{
-    aeron_agent_runner_t runner;
-    runner.running = true;
-    runner.state = AERON_AGENT_STATE_INITED;
+    aeron_err_clear();
 
     EXPECT_EQ(0, aeron_agent_stop(&runner));
+    EXPECT_EQ(0, aeron_errcode());
     EXPECT_FALSE(runner.running);
-    EXPECT_EQ(AERON_AGENT_STATE_STOPPED, runner.state);
+    EXPECT_EQ(GetParam(), runner.state);
 }
 
 TEST_F(AgentTest, shouldStopAgentInManualState)
