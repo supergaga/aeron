@@ -19,8 +19,8 @@
 #define _GNU_SOURCE
 #endif
 
+#include <inttypes.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdio.h>
 #include <errno.h>
 
@@ -405,7 +405,13 @@ static void *agent_main(void *arg)
 
     while (aeron_agent_is_running(runner))
     {
-        runner->idle_strategy(runner->idle_strategy_state, runner->do_work(runner->agent_state));
+        int rc = runner->do_work(runner->agent_state);
+        if (rc < 0)
+        {
+            aeron_err_clear();
+            break;
+        }
+        runner->idle_strategy(runner->idle_strategy_state, rc);
     }
 
     return NULL;
@@ -416,6 +422,15 @@ int aeron_agent_start(aeron_agent_runner_t *runner)
     if (NULL == runner)
     {
         AERON_SET_ERR(EINVAL, "%s", "runner is null");
+        return -1;
+    }
+
+    if (AERON_AGENT_STATE_INITED != runner->state)
+    {
+        AERON_SET_ERR(
+            EINVAL,
+            "runner must be in AERON_AGENT_STATE_INITED(%" PRIu8 ") in order to start state=%" PRIu8,
+            AERON_AGENT_STATE_INITED, runner->state);
         return -1;
     }
 
@@ -442,14 +457,14 @@ int aeron_agent_stop(aeron_agent_runner_t *runner)
 {
     if (NULL == runner)
     {
-        AERON_SET_ERR(EINVAL, "%s", "invalid argument");
+        AERON_SET_ERR(EINVAL, "%s", "runner is null");
         return -1;
     }
 
-    AERON_SET_RELEASE(runner->running, false);
-
     if (AERON_AGENT_STATE_STARTED == runner->state)
     {
+        AERON_SET_RELEASE(runner->running, false);
+
         runner->state = AERON_AGENT_STATE_STOPPING;
 
         int pthread_result;
@@ -461,9 +476,15 @@ int aeron_agent_stop(aeron_agent_runner_t *runner)
 
         runner->state = AERON_AGENT_STATE_STOPPED;
     }
-    else if (AERON_AGENT_STATE_MANUAL == runner->state)
+    else if (AERON_AGENT_STATE_MANUAL == runner->state || AERON_AGENT_STATE_INITED == runner->state)
     {
+        AERON_SET_RELEASE(runner->running, false);
         runner->state = AERON_AGENT_STATE_STOPPED;
+    }
+    else
+    {
+        AERON_SET_ERR(EINVAL, "cannot stop runner in state: %" PRIu8, runner->state);
+        return -1;
     }
 
     return 0;
