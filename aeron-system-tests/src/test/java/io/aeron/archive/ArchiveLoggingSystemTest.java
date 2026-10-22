@@ -50,9 +50,11 @@ import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.ArchiveSystemTests.consume;
 import static io.aeron.archive.ArchiveSystemTests.offer;
 import static io.aeron.archive.codecs.SourceLocation.LOCAL;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 @ExtendWith(InterruptingTestCallback.class)
@@ -114,8 +116,10 @@ class ArchiveLoggingSystemTest
                 Archive archive = Archive.launch(archiveCtx);
                 Aeron aeronClient = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDirectoryName));
                 AeronArchive aeronArchiveClient = AeronArchive.connect(
-                    TestContexts.localhostAeronArchive().aeron(aeronClient)))
+                    TestContexts.localhostAeronArchive().aeron(aeronClient).ownsAeronClient(false)))
             {
+                final CountersReader counters = aeronClient.countersReader();
+
                 systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
                 systemTestWatcher.dataCollector().add(archiveCtx.archiveDir());
 
@@ -132,7 +136,6 @@ class ArchiveLoggingSystemTest
                 {
                     sessionId = publication.sessionId();
 
-                    final CountersReader counters = aeronClient.countersReader();
                     final int counterId = Tests.awaitRecordingCounterId(
                         counters,
                         sessionId,
@@ -193,6 +196,11 @@ class ArchiveLoggingSystemTest
                         originalChannel,
                         sourceIdentity) -> assertEquals(startPosition, newStopPosition));
                 assertEquals(1, count);
+
+                aeronArchiveClient.close();
+
+                // Await session close event
+                Tests.await(() -> 0L == archive.context().controlSessionsCounter().get());
             }
 
             while (0 < EventConfiguration.eventReader().ringBuffer().size())
@@ -203,17 +211,18 @@ class ArchiveLoggingSystemTest
             final Path logFile = tempDir.resolve("archive.log");
             reader.writeToFile(logFile.toString());
             final String content = Files.readString(logFile);
-            assertTrue(content.contains("replayChannel=... (truncated)"));
-            assertTrue(content.contains("CMD_IN_START_RECORDING "));
-            assertTrue(content.contains("CMD_OUT_RESPONSE"));
-            assertTrue(content.contains("CMD_IN_STOP_RECORDING"));
-            assertTrue(content.contains("CMD_IN_FIND_LAST_MATCHING_RECORD"));
-            assertTrue(content.contains("CMD_IN_REPLAY"));
-            assertTrue(content.contains("CMD_IN_CLOSE_SESSION"));
-            assertTrue(content.contains("CONTROL_SESSION_STATE_CHANGE"));
-            assertTrue(content.contains("RECORDING_SESSION_STATE_CHANGE"));
-            assertTrue(content.contains("REPLAY_SESSION_STATE_CHANGE"));
-            assertTrue(content.contains("RECORDING_SIGNAL"));
+            assertThat(content, allOf(
+                containsString("replayChannel=... (truncated)"),
+                containsString("CMD_IN_START_RECORDING "),
+                containsString("CMD_OUT_RESPONSE"),
+                containsString("CMD_IN_STOP_RECORDING"),
+                containsString("CMD_IN_FIND_LAST_MATCHING_RECORD"),
+                containsString("CMD_IN_REPLAY"),
+                containsString("CMD_IN_CLOSE_SESSION"),
+                containsString("CONTROL_SESSION_STATE_CHANGE"),
+                containsString("RECORDING_SESSION_STATE_CHANGE"),
+                containsString("REPLAY_SESSION_STATE_CHANGE"),
+                containsString("RECORDING_SIGNAL")));
         }
         finally
         {
