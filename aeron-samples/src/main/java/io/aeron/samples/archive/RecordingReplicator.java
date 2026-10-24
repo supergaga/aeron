@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ReplicationParams;
 import io.aeron.archive.codecs.RecordingSignal;
+import org.agrona.Strings;
 
 import java.util.Scanner;
 
@@ -39,8 +40,8 @@ import static org.agrona.SystemUtil.loadPropertiesFiles;
  * <p>
  * Configuration properties:
  * <ul>
- *     <li>{@link #SOURCE_RECORDING_ID_PROP_NAME} - required, specifies id of the source recording to be replicated.</li>
- *     <li>{@link #DESTINATION_RECORDING_ID_PROP_NAME} - optional, specifies id of the destination recording to be
+ *     <li>{@link #SOURCE_RECORDING_ID_PROP_NAME} - required, specifies id of source recording to be replicated.</li>
+ *     <li>{@link #DESTINATION_RECORDING_ID_PROP_NAME} - optional, specifies id of destination recording to be
  *     replaced. If omitted or set to {@link Aeron#NULL_VALUE} then the new recording will be created in the destination
  *     Archive.</li>
  *     <li>{@link #SOURCE_ARCHIVE_CONTROL_REQUEST_CHANNEL} - required, specifies the control request channel of the
@@ -188,31 +189,23 @@ public final class RecordingReplicator
 
             signalCapture.reset();
             aeronArchive.truncateRecording(dstRecordingId, recordingDescriptor.startPosition());
-            signalCapture.awaitSignal(aeronArchive, dstRecordingId, RecordingSignal.DELETE);
+            signalCapture.awaitSignalForRecordingId(aeronArchive, dstRecordingId, RecordingSignal.DELETE);
         }
 
         final ReplicationParams replicationParams = new ReplicationParams()
             .replicationChannel(replicationChannel)
             .dstRecordingId(dstRecordingId);
-        signalCapture.reset();
-        aeronArchive.replicate(srcRecordingId, srcArchiveRequestStreamId, srcArchiveRequestChannel, replicationParams);
-
-        final long targetRecordingId;
-        if (NULL_VALUE == dstRecordingId)
-        {
-            signalCapture.awaitSignal(aeronArchive, RecordingSignal.SYNC);
-            targetRecordingId = signalCapture.recordingId();
-        }
-        else
-        {
-            signalCapture.awaitSignal(aeronArchive, dstRecordingId, RecordingSignal.SYNC);
-            targetRecordingId = dstRecordingId;
-        }
+        final long replicationId = aeronArchive.replicate(
+            srcRecordingId, srcArchiveRequestStreamId, srcArchiveRequestChannel, replicationParams);
 
         signalCapture.reset();
-        signalCapture.awaitSignal(aeronArchive, targetRecordingId, RecordingSignal.REPLICATE_END);
+        signalCapture.awaitSignalForCorrelationId(aeronArchive, replicationId, RecordingSignal.SYNC);
+        final long recordingId = signalCapture.recordingId();
 
-        return targetRecordingId;
+        signalCapture.reset();
+        signalCapture.awaitSignalForCorrelationId(aeronArchive, replicationId, RecordingSignal.REPLICATE_END);
+
+        return recordingId;
     }
 
     /**
@@ -257,14 +250,14 @@ public final class RecordingReplicator
                 replicationChannel);
 
             final long newRecordingId = replicator.replicate();
-            System.out.println("Source recording=" + srcRecordingId + " replicated to the destination recording=" +
+            System.out.println("Source recordingId=" + srcRecordingId + " replicated to the destination recordingId=" +
                 newRecordingId + ".");
         }
     }
 
     private static String trimToNull(final String value)
     {
-        if (null == value || value.isEmpty())
+        if (Strings.isEmpty(value))
         {
             return null;
         }

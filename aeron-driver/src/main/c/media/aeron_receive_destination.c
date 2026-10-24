@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#if defined(__linux__)
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include "util/aeron_error.h"
 #include "aeron_driver_receiver.h"
@@ -44,16 +49,35 @@ int aeron_receive_destination_create(
     _destination->transport.data_paths = _destination->data_paths;
     _destination->local_sockaddr_indicator.counter_id = AERON_NULL_COUNTER_ID;
 
-    if (context->udp_channel_transport_bindings->init_func(
-        &_destination->transport,
-        &destination_channel->remote_data,
-        &destination_channel->local_data,
-        NULL,
-        destination_channel->interface_index,
-        0 != destination_channel->multicast_ttl ? destination_channel->multicast_ttl : context->multicast_ttl,
+    if (context->receiver_port_manager->get_managed_port(
+        context->receiver_port_manager->state,
+        &_destination->bind_addr,
+        destination_channel,
+        &destination_channel->remote_data) < 0)
+    {
+        AERON_APPEND_ERR("uri = %s", destination_channel->original_uri);
+        aeron_receive_destination_delete(_destination, counters_manager);
+        return -1;
+    }
+
+    _destination->port_manager = context->receiver_port_manager;
+
+    aeron_udp_channel_transport_params_t transport_params = {
         socket_rcvbuf,
         socket_sndbuf,
+        aeron_udp_channel_socket_tos(endpoint_channel, context->socket_tos),
+        context->mtu_length,
+        destination_channel->interface_index,
+        0 != destination_channel->multicast_ttl ? destination_channel->multicast_ttl : context->multicast_ttl,
         is_media_timestamping,
+    };
+
+    if (context->udp_channel_transport_bindings->init_func(
+        &_destination->transport,
+        &_destination->bind_addr,
+        &destination_channel->local_data,
+        NULL,
+        &transport_params,
         context,
         AERON_UDP_CHANNEL_TRANSPORT_AFFINITY_RECEIVER) < 0)
     {
@@ -110,7 +134,7 @@ int aeron_receive_destination_create(
 
     _destination->has_control_addr = destination_channel->is_multicast || destination_channel->has_explicit_control;
 
-    aeron_counter_set_ordered(
+    aeron_counter_set_release(
         _destination->local_sockaddr_indicator.value_addr, AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE);
 
     // Only take ownership of the destination_channel if the receive destination is successfully created.
@@ -125,10 +149,17 @@ void aeron_receive_destination_delete(
 {
     if (NULL != counters_manager && AERON_NULL_COUNTER_ID != destination->local_sockaddr_indicator.counter_id)
     {
-        aeron_counter_set_ordered(
+        aeron_counter_set_release(
             destination->local_sockaddr_indicator.value_addr, AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_CLOSING);
         aeron_counters_manager_free(counters_manager, destination->local_sockaddr_indicator.counter_id);
         destination->local_sockaddr_indicator.counter_id = AERON_NULL_COUNTER_ID;
+    }
+
+    if (NULL != destination->port_manager)
+    {
+        destination->port_manager->free_managed_port(
+            destination->port_manager->state,
+            &destination->bind_addr);
     }
 
     aeron_udp_channel_delete(destination->conductor_fields.udp_channel);

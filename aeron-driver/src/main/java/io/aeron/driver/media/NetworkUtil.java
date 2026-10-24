@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import java.net.*;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.Objects;
 
 import static java.lang.Boolean.compare;
 import static java.lang.Integer.compare;
@@ -33,6 +34,10 @@ import static java.util.Collections.sort;
  */
 public final class NetworkUtil
 {
+    private NetworkUtil()
+    {
+    }
+
     /**
      * Search for a list of network interfaces that match the specified address and subnet prefix.
      * The results will be ordered by the length of the subnet prefix
@@ -240,7 +245,7 @@ public final class NetworkUtil
         throw new IllegalArgumentException("how many bytes does an IP address have again?");
     }
 
-    private static int prefixLengthToIpV4Mask(final int subnetPrefix)
+    static int prefixLengthToIpV4Mask(final int subnetPrefix)
     {
         return 0 == subnetPrefix ? 0 : -(1 << 32 - subnetPrefix);
     }
@@ -295,6 +300,16 @@ public final class NetworkUtil
             {
                 return compare(isLoopback, other.isLoopback);
             }
+        }
+
+        public boolean equals(final Object o)
+        {
+            return o instanceof FilterResult && compareTo((FilterResult)o) == 0;
+        }
+
+        public int hashCode()
+        {
+            return Objects.hash(interfaceAddress, networkInterface, isLoopback);
         }
     }
 }

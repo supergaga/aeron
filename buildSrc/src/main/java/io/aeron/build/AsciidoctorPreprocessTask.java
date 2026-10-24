@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import org.asciidoctor.Options;
 import org.asciidoctor.SafeMode;
 import org.asciidoctor.ast.Document;
 import org.asciidoctor.extension.PreprocessorReader;
+import org.asciidoctor.extension.Reader;
 import org.asciidoctor.log.Severity;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.tasks.Input;
@@ -49,7 +50,8 @@ public class AsciidoctorPreprocessTask extends DefaultTask
 
     private final File source = new File(sampleBaseDir, "/src/docs/asciidoc");
 
-    private final File target = new File(getProject().getBuildDir(), "/asciidoc/asciidoc");
+    private final File target = new File(
+        getProject().getLayout().getBuildDirectory().getAsFile().get(), "/asciidoc/asciidoc");
 
     // Has a slightly silly name to avoid name clashes in the build script.
     private String versionText;
@@ -57,7 +59,7 @@ public class AsciidoctorPreprocessTask extends DefaultTask
     /**
      * Base directory containing the samples code.
      *
-     * @return base samples directory.
+     * @return base directory for samples.
      */
     @Input
     public String getSampleBaseDir()
@@ -68,7 +70,7 @@ public class AsciidoctorPreprocessTask extends DefaultTask
     /**
      * Directory containing the samples source code.
      *
-     * @return sources within the samples directory.
+     * @return sources within the directory for samples.
      */
     @Input
     public String getSampleSourceDir()
@@ -171,7 +173,7 @@ public class AsciidoctorPreprocessTask extends DefaultTask
                 asciidoctor.javaExtensionRegistry().preprocessor(
                     new org.asciidoctor.extension.Preprocessor()
                     {
-                        public void process(final Document document, final PreprocessorReader reader)
+                        public Reader process(final Document document, final PreprocessorReader reader)
                         {
                             String line;
                             while (null != (line = reader.readLine()))
@@ -185,6 +187,8 @@ public class AsciidoctorPreprocessTask extends DefaultTask
                                     output.println(line);
                                 }
                             }
+
+                            return reader;
                         }
                     });
 
@@ -199,7 +203,7 @@ public class AsciidoctorPreprocessTask extends DefaultTask
 
         errors.forEach((key, value) -> System.out.println("file: " + key + ", error count: " + value));
 
-        if (0 < errors.size())
+        if (!errors.isEmpty())
         {
             throw new Exception("failed due to errors in parsing");
         }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,12 +36,15 @@ aeron_publication_image_state_t;
 
 typedef struct aeron_publication_image_connection_stct
 {
+    uint8_t padding_before[AERON_CACHE_LINE_LENGTH];
     struct sockaddr_storage resolved_control_address_for_implicit_unicast_channels;
     aeron_receive_destination_t *destination;  // Not owned.
     struct sockaddr_storage *control_addr;     // Not owned.
     bool is_eos;
     int64_t time_of_last_activity_ns;
     int64_t time_of_last_frame_ns;
+    int64_t eos_position;
+    uint8_t padding_after[AERON_CACHE_LINE_LENGTH];
 }
 aeron_publication_image_connection_t;
 
@@ -57,8 +60,17 @@ typedef struct aeron_publication_image_stct
         aeron_subscribable_t subscribable;
         int64_t time_of_last_state_change_ns;
         int64_t liveness_timeout_ns;
+        int64_t untethered_window_limit_timeout_ns;
+        int64_t untethered_linger_timeout_ns;
+        int64_t untethered_resting_timeout_ns;
         int64_t clean_position;
+        int32_t loss_report_term_id;
+        int32_t loss_report_term_offset;
+        size_t loss_report_length;
+        aeron_loss_reporter_t *loss_report;
+        aeron_loss_reporter_entry_offset_t loss_report_entry_offset;
         aeron_receive_channel_endpoint_t *endpoint;
+        uint8_t flags;
     }
     conductor_fields;
 
@@ -76,11 +88,11 @@ typedef struct aeron_publication_image_stct
     size_t source_identity_length;
     char source_identity[AERON_NETUTIL_FORMATTED_MAX_LENGTH];
     aeron_loss_detector_t loss_detector;
+    aeron_feedback_delay_generator_state_t feedback_delay_state;
 
-    aeron_mapped_raw_log_t mapped_raw_log;
     aeron_position_t rcv_hwm_position;
     aeron_position_t rcv_pos_position;
-    aeron_logbuffer_metadata_t *log_meta_data;
+    aeron_atomic_counter_t rcv_naks_sent;
 
     aeron_receive_channel_endpoint_t *endpoint;
     aeron_congestion_control_strategy_t *congestion_control;
@@ -88,10 +100,11 @@ typedef struct aeron_publication_image_stct
     aeron_clock_func_t epoch_clock;
     aeron_clock_cache_t *cached_clock;
 
-    aeron_loss_reporter_t *loss_reporter;
-    aeron_loss_reporter_entry_offset_t loss_reporter_offset;
+    aeron_mapped_raw_log_t *mapped_raw_log;
+    aeron_logbuffer_metadata_t *log_meta_data;
+    const char *log_file_name;
+    size_t log_file_name_length;
 
-    char *log_file_name;
     int32_t session_id;
     int32_t stream_id;
     int32_t initial_term_id;
@@ -99,15 +112,17 @@ typedef struct aeron_publication_image_stct
     int32_t term_length;
     int32_t mtu_length;
     int32_t term_length_mask;
-    size_t log_file_name_length;
     size_t position_bits_to_shift;
-    aeron_raw_log_close_func_t raw_log_close_func;
-    aeron_raw_log_free_func_t raw_log_free_func;
-    aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change_func;
 
-    int64_t last_loss_change_number;
+    struct
+    {
+        aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change;
+        aeron_driver_publication_image_revoke_func_t publication_image_revoke;
+    } log;
+
     volatile int64_t begin_loss_change;
     volatile int64_t end_loss_change;
+    int64_t last_loss_change_number;
     int32_t loss_term_id;
     int32_t loss_term_offset;
     size_t loss_length;
@@ -121,10 +136,17 @@ typedef struct aeron_publication_image_stct
 
     int64_t last_sm_change_number;
     int64_t last_sm_position;
-    int64_t time_of_last_sm_ns;
+    int64_t next_sm_deadline_ns;
     int64_t sm_timeout_ns;
 
-    int64_t time_of_last_packet_ns;
+    volatile int64_t time_of_last_packet_ns;
+    const char *invalidation_reason;
+
+    bool is_sm_enabled;
+
+    volatile bool is_next_sm_deadline_reset_requested;
+
+    volatile int64_t response_session_id;
 
     volatile bool is_end_of_stream;
     volatile bool is_sending_eos_sm;
@@ -136,6 +158,9 @@ typedef struct aeron_publication_image_stct
     volatile int64_t *status_messages_sent_counter;
     volatile int64_t *nak_messages_sent_counter;
     volatile int64_t *loss_gap_fills_counter;
+    volatile int64_t *mapped_bytes_counter;
+    volatile int64_t *publication_images_revoked_counter;
+    volatile int64_t *invalid_packets_counter;
 }
 aeron_publication_image_t;
 
@@ -143,7 +168,7 @@ int aeron_publication_image_create(
     aeron_publication_image_t **image,
     aeron_receive_channel_endpoint_t *endpoint,
     aeron_receive_destination_t *destination,
-    aeron_driver_context_t *context,
+    aeron_driver_conductor_t *conductor,
     int64_t correlation_id,
     int32_t session_id,
     int32_t stream_id,
@@ -152,16 +177,21 @@ int aeron_publication_image_create(
     int32_t initial_term_offset,
     aeron_position_t *rcv_hwm_position,
     aeron_position_t *rcv_pos_position,
+    aeron_atomic_counter_t *rcv_naks_sent,
     aeron_congestion_control_strategy_t *congestion_control,
     struct sockaddr_storage *control_address,
     struct sockaddr_storage *source_address,
     int32_t term_buffer_length,
     int32_t sender_mtu_length,
+    uint8_t flags,
     aeron_loss_reporter_t *loss_reporter,
     bool is_reliable,
     bool is_sparse,
     bool treat_as_multicast,
-    aeron_system_counters_t *system_counters);
+    aeron_system_counters_t *system_counters,
+    aeron_mapped_raw_log_t *mapped_raw_log,
+    size_t log_file_name_length,
+    const char *log_file_name);
 
 int aeron_publication_image_close(aeron_counters_manager_t *counters_manager, aeron_publication_image_t *image);
 
@@ -178,7 +208,8 @@ int aeron_publication_image_insert_packet(
     int32_t term_offset,
     const uint8_t *buffer,
     size_t length,
-    struct sockaddr_storage *addr);
+    struct sockaddr_storage *addr,
+    struct timespec *media_receive_timestamp);
 
 int aeron_publication_image_on_rttm(
     aeron_publication_image_t *image, aeron_rttm_header_t *header, struct sockaddr_storage *addr);
@@ -201,14 +232,21 @@ void aeron_publication_image_on_time_event(
 
 void aeron_publication_image_receiver_release(aeron_publication_image_t *image);
 
+void aeron_publication_image_invalidate(aeron_publication_image_t *image, int32_t reason_length, const char *reason);
+
 inline bool aeron_publication_image_is_heartbeat(const uint8_t *buffer, size_t length)
 {
-    return length == AERON_DATA_HEADER_LENGTH && 0 == ((aeron_frame_header_t *)buffer)->frame_length;
+    return AERON_DATA_HEADER_LENGTH == length && 0 == ((aeron_frame_header_t *)buffer)->frame_length;
 }
 
 inline bool aeron_publication_image_is_end_of_stream(const uint8_t *buffer, size_t length)
 {
     return (((aeron_frame_header_t *)buffer)->flags & AERON_DATA_HEADER_EOS_FLAG) != 0;
+}
+
+inline bool aeron_publication_image_is_revoked(const uint8_t *buffer, size_t length)
+{
+    return (((aeron_frame_header_t *)buffer)->flags & AERON_DATA_HEADER_REVOKED_FLAG) != 0;
 }
 
 inline bool aeron_publication_image_is_flow_control_under_run(aeron_publication_image_t *image, int64_t packet_position)
@@ -217,7 +255,7 @@ inline bool aeron_publication_image_is_flow_control_under_run(aeron_publication_
 
     if (is_flow_control_under_run)
     {
-        aeron_counter_ordered_increment(image->flow_control_under_runs_counter, 1);
+        aeron_counter_increment_release(image->flow_control_under_runs_counter);
     }
 
     return is_flow_control_under_run;
@@ -230,7 +268,7 @@ inline bool aeron_publication_image_is_flow_control_over_run(
 
     if (is_flow_control_over_run)
     {
-        aeron_counter_ordered_increment(image->flow_control_over_runs_counter, 1);
+        aeron_counter_increment_release(image->flow_control_over_runs_counter);
     }
 
     return is_flow_control_over_run;
@@ -241,24 +279,31 @@ inline void aeron_publication_image_schedule_status_message(
 {
     const int64_t change_number = image->begin_sm_change + 1;
 
-    AERON_PUT_ORDERED(image->begin_sm_change, change_number);
+    AERON_SET_RELEASE(image->begin_sm_change, change_number);
     aeron_release();
+
     image->next_sm_position = sm_position;
     image->next_sm_receiver_window_length = window_length;
-    AERON_PUT_ORDERED(image->end_sm_change, change_number);
+
+    AERON_SET_RELEASE(image->end_sm_change, change_number);
 }
 
 inline bool aeron_publication_image_is_drained(aeron_publication_image_t *image)
 {
-    int64_t rebuild_position = aeron_counter_get(image->rcv_pos_position.value_addr);
+    int64_t rebuild_position = aeron_counter_get_plain(image->rcv_pos_position.value_addr);
 
     for (size_t i = 0, length = image->conductor_fields.subscribable.length; i < length; i++)
     {
-        int64_t position = aeron_counter_get_volatile(image->conductor_fields.subscribable.array[i].value_addr);
+        aeron_tetherable_position_t *tetherable_position = &image->conductor_fields.subscribable.array[i];
 
-        if (position < rebuild_position)
+        if (aeron_driver_subscribable_is_active_state(tetherable_position->state))
         {
-            return false;
+            const int64_t sub_pos = aeron_counter_get_acquire(tetherable_position->value_addr);
+
+            if (sub_pos < rebuild_position)
+            {
+                return false;
+            }
         }
     }
 
@@ -267,12 +312,12 @@ inline bool aeron_publication_image_is_drained(aeron_publication_image_t *image)
 
 inline bool aeron_publication_image_has_no_subscribers(aeron_publication_image_t *image)
 {
-    return 0 == image->conductor_fields.subscribable.length;
+    return !aeron_driver_subscribable_has_working_positions(&image->conductor_fields.subscribable);
 }
 
 inline bool aeron_publication_image_is_accepting_subscriptions(aeron_publication_image_t *image)
 {
-    return image->conductor_fields.subscribable.length > 0 &&
+    return aeron_driver_subscribable_has_working_positions(&image->conductor_fields.subscribable) &&
         (image->conductor_fields.state == AERON_PUBLICATION_IMAGE_STATE_ACTIVE ||
             (image->conductor_fields.state == AERON_PUBLICATION_IMAGE_STATE_DRAINING &&
                 !aeron_publication_image_is_drained(image)));
@@ -298,10 +343,35 @@ inline int64_t aeron_publication_image_registration_id(aeron_publication_image_t
     return image->conductor_fields.managed_resource.registration_id;
 }
 
-inline size_t aeron_publication_image_subscriber_count(aeron_publication_image_t *image)
+inline bool aeron_publication_image_has_send_response_setup(aeron_publication_image_t *image)
 {
-    return image->conductor_fields.subscribable.length;
+    return AERON_SETUP_HEADER_SEND_RESPONSE_FLAG & image->conductor_fields.flags;
 }
+
+// Called from Conductor
+inline void aeron_publication_image_set_response_session_id(
+    aeron_publication_image_t *image, int64_t response_session_id)
+{
+    AERON_SET_RELEASE(image->response_session_id, response_session_id);
+}
+
+/*
+ * Request that the status message deadline be expired so frames which ride the status message timer, such as a
+ * Response Setup, are sent on the next receiver duty cycle rather than waiting out the remainder of the current
+ * status message interval.
+ *
+ * The deadline itself is owned by the receiver, so only a request is recorded here and the receiver applies it in
+ * aeron_publication_image_send_pending_status_message(). The release store publishes any writes made before it,
+ * such as the response session id, to the receiver which reads this with acquire semantics.
+ *
+ * May be called from any thread.
+ */
+inline void aeron_publication_image_request_next_sm_deadline_reset(aeron_publication_image_t *image)
+{
+    AERON_SET_RELEASE(image->is_next_sm_deadline_reset_requested, true);
+}
+
+void aeron_publication_image_remove_response_session_id(aeron_publication_image_t *image);
 
 inline int64_t aeron_publication_image_join_position(aeron_publication_image_t *image)
 {
@@ -309,15 +379,22 @@ inline int64_t aeron_publication_image_join_position(aeron_publication_image_t *
 
     for (size_t i = 0, length = image->conductor_fields.subscribable.length; i < length; i++)
     {
-        int64_t sub_pos = aeron_counter_get_volatile(image->conductor_fields.subscribable.array[i].value_addr);
+        aeron_tetherable_position_t *tetherable_position = &image->conductor_fields.subscribable.array[i];
 
-        if (sub_pos < position)
+        if (aeron_driver_subscribable_is_active_state(tetherable_position->state))
         {
-            position = sub_pos;
+            const int64_t sub_pos = aeron_counter_get_acquire(tetherable_position->value_addr);
+
+            if (sub_pos < position)
+            {
+                position = sub_pos;
+            }
         }
     }
 
     return position;
 }
+
+void aeron_publication_image_stop_status_messages_if_not_active(aeron_publication_image_t *image);
 
 #endif //AERON_PUBLICATION_IMAGE_H

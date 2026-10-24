@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,6 @@ import net.bytebuddy.asm.Advice;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledForJreRange;
-import org.junit.jupiter.api.condition.JRE;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -75,8 +73,7 @@ class FailedFirstElectionClusterTest
     }
 
     @Test
-    @EnabledForJreRange(min = JRE.JAVA_11)
-    @InterruptAfter(60)
+    @InterruptAfter(120)
     void shouldRecoverWhenFollowerIsMultipleTermsBehindFromEmptyLog()
     {
         final int numNodes = 3;
@@ -105,6 +102,7 @@ class FailedFirstElectionClusterTest
         }
 
         cluster.startStaticNode(2, true);
+        cluster.awaitLeader();
 
         cluster.connectClient();
         cluster.sendMessages(messageCount);

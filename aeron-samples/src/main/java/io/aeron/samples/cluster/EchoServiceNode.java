@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,8 +59,6 @@ public final class EchoServiceNode
         final List<String> hostnames = Arrays.asList(hostnamesStr.split(","));
         final List<String> internalHostnames = Arrays.asList(internalHostnamesStr.split(","));
 
-        final ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
-
         final ClusterConfig clusterConfig = ClusterConfig.create(
             nodeId, hostnames, internalHostnames, PORT_BASE, new EchoService());
 
@@ -74,13 +72,13 @@ public final class EchoServiceNode
         clusterConfig.clusteredServiceContext()
             .errorHandler(errorHandler("Clustered Service"));
 
-        try (
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
             ClusteredMediaDriver ignore = ClusteredMediaDriver.launch(
-                clusterConfig.mediaDriverContext(),
+                clusterConfig.mediaDriverContext().terminationHook(barrier::signalAll),
                 clusterConfig.archiveContext(),
-                clusterConfig.consensusModuleContext());
+                clusterConfig.consensusModuleContext().terminationHook(barrier::signalAll));
             ClusteredServiceContainer ignore2 = ClusteredServiceContainer.launch(
-                clusterConfig.clusteredServiceContext()))
+                clusterConfig.clusteredServiceContext().terminationHook(barrier::signalAll)))
         {
             System.out.println("[" + nodeId + "] Started Cluster Node on " + hostnames.get(nodeId) + "...");
             barrier.await();

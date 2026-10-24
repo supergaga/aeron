@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,11 +20,17 @@ import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 
+import static io.aeron.Aeron.NULL_VALUE;
+
 /**
  * The number of active receivers represented as a counter value.
  */
-public class FlowControlReceivers
+public final class FlowControlReceivers
 {
+    private FlowControlReceivers()
+    {
+    }
+
     /**
      * Type id of number of receivers counter.
      */
@@ -37,7 +43,7 @@ public class FlowControlReceivers
     public static final String NAME = "fc-receivers";
 
     /**
-     * Allocate a new flow control receivers counter for a stream
+     * Allocate a new flow control receivers counter for a stream.
      *
      * @param tempBuffer      to build the label.
      * @param countersManager to allocate the counter from.
@@ -60,10 +66,12 @@ public class FlowControlReceivers
             NAME,
             FLOW_CONTROL_RECEIVERS_COUNTER_TYPE_ID,
             countersManager,
+            NULL_VALUE,
             registrationId,
             sessionId,
             streamId,
-            channel);
+            channel,
+            NULL_VALUE);
 
         return new AtomicCounter(countersManager.valuesBuffer(), counterId, countersManager);
     }

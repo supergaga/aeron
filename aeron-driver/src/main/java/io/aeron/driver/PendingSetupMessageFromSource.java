@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package io.aeron.driver;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
 
 import java.net.InetSocketAddress;
+
+import static io.aeron.driver.DataPacketDispatcher.SessionState.PENDING_SETUP_FRAME;
 
 final class PendingSetupMessageFromSource
 {
@@ -98,6 +100,19 @@ final class PendingSetupMessageFromSource
 
     void removeFromDataPacketDispatcher()
     {
-        channelEndpoint.dispatcher().removePendingSetup(sessionId, streamId);
+        channelEndpoint.dispatcher().removeSessionInterestByState(sessionId, streamId, PENDING_SETUP_FRAME);
+    }
+
+    public String toString()
+    {
+        return "PendingSetupMessageFromSource{" +
+            "sessionId=" + sessionId +
+            ", streamId=" + streamId +
+            ", transportIndex=" + transportIndex +
+            ", periodic=" + periodic +
+            ", channelEndpoint=" + channelEndpoint +
+            ", controlAddress=" + controlAddress +
+            ", timeOfStatusMessageNs=" + timeOfStatusMessageNs +
+            '}';
     }
 }

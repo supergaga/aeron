@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -102,6 +102,7 @@ final class PriorityHeapTimerService implements TimerService
     /**
      * {@inheritDoc}
      */
+    @Override
     public void scheduleTimerForCorrelationId(final long correlationId, final long deadline)
     {
         final Timer existingTimer = timerByCorrelationId.get(correlationId);
@@ -144,6 +145,7 @@ final class PriorityHeapTimerService implements TimerService
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean cancelTimerByCorrelationId(final long correlationId)
     {
         final Timer removedTimer = timerByCorrelationId.remove(correlationId);
@@ -173,6 +175,7 @@ final class PriorityHeapTimerService implements TimerService
     /**
      * {@inheritDoc}
      */
+    @Override
     public void snapshot(final TimerSnapshotTaker snapshotTaker)
     {
         final Timer[] timers = this.timers;
@@ -186,6 +189,7 @@ final class PriorityHeapTimerService implements TimerService
     /**
      * {@inheritDoc}
      */
+    @Override
     public void currentTime(final long now)
     {
     }

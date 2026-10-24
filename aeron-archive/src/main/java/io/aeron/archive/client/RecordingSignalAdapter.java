@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,9 @@ import static io.aeron.logbuffer.ControlledFragmentHandler.Action.*;
 /**
  * Encapsulate the polling, decoding, and dispatching of recording transition events for a session plus the
  * asynchronous events to check for errors.
+ * <p>
+ * Important: set the underlying {@link RecordingSignalConsumer} instance on the {@link AeronArchive} using the
+ * {@link AeronArchive.Context#recordingSignalConsumer(RecordingSignalConsumer)} method to avoid missing signals.
  *
  * @see RecordingSignal
  */

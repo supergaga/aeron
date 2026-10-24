@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,8 +23,16 @@ import io.aeron.driver.media.UdpChannel;
 public class MinMulticastFlowControlSupplier implements FlowControlSupplier
 {
     /**
+     * Default constructor.
+     */
+    public MinMulticastFlowControlSupplier()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public FlowControl newInstance(final UdpChannel udpChannel, final int streamId, final long registrationId)
     {
         return new MinMulticastFlowControl();

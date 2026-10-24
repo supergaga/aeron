@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ public:
         {
             throw aeron::util::OutOfBoundsException(
                 aeron::util::strPrintf("length out of bounds[%p]: length=%lld", this, static_cast<long long>(length)),
-                SOURCEINFO);
+                SOURCEINFO, EINVAL);
         }
 #endif
     }
@@ -73,7 +73,7 @@ public:
         {
             throw aeron::util::OutOfBoundsException(
                 aeron::util::strPrintf("length out of bounds[%p]. length=%lld", this, static_cast<long long>(length)),
-                SOURCEINFO);
+                SOURCEINFO, EINVAL);
         }
 #endif
 
@@ -112,7 +112,7 @@ public:
         {
             throw aeron::util::OutOfBoundsException(
                 aeron::util::strPrintf("length out of bounds[%p]: length=%lld", this, static_cast<long long>(length)),
-                SOURCEINFO);
+                SOURCEINFO, EINVAL);
         }
 #endif
 
@@ -164,7 +164,7 @@ public:
         {
             throw aeron::util::OutOfBoundsException(
                 aeron::util::strPrintf("length out of bounds[%p]: length=%lld", this, static_cast<long long>(length)),
-                SOURCEINFO);
+                SOURCEINFO, EINVAL);
         }
 #endif
 
@@ -457,13 +457,15 @@ public:
 #if !defined(DISABLE_BOUNDS_CHECKS)
     inline void boundsCheck(util::index_t index, std::uint64_t length) const
     {
-        if (AERON_COND_EXPECT(index < 0 || (static_cast<std::uint64_t>(m_length) - index) < length, false))
+        // a negative index sign-extends to a value greater than any capacity, so one comparison rejects both cases
+        const std::uint64_t position = static_cast<std::uint64_t>(static_cast<std::int64_t>(index));
+        if (AERON_COND_EXPECT(position > m_length || (m_length - position) < length, false))
         {
             throw aeron::util::OutOfBoundsException(
                 aeron::util::strPrintf(
                     "index out of bounds[%p]: index=%lld + %lld, capacity=%lld",
                     this, static_cast<long long>(index), length, static_cast<long long>(m_length)),
-                SOURCEINFO);
+                SOURCEINFO, EINVAL);
         }
     }
 #else

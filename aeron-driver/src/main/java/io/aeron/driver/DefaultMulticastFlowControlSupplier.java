@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,16 @@ import static io.aeron.driver.Configuration.MULTICAST_FLOW_CONTROL_STRATEGY;
 public class DefaultMulticastFlowControlSupplier implements FlowControlSupplier
 {
     /**
+     * Default constructor.
+     */
+    public DefaultMulticastFlowControlSupplier()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public FlowControl newInstance(final UdpChannel udpChannel, final int streamId, final long registrationId)
     {
         final String fcStr = udpChannel.channelUri().get(CommonContext.FLOW_CONTROL_PARAM_NAME);
@@ -41,7 +49,7 @@ public class DefaultMulticastFlowControlSupplier implements FlowControlSupplier
             switch (strategyStr)
             {
                 case MaxMulticastFlowControl.FC_PARAM_VALUE:
-                    return MaxMulticastFlowControl.INSTANCE;
+                    return new MaxMulticastFlowControl();
 
                 case MinMulticastFlowControl.FC_PARAM_VALUE:
                     return new MinMulticastFlowControl();
@@ -56,7 +64,7 @@ public class DefaultMulticastFlowControlSupplier implements FlowControlSupplier
 
         if (MaxMulticastFlowControl.class.getName().equals(MULTICAST_FLOW_CONTROL_STRATEGY))
         {
-            return MaxMulticastFlowControl.INSTANCE;
+            return new MaxMulticastFlowControl();
         }
         else if (MinMulticastFlowControl.class.getName().equals(MULTICAST_FLOW_CONTROL_STRATEGY))
         {
@@ -85,6 +93,7 @@ public class DefaultMulticastFlowControlSupplier implements FlowControlSupplier
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "DefaultMulticastFlowControlSupplier{flowControlClass=" +

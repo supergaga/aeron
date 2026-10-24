@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,13 +28,13 @@ struct aeron_rb_descriptor_stct
     uint8_t begin_pad[(2 * AERON_CACHE_LINE_LENGTH)];
     volatile int64_t tail_position;
     uint8_t tail_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
-    int64_t head_cache_position;
+    volatile int64_t head_cache_position;
     uint8_t head_cache_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
     volatile int64_t head_position;
     uint8_t head_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
     volatile int64_t correlation_counter;
     uint8_t correlation_counter_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
-    int64_t consumer_heartbeat;
+    volatile int64_t consumer_heartbeat;
     uint8_t consumer_heartbeat_pad[(2 * AERON_CACHE_LINE_LENGTH) - sizeof(int64_t)];
 };
 typedef struct aeron_rb_descriptor_stct aeron_rb_descriptor_t;
@@ -76,6 +76,9 @@ typedef enum aeron_rb_read_action_stct aeron_rb_read_action_t;
 
 typedef aeron_rb_read_action_t (*aeron_rb_controlled_handler_t)(int32_t, const void *, size_t, void *);
 
-#define AERON_RB_IS_CAPACITY_VALID(capacity, min_capacity) AERON_IS_POWER_OF_TWO(capacity) && (capacity) >= (min_capacity)
+#define AERON_RB_IS_CAPACITY_VALID(capacity, min_capacity) \
+    (AERON_IS_POWER_OF_TWO(capacity) && \
+    (capacity) >= (min_capacity) && \
+    (capacity) < INT32_MAX)
 
 #endif //AERON_RB_H

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,13 +26,19 @@ import org.agrona.concurrent.AgentRunner;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.ShutdownSignalBarrier;
 
-import javax.management.*;
+import javax.management.InstanceAlreadyExistsException;
+import javax.management.InstanceNotFoundException;
+import javax.management.MBeanRegistrationException;
+import javax.management.MalformedObjectNameException;
+import javax.management.NotCompliantMBeanException;
+import javax.management.ObjectName;
+import javax.management.StandardMBean;
 import java.lang.management.ManagementFactory;
 
 import static java.util.Objects.requireNonNull;
 
 /**
- * Main class for starting the provisioning service
+ * Main class for starting the provisioning service.
  */
 public final class ProvisioningServerMain implements Agent, AutoCloseable
 {
@@ -53,14 +59,13 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     /**
      * Entry point for starting the provisioning service.
      *
-     * @param args command line arguments
+     * @param args command line arguments.
      */
     @SuppressWarnings("try")
     public static void main(final String[] args)
     {
-        final ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
-
-        try (ProvisioningServerMain ignore = ProvisioningServerMain.launch(new Aeron.Context()))
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ProvisioningServerMain ignore = ProvisioningServerMain.launch(new Aeron.Context()))
         {
             barrier.await();
             System.out.println("Shutdown Provisioning Server...");
@@ -68,10 +73,10 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     }
 
     /**
-     * Launch the provisioning server
+     * Launch the provisioning server.
      *
-     * @param context Aeron client context to connect to the local media driver
-     * @return new ProvisionServerMain instance
+     * @param context Aeron client context to connect to the local media driver.
+     * @return new ProvisionServerMain instance.
      */
     public static ProvisioningServerMain launch(final Aeron.Context context)
     {
@@ -92,6 +97,7 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onStart()
     {
         try
@@ -112,6 +118,7 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
         return provisioning.doWork();
@@ -120,6 +127,7 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public String roleName()
     {
         return "EchoProvisioningServer";
@@ -128,6 +136,7 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         if (null != beanName)
@@ -140,6 +149,7 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
             {
             }
         }
+
         CloseHelper.quietCloseAll(runner, aeron, driver);
     }
 }

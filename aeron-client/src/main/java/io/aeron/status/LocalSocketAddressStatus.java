@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ import static org.agrona.concurrent.status.CountersReader.RECORD_UNUSED;
  * When the value is {@link ChannelEndpointStatus#ACTIVE} then the key value and label will be updated with the
  * socket address and port which is bound.
  */
-public class LocalSocketAddressStatus
+public final class LocalSocketAddressStatus
 {
     private static final int CHANNEL_STATUS_ID_OFFSET = 0;
     private static final int LOCAL_SOCKET_ADDRESS_LENGTH_OFFSET = CHANNEL_STATUS_ID_OFFSET + BitUtil.SIZE_OF_INT;
@@ -56,6 +56,10 @@ public class LocalSocketAddressStatus
      */
     public static final int LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID =
         AeronCounters.DRIVER_LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID;
+
+    private LocalSocketAddressStatus()
+    {
+    }
 
     /**
      * Allocate a counter to represent a local socket address associated with a channel.
@@ -76,7 +80,7 @@ public class LocalSocketAddressStatus
         final String name,
         final int typeId)
     {
-        tempBuffer.putInt(0, channelStatusId);
+        tempBuffer.putInt(CHANNEL_STATUS_ID_OFFSET, channelStatusId);
         tempBuffer.putInt(LOCAL_SOCKET_ADDRESS_LENGTH_OFFSET, 0);
 
         final int keyLength = INITIAL_LENGTH;
@@ -139,18 +143,18 @@ public class LocalSocketAddressStatus
         final ArrayList<String> bindings = new ArrayList<>(2);
         final DirectBuffer buffer = countersReader.metaDataBuffer();
 
-        for (int i = 0, size = countersReader.maxCounterId(); i < size; i++)
+        for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
         {
-            final int counterState = countersReader.getCounterState(i);
+            final int counterState = countersReader.getCounterState(counterId);
             if (RECORD_ALLOCATED == counterState)
             {
-                if (countersReader.getCounterTypeId(i) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID)
+                if (countersReader.getCounterTypeId(counterId) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID)
                 {
-                    final int recordOffset = CountersReader.metaDataOffset(i);
+                    final int recordOffset = CountersReader.metaDataOffset(counterId);
                     final int keyIndex = recordOffset + CountersReader.KEY_OFFSET;
 
                     if (channelStatusId == buffer.getInt(keyIndex + CHANNEL_STATUS_ID_OFFSET) &&
-                        ChannelEndpointStatus.ACTIVE == countersReader.getCounterValue(i))
+                        ChannelEndpointStatus.ACTIVE == countersReader.getCounterValue(counterId))
                     {
                         final int length = buffer.getInt(keyIndex + LOCAL_SOCKET_ADDRESS_LENGTH_OFFSET);
                         if (length > 0)
@@ -188,18 +192,18 @@ public class LocalSocketAddressStatus
         {
             final DirectBuffer buffer = countersReader.metaDataBuffer();
 
-            for (int i = 0, size = countersReader.maxCounterId(); i < size; i++)
+            for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
             {
-                final int counterState = countersReader.getCounterState(i);
+                final int counterState = countersReader.getCounterState(counterId);
                 if (RECORD_ALLOCATED == counterState)
                 {
-                    if (countersReader.getCounterTypeId(i) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID)
+                    if (countersReader.getCounterTypeId(counterId) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID)
                     {
-                        final int recordOffset = CountersReader.metaDataOffset(i);
+                        final int recordOffset = CountersReader.metaDataOffset(counterId);
                         final int keyIndex = recordOffset + CountersReader.KEY_OFFSET;
 
                         if (channelStatusId == buffer.getInt(keyIndex + CHANNEL_STATUS_ID_OFFSET) &&
-                            ChannelEndpointStatus.ACTIVE == countersReader.getCounterValue(i))
+                            ChannelEndpointStatus.ACTIVE == countersReader.getCounterValue(counterId))
                         {
                             final int length = buffer.getInt(keyIndex + LOCAL_SOCKET_ADDRESS_LENGTH_OFFSET);
                             if (length > 0)
@@ -225,21 +229,21 @@ public class LocalSocketAddressStatus
     /**
      * Return number of local addresses for the given subscription registration id.
      *
-     * @param countersReader for the connected driver
-     * @param registrationId for the subscription
-     * @return nunmber of local socket addresses in use
+     * @param countersReader for the connected driver.
+     * @param registrationId for the subscription.
+     * @return number of local socket addresses in use.
      */
     public static int findNumberOfAddressesByRegistrationId(
         final CountersReader countersReader, final long registrationId)
     {
         int result = 0;
 
-        for (int i = 0, size = countersReader.maxCounterId(); i < size; i++)
+        for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
         {
-            final int counterState = countersReader.getCounterState(i);
+            final int counterState = countersReader.getCounterState(counterId);
             if (counterState == RECORD_ALLOCATED &&
-                countersReader.getCounterTypeId(i) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID &&
-                countersReader.getCounterRegistrationId(i) == registrationId)
+                countersReader.getCounterTypeId(counterId) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID &&
+                countersReader.getCounterRegistrationId(counterId) == registrationId)
             {
                 result++;
             }
@@ -250,5 +254,42 @@ public class LocalSocketAddressStatus
         }
 
         return result;
+    }
+
+    /**
+     * Is a socket currently active for a channel.
+     *
+     * @param countersReader  for the connected driver.
+     * @param channelStatusId identity of the counter for the channel.
+     * @return true if the counter is active otherwise false.
+     */
+    public static boolean isActive(final CountersReader countersReader, final int channelStatusId)
+    {
+        final DirectBuffer buffer = countersReader.metaDataBuffer();
+
+        for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
+        {
+            final int counterState = countersReader.getCounterState(counterId);
+            if (RECORD_ALLOCATED == counterState)
+            {
+                if (countersReader.getCounterTypeId(counterId) == LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID)
+                {
+                    final int recordOffset = CountersReader.metaDataOffset(counterId);
+                    final int keyIndex = recordOffset + CountersReader.KEY_OFFSET;
+
+                    if (channelStatusId == buffer.getInt(keyIndex + CHANNEL_STATUS_ID_OFFSET) &&
+                        ChannelEndpointStatus.ACTIVE == countersReader.getCounterValue(counterId))
+                    {
+                        return true;
+                    }
+                }
+            }
+            else if (RECORD_UNUSED == counterState)
+            {
+                break;
+            }
+        }
+
+        return false;
     }
 }

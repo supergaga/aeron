@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ template <typename Agent, typename IdleStrategy>
 class AgentRunner
 {
 public:
-    AgentRunner(Agent &agent, IdleStrategy &idleStrategy, logbuffer::exception_handler_t &exceptionHandler) :
+    AgentRunner(Agent &agent, IdleStrategy &idleStrategy, util::exception_handler_t &exceptionHandler) :
         m_agent(agent),
         m_idleStrategy(idleStrategy),
         m_exceptionHandler(exceptionHandler),
@@ -48,7 +48,7 @@ public:
     AgentRunner(
         Agent &agent,
         IdleStrategy &idleStrategy,
-        logbuffer::exception_handler_t &exceptionHandler,
+        util::exception_handler_t &exceptionHandler,
         const std::string &name) :
         m_agent(agent),
         m_idleStrategy(idleStrategy),
@@ -84,7 +84,7 @@ public:
      */
     inline bool isRunning() const
     {
-        return m_isRunning.load(std::memory_order_acquire);
+        return STATE_RUNNING == m_state.load(std::memory_order_acquire);
     }
 
     /**
@@ -106,23 +106,25 @@ public:
     {
         if (m_isClosed.load(std::memory_order_acquire))
         {
-            throw util::IllegalStateException(std::string("AgentRunner closed"), SOURCEINFO);
+            throw util::IllegalStateException(std::string("AgentRunner closed"), SOURCEINFO, EINVAL);
         }
 
         bool expected = false;
         if (!m_isStarted.compare_exchange_strong(expected, true, std::memory_order_seq_cst))
         {
-            throw util::IllegalStateException(std::string("AgentRunner already started"), SOURCEINFO);
+            throw util::IllegalStateException(std::string("AgentRunner already started"), SOURCEINFO, EINVAL);
         }
 
         m_thread = std::thread(
             [&]()
             {
 #if defined(AERON_COMPILER_MSVC)
-#elif defined(Darwin)
+#elif defined(__APPLE__)
                 pthread_setname_np(m_name.c_str());
 #else
-                pthread_setname_np(pthread_self(), m_name.c_str());
+                char threadName[16UL] = {};
+                std::copy(m_name.begin(), m_name.begin() + std::min(m_name.size(), 15UL), threadName);
+                pthread_setname_np(pthread_self(), threadName);
 #endif
                 run();
             });
@@ -133,37 +135,39 @@ public:
      */
     inline void run()
     {
-        m_isRunning.store(true, std::memory_order_release);
-        bool isRunning = true;
-
-        util::OnScopeExit tidy(
-            [&]()
-            {
-                m_isRunning.store(false, std::memory_order_release);
-            });
+        int expected = STATE_NOT_EXECUTED;
+        if (!m_state.compare_exchange_strong(expected, STATE_RUNNING, std::memory_order_seq_cst))
+        {
+            return;
+        }
 
         try
         {
             m_agent.onStart();
         }
-        catch (const util::SourcedException &exception)
+        catch (const std::exception &exception)
         {
-            isRunning = false;
+            m_state.store(STATE_STOPPED, std::memory_order_release);
             m_exceptionHandler(exception);
         }
 
-        if (isRunning)
+        while (STATE_RUNNING == m_state.load(std::memory_order_acquire))
         {
-            while (!m_isClosed.load(std::memory_order_acquire))
+            try
             {
-                try
-                {
-                    m_idleStrategy.idle(m_agent.doWork());
-                }
-                catch (const util::SourcedException &exception)
+                m_idleStrategy.idle(m_agent.doWork());
+            }
+            catch (const util::AgentTerminationException &exception)
+            {
+                m_state.store(STATE_STOPPED, std::memory_order_release);
+                if (!exception.isExpected())
                 {
                     m_exceptionHandler(exception);
                 }
+            }
+            catch (const std::exception &exception)
+            {
+                m_exceptionHandler(exception);
             }
         }
 
@@ -171,7 +175,7 @@ public:
         {
             m_agent.onClose();
         }
-        catch (const util::SourcedException &exception)
+        catch (const std::exception &exception)
         {
             m_exceptionHandler(exception);
         }
@@ -185,19 +189,42 @@ public:
         bool expected = false;
         if (m_isClosed.compare_exchange_strong(expected, true, std::memory_order_seq_cst))
         {
-            if (m_thread.joinable())
+            int expectedState = STATE_RUNNING;
+            while (!m_state.compare_exchange_strong(expectedState, STATE_STOPPED, std::memory_order_seq_cst))
             {
-                m_thread.join();
+            }
+
+            if (STATE_NOT_EXECUTED == expectedState)
+            {
+                try
+                {
+                    m_agent.onClose();
+                }
+                catch (const std::exception &exception)
+                {
+                    m_exceptionHandler(exception);
+                }
+            }
+            else if (m_isStarted.load(std::memory_order_acquire))
+            {
+                if (m_thread.joinable())
+                {
+                    m_thread.join();
+                }
             }
         }
     }
 
 private:
+    static constexpr int STATE_NOT_EXECUTED = 0;
+    static constexpr int STATE_RUNNING = 1;
+    static constexpr int STATE_STOPPED = 2;
+
     Agent &m_agent;
     IdleStrategy &m_idleStrategy;
-    logbuffer::exception_handler_t &m_exceptionHandler;
+    util::exception_handler_t &m_exceptionHandler;
     std::atomic<bool> m_isStarted = { false };
-    std::atomic<bool> m_isRunning = { false };
+    std::atomic<int> m_state = { STATE_NOT_EXECUTED };
     std::atomic<bool> m_isClosed = { false };
     std::thread m_thread;
     const std::string m_name;

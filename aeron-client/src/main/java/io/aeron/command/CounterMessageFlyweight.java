@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,15 @@ public class CounterMessageFlyweight extends CorrelatedMessageFlyweight
     private static final int KEY_LENGTH_OFFSET = COUNTER_TYPE_ID_FIELD_OFFSET + SIZE_OF_INT;
     static final int KEY_BUFFER_OFFSET = KEY_LENGTH_OFFSET + SIZE_OF_INT;
     private static final int MINIMUM_LENGTH = KEY_BUFFER_OFFSET + SIZE_OF_INT;
+
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public CounterMessageFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
@@ -246,6 +255,7 @@ public class CounterMessageFlyweight extends CorrelatedMessageFlyweight
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "CounterMessageFlyweight{" +

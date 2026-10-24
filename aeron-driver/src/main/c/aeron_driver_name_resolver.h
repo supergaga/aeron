@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,6 @@
 
 #ifndef AERON_NAME_RESOLVER_DRIVER_H
 #define AERON_NAME_RESOLVER_DRIVER_H
-
-#define AERON_NAME_RESOLVER_DRIVER_SELF_RESOLUTION_INTERVAL_MS (1 * INT64_C(1000))
-#define AERON_NAME_RESOLVER_DRIVER_NEIGHBOUR_RESOLUTION_INTERVAL_MS (2 * INT64_C(1000))
-#define AERON_NAME_RESOLVER_DRIVER_TIMEOUT_MS (10 * INT64_C(1000))
-#define AERON_COUNTER_NAME_RESOLVER_NEIGHBORS_COUNTER_TYPE_ID (15)
-#define AERON_COUNTER_NAME_RESOLVER_CACHE_ENTRIES_COUNTER_TYPE_ID (16)
 
 #include "protocol/aeron_udp_protocol.h"
 #include "aeronmd.h"

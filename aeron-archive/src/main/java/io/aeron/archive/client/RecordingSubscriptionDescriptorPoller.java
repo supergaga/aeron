@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -195,9 +195,9 @@ public final class RecordingSubscriptionDescriptorPoller
                 if (controlResponseDecoder.controlSessionId() == controlSessionId)
                 {
                     final ControlResponseCode code = controlResponseDecoder.code();
-                    final long correlationId = controlResponseDecoder.correlationId();
+                    final long responseCorrelationId = controlResponseDecoder.correlationId();
 
-                    if (ControlResponseCode.SUBSCRIPTION_UNKNOWN == code && correlationId == this.correlationId)
+                    if (ControlResponseCode.SUBSCRIPTION_UNKNOWN == code && responseCorrelationId == correlationId)
                     {
                         isDispatchComplete = true;
                         return ControlledFragmentAssembler.Action.BREAK;
@@ -206,12 +206,12 @@ public final class RecordingSubscriptionDescriptorPoller
                     if (ControlResponseCode.ERROR == code)
                     {
                         final ArchiveException ex = new ArchiveException(
-                            "response for correlationId=" + this.correlationId +
+                            "response for correlationId=" + correlationId +
                             ", error: " + controlResponseDecoder.errorMessage(),
                             (int)controlResponseDecoder.relevantId(),
-                            correlationId);
+                            responseCorrelationId);
 
-                        if (correlationId == this.correlationId)
+                        if (responseCorrelationId == correlationId)
                         {
                             throw ex;
                         }

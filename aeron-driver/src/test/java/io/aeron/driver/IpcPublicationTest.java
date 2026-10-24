@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,14 +15,24 @@
  */
 package io.aeron.driver;
 
+import io.aeron.Aeron;
 import io.aeron.CommonContext;
 import io.aeron.DriverProxy;
 import io.aeron.driver.buffer.TestLogFactory;
 import io.aeron.driver.status.SystemCounters;
 import io.aeron.logbuffer.LogBufferDescriptor;
-import org.agrona.concurrent.*;
+import io.aeron.test.Tests;
+import org.agrona.ErrorHandler;
+import org.agrona.concurrent.CachedEpochClock;
+import org.agrona.concurrent.CachedNanoClock;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
+import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
 import org.agrona.concurrent.ringbuffer.RingBuffer;
+import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 import org.agrona.concurrent.status.Position;
 import org.agrona.concurrent.status.UnsafeBufferPosition;
@@ -30,8 +40,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 
+import static io.aeron.driver.Configuration.CMD_QUEUE_CAPACITY;
 import static org.agrona.concurrent.status.CountersReader.METADATA_LENGTH;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
@@ -50,23 +60,28 @@ class IpcPublicationTest
 
     private DriverProxy driverProxy;
     private DriverConductor driverConductor;
+    private NativeResourceAgent nativeResourceAgent;
 
-    @SuppressWarnings("unchecked")
     @BeforeEach
     void setUp()
     {
         final RingBuffer toDriverCommands = new ManyToOneRingBuffer(new UnsafeBuffer(
-            ByteBuffer.allocate(Configuration.CONDUCTOR_BUFFER_LENGTH_DEFAULT)));
+            ByteBuffer.allocateDirect(Configuration.CONDUCTOR_BUFFER_LENGTH_DEFAULT)));
 
-        final UnsafeBuffer counterBuffer = new UnsafeBuffer(ByteBuffer.allocate(BUFFER_LENGTH));
-        final UnsafeBuffer metaDataBuffer = new UnsafeBuffer(
-            ByteBuffer.allocate(Configuration.countersMetadataBufferLength(BUFFER_LENGTH)));
-        final CountersManager countersManager = new CountersManager(
-            metaDataBuffer, counterBuffer, StandardCharsets.US_ASCII);
+        final CountersManager countersManager = Tests.newCountersManager(BUFFER_LENGTH);
         final SystemCounters systemCounters = new SystemCounters(countersManager);
 
         final SenderProxy senderProxy = mock(SenderProxy.class);
         final ReceiverProxy receiverProxy = mock(ReceiverProxy.class);
+        final ManyToOneConcurrentLinkedQueue<Runnable> driverCommandQueue =
+            new ManyToOneConcurrentLinkedQueue<>();
+        final DriverConductorProxy driverConductorProxy =
+            new DriverConductorProxy(driverCommandQueue);
+        final OneToOneConcurrentArrayQueue<Runnable> nativeResourceAgentCommandQueue =
+            new OneToOneConcurrentArrayQueue<>(CMD_QUEUE_CAPACITY);
+        final NativeResourceAgentProxy nativeResourceAgentProxy = new NativeResourceAgentProxy(
+            nativeResourceAgentCommandQueue, mock(AtomicCounter.class));
+        final ErrorHandler errorHandler = mock(ErrorHandler.class);
 
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .tempBuffer(new UnsafeBuffer(new byte[METADATA_LENGTH]))
@@ -76,7 +91,12 @@ class IpcPublicationTest
             .clientProxy(mock(ClientProxy.class))
             .senderProxy(senderProxy)
             .receiverProxy(receiverProxy)
-            .driverCommandQueue(new ManyToOneConcurrentArrayQueue<>(256))
+            .driverCommandQueue(driverCommandQueue)
+            .driverConductorProxy(driverConductorProxy)
+            .errorHandler(errorHandler)
+            .countedErrorHandler(mock(CountedErrorHandler.class))
+            .nativeResourceAgentCommandQueue(nativeResourceAgentCommandQueue)
+            .nativeResourceAgentProxy(nativeResourceAgentProxy)
             .epochClock(SystemEpochClock.INSTANCE)
             .cachedEpochClock(new CachedEpochClock())
             .cachedNanoClock(new CachedNanoClock())
@@ -85,9 +105,12 @@ class IpcPublicationTest
             .nameResolver(DefaultNameResolver.INSTANCE)
             .nanoClock(new CachedNanoClock())
             .threadingMode(ThreadingMode.DEDICATED)
-            .conductorDutyCycleTracker(new DutyCycleTracker());
+            .conductorDutyCycleTracker(new DutyCycleTracker())
+            .nameResolverTimeTracker(new DutyCycleTracker())
+            .resourceFreeLimit(1);
 
-        ctx.countersValuesBuffer(counterBuffer);
+        nativeResourceAgent = new NativeResourceAgent(ctx);
+        nativeResourceAgentProxy.nativeResourceAgent(nativeResourceAgent);
 
         driverProxy = new DriverProxy(toDriverCommands, CLIENT_ID);
         driverConductor = new DriverConductor(ctx);
@@ -95,9 +118,12 @@ class IpcPublicationTest
 
         driverProxy.addPublication(CommonContext.IPC_CHANNEL, STREAM_ID);
         driverConductor.doWork();
+        nativeResourceAgent.doWork();
+        driverConductor.doWork();
 
-        ipcPublication = driverConductor.getSharedIpcPublication(STREAM_ID);
-        publisherLimit = new UnsafeBufferPosition(counterBuffer, ipcPublication.publisherLimitId());
+        ipcPublication = driverConductor.findSharedIpcPublication(STREAM_ID, Aeron.NULL_VALUE);
+        publisherLimit = new UnsafeBufferPosition(
+            (UnsafeBuffer)countersManager.valuesBuffer(), ipcPublication.publisherLimitId());
     }
 
     @Test
@@ -109,7 +135,7 @@ class IpcPublicationTest
     @Test
     void shouldKeepPublisherLimitZeroOnNoSubscriptionUpdate()
     {
-        ipcPublication.updatePublisherLimit();
+        ipcPublication.updatePublisherPositionAndLimit();
         assertThat(publisherLimit.get(), is(0L));
     }
 
@@ -124,6 +150,7 @@ class IpcPublicationTest
     {
         driverProxy.addSubscription(CommonContext.IPC_CHANNEL, STREAM_ID);
         driverConductor.doWork();
+        nativeResourceAgent.doWork();
 
         assertThat(publisherLimit.get(), is(greaterThan(0L)));
     }

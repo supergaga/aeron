@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <memory>
 
 #include "concurrent/AtomicBuffer.h"
 #include "concurrent/logbuffer/Header.h"
@@ -77,21 +78,21 @@ typedef std::function<ControlledPollAction(
 
 
 template<typename H>
-static void doPoll(void *clientd, const std::uint8_t *buffer, std::size_t length, aeron_header_t *header)
+static void doPoll(void *clientd, const std::uint8_t *buffer, std::size_t length, aeron_header_t *header) noexcept
 {
     H &handler = *reinterpret_cast<H *>(clientd);
     AtomicBuffer atomicBuffer(const_cast<std::uint8_t *>(buffer), length);
-    Header headerWrapper(header, nullptr);
+    Header headerWrapper{header};
     handler(atomicBuffer, static_cast<util::index_t>(0), static_cast<util::index_t>(length), headerWrapper);
 }
 
 template<typename H>
 static aeron_controlled_fragment_handler_action_t doControlledPoll(
-    void *clientd, const std::uint8_t *buffer, std::size_t length, aeron_header_t *header)
+    void *clientd, const std::uint8_t *buffer, std::size_t length, aeron_header_t *header) noexcept
 {
     H &handler = *reinterpret_cast<H *>(clientd);
     AtomicBuffer atomicBuffer(const_cast<std::uint8_t *>(buffer), length);
-    Header headerWrapper(header, nullptr);
+    Header headerWrapper{header};
 
     ControlledPollAction action = handler(atomicBuffer, 0, static_cast<std::int32_t>(length), headerWrapper);
     return static_cast<aeron_controlled_fragment_handler_action_t>(action);
@@ -99,7 +100,7 @@ static aeron_controlled_fragment_handler_action_t doControlledPoll(
 
 template<typename H>
 static void doBlockPoll(
-    void *clientd, const std::uint8_t *buffer, std::size_t length, std::int32_t session_id, std::int32_t term_id)
+    void *clientd, const std::uint8_t *buffer, std::size_t length, std::int32_t session_id, std::int32_t term_id) noexcept
 {
     H &handler = *reinterpret_cast<H *>(clientd);
     AtomicBuffer atomicBuffer(const_cast<std::uint8_t *>(buffer), length);
@@ -129,7 +130,7 @@ public:
 
     ~Image()
     {
-        aeron_subscription_image_release(m_subscription, m_image);
+        aeron_image_release(m_image);
     }
 
     /**
@@ -224,6 +225,11 @@ public:
         return aeron_image_is_closed(m_image);
     }
 
+    inline bool isPublicationRevoked() const
+    {
+        return aeron_image_is_publication_revoked(m_image);
+    }
+
     /**
      * The position this Image has been consumed to by the subscriber.
      *
@@ -251,19 +257,6 @@ public:
     }
 
     /**
-     * Set the subscriber position for this Image to indicate where it has been consumed to.
-     *
-     * @param newPosition for the consumption point.
-     */
-    inline void position(std::int64_t newPosition)
-    {
-        if (aeron_image_set_position(m_image, newPosition) < 0)
-        {
-            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
-        }
-    }
-
-    /**
      * Is the current consumed position at the end of the stream?
      *
      * @return true if at the end of the stream or false if not.
@@ -271,6 +264,25 @@ public:
     inline bool isEndOfStream() const
     {
         return aeron_image_is_end_of_stream(m_image);
+    }
+
+    /**
+     * The position the stream reached when EOS was received from the publisher. The position will be
+     * INT64_MAX until the stream ends and EOS is set.
+     *
+     * @return position the stream reached when EOS was received from the publisher.
+     */
+    inline std::int64_t endOfStreamPosition() const
+    {
+        return aeron_image_end_of_stream_position(m_image);
+    }
+
+    inline void reject(std::string reason)
+    {
+        if (aeron_image_reject(m_image, reason.c_str()) < 0)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
     }
 
     /**
@@ -409,37 +421,6 @@ public:
         }
 
         return numFragments;
-    }
-
-    /**
-     * Peek for new messages in a stream by scanning forward from an initial position. If new messages are found then
-     * they will be delivered to the controlled_poll_fragment_handler_t up to a limited position.
-     * <p>
-     * To assemble messages that span multiple fragments then use ControlledFragmentAssembler. Scans must also
-     * start at the beginning of a message so that the assembler is reset.
-     *
-     * @param initialPosition from which to peek forward.
-     * @param fragmentHandler to which message fragments are delivered.
-     * @param limitPosition   up to which can be scanned.
-     * @return the resulting position after the scan terminates which is a complete message.
-     * @see controlled_poll_fragment_handler_t
-     */
-    template<typename F>
-    inline std::int64_t controlledPeek(std::int64_t initialPosition, F &&fragmentHandler, std::int64_t limitPosition)
-    {
-        using handler_type = typename std::remove_reference<F>::type;
-        handler_type &handler = fragmentHandler;
-        void *handler_ptr = const_cast<void *>(reinterpret_cast<const void *>(&handler));
-
-        std::int64_t bytesPeeked = aeron_image_controlled_peek(
-            m_image, initialPosition, doControlledPoll<handler_type>, handler_ptr, limitPosition);
-
-        if (bytesPeeked < 0)
-        {
-            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
-        }
-
-        return bytesPeeked;
     }
 
     /**

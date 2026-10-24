@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,16 +25,24 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.samples.cluster.ClusterConfig;
 import io.aeron.samples.cluster.EchoServiceNode;
 import io.aeron.samples.cluster.tutorial.BasicAuctionClusterClient;
-import io.aeron.test.*;
+import io.aeron.test.EventLogExtension;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.TopologyTest;
+import io.aeron.test.driver.TestMediaDriver;
 import io.aeron.test.launcher.FileResolveUtil;
 import io.aeron.test.launcher.RemoteLaunchClient;
 import org.agrona.IoUtil;
 import org.agrona.MutableDirectBuffer;
+import org.agrona.collections.MutableLong;
 import org.agrona.collections.MutableReference;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.JRE;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -54,21 +62,30 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CoderResult;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.*;
 
 @TopologyTest
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
+@EnabledOnOs(OS.LINUX)
 class ClusterNetworkTopologyTest
 {
     private static final int REMOTE_LAUNCH_PORT = 11112;
-    private static final long CLUSTER_START_ELECTION_TIMEOUT_S = 10;
+    private static final long STARTUP_CANVASS_TIMEOUT_S =
+        NANOSECONDS.toSeconds(2 * ConsensusModule.Configuration.leaderHeartbeatTimeoutNs());
+    private static final long LIVENESS_TIMEOUT_S = 30;
+    private static final long PUBLICATION_UNBLOCK_TIMEOUT_S = 60;
+    private static final long MESSAGE_TIMEOUT_S = 20;
     private static final List<String> HOSTNAMES = Arrays.asList("10.42.0.10", "10.42.0.11", "10.42.0.12");
     private static final List<String> INTERNAL_HOSTNAMES = Arrays.asList("10.42.1.10", "10.42.1.11", "10.42.1.12");
 
@@ -248,7 +265,7 @@ class ClusterNetworkTopologyTest
         final String ingressChannel,
         final String ingressEndpoints,
         final Selector selector,
-        final double messageCount)
+        final int messageCount)
     {
         final String message = "Hello World!";
         final MutableDirectBuffer messageBuffer = new UnsafeBuffer(ByteBuffer.allocate(128));
@@ -262,13 +279,12 @@ class ClusterNetworkTopologyTest
                 egressResponse.set(stringAscii);
             };
 
-        try (
-            MediaDriver mediaDriver = MediaDriver.launchEmbedded(new MediaDriver.Context()
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(new MediaDriver.Context()
                 .threadingMode(ThreadingMode.SHARED)
                 .dirDeleteOnStart(true)
-                .dirDeleteOnShutdown(true));
+                .dirDeleteOnShutdown(true), systemTestWatcher);
             AeronCluster.AsyncConnect asyncConnect = AeronCluster.asyncConnect(new AeronCluster.Context()
-                .messageTimeoutNs(TimeUnit.SECONDS.toNanos(CLUSTER_START_ELECTION_TIMEOUT_S * 2))
+                .messageTimeoutNs(SECONDS.toNanos(STARTUP_CANVASS_TIMEOUT_S * 2))
                 .egressListener(egressListener)
                 .egressChannel("aeron:udp?endpoint=10.42.0.1:0")
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName())
@@ -285,16 +301,23 @@ class ClusterNetworkTopologyTest
                         pollSelector(selector);
                         return 0 < position;
                     },
-                    SECONDS.toNanos(5));
+                    SECONDS.toNanos(MESSAGE_TIMEOUT_S));
 
+                final MutableLong nextKeepAliveNs = new MutableLong(System.nanoTime() + MILLISECONDS.toNanos(100));
                 Tests.await(
                     () ->
                     {
+                        final long nowNs = System.nanoTime();
+                        if (nowNs >= nextKeepAliveNs.get())
+                        {
+                            aeronCluster.sendKeepAlive();
+                            nextKeepAliveNs.set(nowNs + MILLISECONDS.toNanos(100));
+                        }
                         aeronCluster.pollEgress();
                         pollSelector(selector);
                         return message.equals(egressResponse.get());
                     },
-                    SECONDS.toNanos(5));
+                    SECONDS.toNanos(MESSAGE_TIMEOUT_S));
             }
         }
     }
@@ -448,23 +471,23 @@ class ClusterNetworkTopologyTest
         IoUtil.delete(clusterDir, false);
         IoUtil.ensureDirectoryExists(clusterDir, "cluster base directory");
 
-        if (isVersionAfterJdk8())
-        {
-            command.add("--add-opens");
-            command.add("java.base/sun.nio.ch=ALL-UNNAMED");
-        }
-
+        command.add("--add-opens");
+        command.add("java.base/jdk.internal.misc=ALL-UNNAMED");
+        command.add("--add-opens");
+        command.add("java.base/java.util.zip=ALL-UNNAMED");
         command.add("-Xmx32m");
         command.add("-cp");
         command.add(FileResolveUtil.resolveAeronAllJar().getAbsolutePath());
-        command.add("-javaagent:" + FileResolveUtil.resolveAeronAgentJar().getAbsolutePath());
         command.add("-Djava.net.preferIPv4Stack=true");
         command.add("-Daeron.dir.delete.on.start=true");
         command.add("-Daeron.event.cluster.log=all");
         command.add("-Daeron.event.cluster.log.disable=CANVASS_POSITION,APPEND_POSITION,COMMIT_POSITION");
         command.add("-Daeron.event.log.filename=" + new File(clusterDir, "event.log").getAbsolutePath());
         command.add("-Daeron.driver.resolver.name=node" + nodeId);
-        command.add("-Daeron.cluster.startup.canvass.timeout=" + CLUSTER_START_ELECTION_TIMEOUT_S + "s");
+        command.add("-Daeron.cluster.startup.canvass.timeout=" + STARTUP_CANVASS_TIMEOUT_S + "s");
+        command.add("-Daeron.client.liveness.timeout=" + LIVENESS_TIMEOUT_S + "s");
+        command.add("-Daeron.driver.timeout=" + LIVENESS_TIMEOUT_S + "s");
+        command.add("-Daeron.publication.unblock.timeout=" + PUBLICATION_UNBLOCK_TIMEOUT_S + "s");
 
         if (null != ingressChannel)
         {
@@ -487,10 +510,5 @@ class ClusterNetworkTopologyTest
         command.add(EchoServiceNode.class.getName());
 
         return command.toArray(new String[0]);
-    }
-
-    private static boolean isVersionAfterJdk8()
-    {
-        return EnumSet.range(JRE.JAVA_9, JRE.OTHER).contains(JRE.currentVersion());
     }
 }

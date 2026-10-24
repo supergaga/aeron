@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -100,6 +100,7 @@ public class CubicCongestionControl implements CongestionControl
      * @param context         for configuration options applied in the driver.
      * @param countersManager for the driver.
      */
+    @SuppressWarnings("this-escape")
     public CubicCongestionControl(
         final long registrationId,
         final UdpChannel udpChannel,
@@ -115,12 +116,12 @@ public class CubicCongestionControl implements CongestionControl
     {
         try
         {
-            errorHandler = context.errorHandler();
+            errorHandler = context.countedErrorHandler();
             mtu = senderMtuLength;
 
-            final int initialWindowLength = 0 != udpChannel.receiverWindowLength() ?
+            final int receiverWindowLength = 0 != udpChannel.receiverWindowLength() ?
                 udpChannel.receiverWindowLength() : context.initialWindowLength();
-            maxWindowLength = Configuration.receiverWindowLength(termLength, initialWindowLength);
+            maxWindowLength = Configuration.receiverWindowLength(termLength, receiverWindowLength);
 
             maxCwnd = maxWindowLength / mtu;
             cwnd = Math.min(INITCWND, maxCwnd);
@@ -152,8 +153,8 @@ public class CubicCongestionControl implements CongestionControl
                 udpChannel.originalUriString());
 
             windowLength = this.initialWindowLength;
-            rttIndicator.setOrdered(0);
-            windowIndicator.setOrdered(this.initialWindowLength);
+            rttIndicator.setRelease(0);
+            windowIndicator.setRelease(this.initialWindowLength);
 
             lastLossTimestampNs = nanoClock.nanoTime();
             lastUpdateTimestampNs = lastLossTimestampNs;
@@ -168,6 +169,7 @@ public class CubicCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         CloseHelper.close(errorHandler, rttIndicator);
@@ -177,6 +179,7 @@ public class CubicCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean shouldMeasureRtt(final long nowNs)
     {
         return CubicCongestionControlConfiguration.MEASURE_RTT && ((lastRttTimestampNs + rttTimeoutNs) - nowNs < 0);
@@ -185,6 +188,7 @@ public class CubicCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onRttMeasurementSent(final long nowNs)
     {
         lastRttTimestampNs = nowNs;
@@ -193,17 +197,19 @@ public class CubicCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onRttMeasurement(final long nowNs, final long rttNs, final InetSocketAddress srcAddress)
     {
         lastRttTimestampNs = nowNs;
         this.rttNs = rttNs;
-        rttIndicator.setOrdered(rttNs);
+        rttIndicator.setRelease(rttNs);
         rttTimeoutNs = Math.max(rttNs, CubicCongestionControlConfiguration.INITIAL_RTT_NS) * RTT_TIMEOUT_MULTIPLE;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onTrackRebuild(
         final long nowNs,
         final long newConsumptionPosition,
@@ -222,7 +228,7 @@ public class CubicCongestionControl implements CongestionControl
             k = StrictMath.cbrt((double)w_max * B / C);
             cwnd = Math.max(1, (int)(cwnd * (1.0 - B)));
             windowLength = cwnd * mtu;
-            windowIndicator.setOrdered(windowLength);
+            windowIndicator.setRelease(windowLength);
 
             lastLossTimestampNs = nowNs;
         }
@@ -250,7 +256,7 @@ public class CubicCongestionControl implements CongestionControl
             if (windowLength != this.windowLength)
             {
                 this.windowLength = windowLength;
-                windowIndicator.setOrdered(windowLength);
+                windowIndicator.setRelease(windowLength);
             }
 
             lastUpdateTimestampNs = nowNs;
@@ -268,6 +274,7 @@ public class CubicCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public int initialWindowLength()
     {
         return initialWindowLength;
@@ -276,6 +283,7 @@ public class CubicCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public int maxWindowLength()
     {
         return maxWindowLength;

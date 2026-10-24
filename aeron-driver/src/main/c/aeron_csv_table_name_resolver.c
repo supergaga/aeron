@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ int aeron_csv_table_name_resolver_resolve(
             if (strncmp(name, table->array[i].name, strlen(table->array[i].name) + 1) == 0)
             {
                 int64_t operation;
-                AERON_GET_VOLATILE(operation, *table->array[i].operation_toggle.value_addr);
+                AERON_GET_ACQUIRE(operation, *table->array[i].operation_toggle.value_addr);
 
                 if (AERON_NAME_RESOLVER_CSV_DISABLE_RESOLUTION_OP == operation)
                 {
@@ -86,12 +86,6 @@ int aeron_csv_table_name_resolver_resolve(
     }
 
     int result = aeron_default_name_resolver_resolve(resolver, hostname, uri_param_name, is_re_resolution, address);
-
-    if (NULL != resolver->on_resolve_func)
-    {
-        struct sockaddr_storage *resolved_address = 0 <= result ? address : NULL;
-        resolver->on_resolve_func(resolver, name, resolved_address);
-    }
 
     return result;
 }
@@ -116,9 +110,9 @@ int aeron_csv_table_name_resolver_supplier(
 {
     resolver->lookup_func = aeron_default_name_resolver_lookup;
     resolver->close_func = aeron_csv_table_name_resolver_close;
+    resolver->start_func = aeron_default_name_resolver_start;
     resolver->resolve_func = aeron_csv_table_name_resolver_resolve;
     resolver->do_work_func = aeron_default_name_resolver_do_work;
-    resolver->on_resolve_func = context->on_name_resolve_func;
     resolver->name = "csv";
 
     char *rows[AERON_NAME_RESOLVER_CSV_TABLE_MAX_SIZE];

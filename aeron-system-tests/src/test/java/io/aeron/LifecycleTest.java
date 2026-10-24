@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,15 +43,13 @@ class LifecycleTest
 
         try (TestMediaDriver mediaDriver = TestMediaDriver.launch(driverCtx, testWatcher))
         {
+            testWatcher.dataCollector().add(mediaDriver.context().aeronDirectory());
+
             final Aeron.Context clientCtx = new Aeron.Context()
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName());
 
             final Aeron aeron = Aeron.connect(clientCtx);
             aeron.close();
-        }
-        finally
-        {
-            driverCtx.deleteDirectory();
         }
     }
 
@@ -65,6 +63,8 @@ class LifecycleTest
 
         try (TestMediaDriver mediaDriver = TestMediaDriver.launch(driverCtx, testWatcher))
         {
+            testWatcher.dataCollector().add(mediaDriver.context().aeronDirectory());
+
             final Aeron.Context clientCtxOne = new Aeron.Context()
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName());
 
@@ -88,10 +88,6 @@ class LifecycleTest
                 verify(unavailableHandler, timeout(5000))
                     .onUnavailableCounter(any(), eq(clientCtxTwo.clientId()), anyInt());
             }
-        }
-        finally
-        {
-            driverCtx.deleteDirectory();
         }
     }
 }

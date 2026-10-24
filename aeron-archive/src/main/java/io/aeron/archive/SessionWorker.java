@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -43,6 +43,7 @@ class SessionWorker<T extends Session> implements Agent
     /**
      * {@inheritDoc}
      */
+    @Override
     public String roleName()
     {
         return roleName;
@@ -51,6 +52,7 @@ class SessionWorker<T extends Session> implements Agent
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
         int workCount = 0;
@@ -81,6 +83,7 @@ class SessionWorker<T extends Session> implements Agent
     /**
      * {@inheritDoc}
      */
+    @Override
     public final void onClose()
     {
         if (isClosed)
@@ -108,14 +111,16 @@ class SessionWorker<T extends Session> implements Agent
     }
 
     /**
-     * {@inheritDoc}
+     * Abort work.
      */
     protected void abort()
     {
     }
 
     /**
-     * {@inheritDoc}
+     * Close {@code session} and handle any exceptions thrown by {@link Session#close()}.
+     *
+     * @param session to close.
      */
     protected void closeSession(final T session)
     {
@@ -130,21 +135,23 @@ class SessionWorker<T extends Session> implements Agent
     }
 
     /**
-     * {@inheritDoc}
+     * Hook for specific behaviour after all sessions have been closed.
      */
     protected void postSessionsClose()
     {
     }
 
     /**
-     * {@inheritDoc}
+     * Hook for specific behaviour before all sessions are closed.
      */
     protected void preSessionsClose()
     {
     }
 
     /**
-     * {@inheritDoc}
+     * Add a {@code session} to the list of sessions used by this worker.
+     *
+     * @param session to add.
      */
     protected void addSession(final T session)
     {

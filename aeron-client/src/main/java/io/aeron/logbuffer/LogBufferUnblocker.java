@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,12 @@ import static io.aeron.logbuffer.LogBufferDescriptor.*;
 /**
  * Provides the functionality to unblock a log at a given position.
  */
-public class LogBufferUnblocker
+public final class LogBufferUnblocker
 {
+    private LogBufferUnblocker()
+    {
+    }
+
     /**
      * Attempt to unblock a log buffer at given position.
      *
@@ -59,6 +63,9 @@ public class LogBufferUnblocker
 
         switch (TermUnblocker.unblock(logMetaDataBuffer, termBuffer, blockedOffset, tailOffset, termId))
         {
+            case NO_ACTION:
+                break;
+
             case UNBLOCKED_TO_END:
                 rotateLog(logMetaDataBuffer, blockedTermCount, termId);
                 return true;

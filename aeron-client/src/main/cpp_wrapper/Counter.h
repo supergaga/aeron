@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,7 @@
 
 #include <cstdint>
 #include <memory>
-#include <atomic>
 
-#include "util/Index.h"
 #include "concurrent/AtomicCounter.h"
 #include "concurrent/CountersReader.h"
 
@@ -30,23 +28,37 @@ namespace aeron
 
 using namespace aeron::concurrent;
 
+class Aeron;
 class ClientConductor;
 
 class Counter : public AtomicCounter
 {
 public:
     /// @cond HIDDEN_SYMBOLS
-    Counter(aeron_counter_t *counter, CountersReader &reader, std::int64_t registrationId) :
-        AtomicCounter(counter), m_reader(reader), m_registrationId(registrationId)
+    Counter(
+        const std::shared_ptr<Aeron> &aeronRef,
+        CountersReader &reader,
+        aeron_counter_t *counter,
+        std::int64_t registrationId) :
+        AtomicCounter(counter),
+        m_aeronRef(aeronRef),
+        m_reader(reader),
+        m_registrationId(registrationId)
     {
     }
     /// @endcond
 
     Counter(CountersReader &reader, std::int64_t registrationId, std::int32_t counterId) :
-        AtomicCounter(reader.getCounterAddress(counterId), registrationId, counterId),
+        AtomicCounter(counterAddress(reader, counterId), registrationId, counterId),
         m_reader(reader),
         m_registrationId(registrationId)
     {
+    }
+
+    ~Counter()
+    {
+        // close before m_aeronRef is released, as the Aeron instance owns the underlying C counter
+        close();
     }
 
     inline std::int64_t registrationId() const
@@ -69,7 +81,28 @@ public:
         return aeron_counter_is_closed(counter());
     }
 
+    /// @cond HIDDEN_SYMBOLS
+    aeron_counter_t *c_counter() const
+    {
+        return counter();
+    }
+    /// @endcond
+
 private:
+    static std::int64_t *counterAddress(CountersReader &reader, std::int32_t counterId)
+    {
+        if (counterId < 0 || counterId > reader.maxCounterId())
+        {
+            throw util::IllegalArgumentException(
+                "counter id " + std::to_string(counterId) +
+                " out of range: maxCounterId=" + std::to_string(reader.maxCounterId()),
+                SOURCEINFO, EINVAL);
+        }
+
+        return reader.getCounterAddress(counterId);
+    }
+
+    std::shared_ptr<Aeron> m_aeronRef; // ensure Aeron instance is being deleted after its children
     CountersReader &m_reader;
     std::int64_t m_registrationId;
 };

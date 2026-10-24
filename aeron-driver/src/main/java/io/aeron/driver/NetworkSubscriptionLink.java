@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,14 @@ import io.aeron.driver.media.ReceiveChannelEndpoint;
 
 class NetworkSubscriptionLink extends SubscriptionLink
 {
+    enum ResponseSetupState
+    {
+        PENDING, COMPLETE, ERROR
+    }
+
     private final boolean isReliable;
-    private final boolean isRejoin;
     private final ReceiveChannelEndpoint channelEndpoint;
+    private ResponseSetupState responseSetupState = ResponseSetupState.PENDING;
 
     NetworkSubscriptionLink(
         final long registrationId,
@@ -34,18 +39,22 @@ class NetworkSubscriptionLink extends SubscriptionLink
         super(registrationId, streamId, channelUri, aeronClient, params);
 
         this.isReliable = params.isReliable;
-        this.isRejoin = params.isRejoin;
         this.channelEndpoint = channelEndpoint;
+    }
+
+    ResponseSetupState responseSetupState()
+    {
+        return responseSetupState;
+    }
+
+    void responseSetupState(final ResponseSetupState state)
+    {
+        responseSetupState = state;
     }
 
     boolean isReliable()
     {
         return isReliable;
-    }
-
-    boolean isRejoin()
-    {
-        return isRejoin;
     }
 
     ReceiveChannelEndpoint channelEndpoint()
@@ -62,12 +71,10 @@ class NetworkSubscriptionLink extends SubscriptionLink
 
     boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final SubscriptionParams params)
     {
-        final boolean isExactWildcardOrSessionIdMatch =
-            hasSessionId == params.hasSessionId && (!hasSessionId || this.sessionId == params.sessionId);
-
         return channelEndpoint == this.channelEndpoint &&
             streamId == this.streamId &&
-            isExactWildcardOrSessionIdMatch;
+            hasSessionId == params.hasSessionId &&
+            isWildcardOrSessionIdMatch(params.sessionId);
     }
 
     boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)

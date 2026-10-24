@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,19 +45,19 @@ const char *TERMINATION_KEY = "Exit please";
 class EmbeddedMediaDriver
 {
 public:
-    EmbeddedMediaDriver(std::function<void(aeron_driver_context_t *)> setContextFunc = [](aeron_driver_context_t *) {})
+    explicit EmbeddedMediaDriver(std::function<void(aeron_driver_context_t *)> setContextFunc = [](aeron_driver_context_t *) {})
         : m_setContextFunc(setContextFunc)
     {
     }
 
     ~EmbeddedMediaDriver()
     {
-        if (0 != aeron_driver_close(m_driver))
+        if (nullptr != m_driver && 0 != aeron_driver_close(m_driver))
         {
             fprintf(stderr, "ERROR: driver close (%d) %s\n", aeron_errcode(), aeron_errmsg());
         }
 
-        if (0 != aeron_driver_context_close(m_context))
+        if (nullptr != m_context && 0 != aeron_driver_context_close(m_context))
         {
             fprintf(stderr, "ERROR: driver context close (%d) %s\n", aeron_errcode(), aeron_errmsg());
         }

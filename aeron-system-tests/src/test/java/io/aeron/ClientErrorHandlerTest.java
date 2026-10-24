@@ -1,20 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-/*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -73,59 +58,61 @@ class ClientErrorHandlerTest
             .errorHandler(mockErrorHandlerTwo)
             .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE);
 
-        try (
-            TestMediaDriver ignore = TestMediaDriver.launch(ctx, testWatcher);
-            Aeron aeronOne = Aeron.connect(clientCtxOne);
-            Aeron aeronTwo = Aeron.connect(clientCtxTwo);
-            Publication publication = aeronOne.addPublication(CHANNEL, STREAM_ID);
-            Subscription subscriptionOne = aeronOne.addSubscription(CHANNEL, STREAM_ID);
-            Subscription subscriptionTwo = aeronTwo.addSubscription(CHANNEL, STREAM_ID))
+        try (TestMediaDriver ignore = TestMediaDriver.launch(ctx, testWatcher))
         {
-            awaitConnected(subscriptionOne);
-            awaitConnected(subscriptionTwo);
+            testWatcher.dataCollector().add(ctx.aeronDirectory());
 
-            assertEquals(clientCtxOne.errorHandler(), clientCtxOne.subscriberErrorHandler());
-            assertNotEquals(clientCtxTwo.errorHandler(), clientCtxTwo.subscriberErrorHandler());
-
-            final UnsafeBuffer buffer = new UnsafeBuffer(new byte[100]);
-            while (publication.offer(buffer) < 0)
+            try (
+                Aeron aeronOne = Aeron.connect(clientCtxOne);
+                Aeron aeronTwo = Aeron.connect(clientCtxTwo);
+                Publication publication = aeronOne.addPublication(CHANNEL, STREAM_ID);
+                Subscription subscriptionOne = aeronOne.addSubscription(CHANNEL, STREAM_ID);
+                Subscription subscriptionTwo = aeronTwo.addSubscription(CHANNEL, STREAM_ID))
             {
-                Tests.yield();
-            }
+                testWatcher.dataCollector().add(ctx.aeronDirectory());
 
-            final RuntimeException expectedException = new RuntimeException("Expected");
-            final FragmentHandler handler =
-                (buffer1, offset, length, header) ->
-                {
-                    throw expectedException;
-                };
+                awaitConnected(subscriptionOne);
+                awaitConnected(subscriptionTwo);
 
-            while (0 == subscriptionOne.poll(handler, 1))
-            {
-                Tests.yield();
-            }
+                assertEquals(clientCtxOne.errorHandler(), clientCtxOne.subscriberErrorHandler());
+                assertNotEquals(clientCtxTwo.errorHandler(), clientCtxTwo.subscriberErrorHandler());
 
-            verify(mockErrorHandlerOne).onError(expectedException);
-
-            try
-            {
-                while (0 == subscriptionTwo.poll(handler, 1))
+                final UnsafeBuffer buffer = new UnsafeBuffer(new byte[100]);
+                while (publication.offer(buffer) < 0)
                 {
                     Tests.yield();
                 }
 
-                fail("Expected exception");
-            }
-            catch (final Exception ex)
-            {
-                assertEquals(expectedException, ex);
-            }
+                final RuntimeException expectedException = new RuntimeException("Expected");
+                final FragmentHandler handler =
+                    (buffer1, offset, length, header) ->
+                    {
+                        throw expectedException;
+                    };
 
-            verify(mockErrorHandlerTwo, never()).onError(any());
-        }
-        finally
-        {
-            ctx.deleteDirectory();
+                while (0 == subscriptionOne.poll(handler, 1))
+                {
+                    Tests.yield();
+                }
+
+                verify(mockErrorHandlerOne).onError(expectedException);
+
+                try
+                {
+                    while (0 == subscriptionTwo.poll(handler, 1))
+                    {
+                        Tests.yield();
+                    }
+
+                    fail("Expected exception");
+                }
+                catch (final Exception ex)
+                {
+                    assertEquals(expectedException, ex);
+                }
+
+                verify(mockErrorHandlerTwo, never()).onError(any());
+            }
         }
     }
 }

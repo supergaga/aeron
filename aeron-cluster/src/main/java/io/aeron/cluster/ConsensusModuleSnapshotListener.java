@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,9 +32,6 @@ interface ConsensusModuleSnapshotListener
         DirectBuffer buffer,
         int offset,
         int length);
-
-    void onLoadClusterMembers(
-        int memberId, int highMemberId, String clusterMembers, DirectBuffer buffer, int offset, int length);
 
     void onLoadPendingMessage(long clusterSessionId, DirectBuffer buffer, int offset, int length);
 

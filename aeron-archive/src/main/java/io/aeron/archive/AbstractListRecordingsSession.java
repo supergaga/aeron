@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,16 @@
  */
 package io.aeron.archive;
 
-import io.aeron.Aeron;
 import org.agrona.concurrent.UnsafeBuffer;
 
 abstract class AbstractListRecordingsSession implements Session
 {
-    static final int MAX_SCANS_PER_WORK_CYCLE = 256;
+    static final int MAX_SCANS_PER_WORK_CYCLE = 64;
 
     private final UnsafeBuffer descriptorBuffer;
     private final Catalog catalog;
     private final int count;
     private final ControlSession controlSession;
-    private final ControlResponseProxy proxy;
     private final long correlationId;
     private long recordingId;
     private int sent;
@@ -37,7 +35,6 @@ abstract class AbstractListRecordingsSession implements Session
         final long fromRecordingId,
         final int count,
         final Catalog catalog,
-        final ControlResponseProxy proxy,
         final ControlSession controlSession,
         final UnsafeBuffer descriptorBuffer)
     {
@@ -46,14 +43,14 @@ abstract class AbstractListRecordingsSession implements Session
         this.count = count;
         this.controlSession = controlSession;
         this.catalog = catalog;
-        this.proxy = proxy;
         this.descriptorBuffer = descriptorBuffer;
     }
 
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    @Override
+    public void abort(final String reason)
     {
         isDone = true;
     }
@@ -61,6 +58,7 @@ abstract class AbstractListRecordingsSession implements Session
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean isDone()
     {
         return isDone;
@@ -69,14 +67,16 @@ abstract class AbstractListRecordingsSession implements Session
     /**
      * {@inheritDoc}
      */
+    @Override
     public long sessionId()
     {
-        return Aeron.NULL_VALUE;
+        return correlationId;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
         if (isDone)
@@ -101,26 +101,24 @@ abstract class AbstractListRecordingsSession implements Session
             }
         }
 
-        final int alreadySent = sent;
+        final int batchStartPosition = position;
         for (int recordsScanned = 0; sent < count && recordsScanned < MAX_SCANS_PER_WORK_CYCLE; recordsScanned++)
         {
             final boolean noMoreRecordings = position < 0 || position > lastPosition;
             if (noMoreRecordings || catalog.wrapDescriptorAtOffset(descriptorBuffer, (int)index[position + 1]) < 0)
             {
-                controlSession.sendRecordingUnknown(
-                    correlationId, noMoreRecordings ? recordingId : index[position], proxy);
+                controlSession.sendRecordingUnknown(correlationId, noMoreRecordings ? recordingId : index[position]);
                 isDone = true;
                 break;
             }
 
             if (acceptDescriptor(descriptorBuffer))
             {
-                if (0 == controlSession.sendDescriptor(correlationId, descriptorBuffer, proxy))
+                if (!controlSession.sendDescriptor(correlationId, descriptorBuffer))
                 {
                     isDone = controlSession.isDone();
                     break;
                 }
-
                 ++sent;
             }
 
@@ -140,12 +138,13 @@ abstract class AbstractListRecordingsSession implements Session
             isDone = true;
         }
 
-        return sent - alreadySent;
+        return (position - batchStartPosition) / 2;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         controlSession.activeListing(null);

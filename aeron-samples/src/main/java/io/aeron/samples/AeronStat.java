@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,10 @@ package io.aeron.samples;
 
 import io.aeron.CncFileDescriptor;
 import io.aeron.status.ChannelEndpointStatus;
+import org.agrona.AsciiEncoding;
 import org.agrona.DirectBuffer;
 import org.agrona.SystemUtil;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.IOException;
@@ -36,7 +37,10 @@ import static io.aeron.driver.status.ReceiveChannelStatus.RECEIVE_CHANNEL_STATUS
 import static io.aeron.driver.status.ReceiverPos.RECEIVER_POS_TYPE_ID;
 import static io.aeron.driver.status.SendChannelStatus.SEND_CHANNEL_STATUS_TYPE_ID;
 import static io.aeron.driver.status.SenderLimit.SENDER_LIMIT_TYPE_ID;
-import static io.aeron.driver.status.StreamCounter.*;
+import static io.aeron.driver.status.StreamCounter.CHANNEL_OFFSET;
+import static io.aeron.driver.status.StreamCounter.REGISTRATION_ID_OFFSET;
+import static io.aeron.driver.status.StreamCounter.SESSION_ID_OFFSET;
+import static io.aeron.driver.status.StreamCounter.STREAM_ID_OFFSET;
 import static io.aeron.driver.status.SystemCounterDescriptor.SYSTEM_COUNTER_TYPE_ID;
 
 /**
@@ -52,6 +56,7 @@ import static io.aeron.driver.status.SystemCounterDescriptor.SYSTEM_COUNTER_TYPE
  */
 public class AeronStat
 {
+    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("HH:mm:ss");
     private static final String ANSI_CLS = "\u001b[2J";
     private static final String ANSI_HOME = "\u001b[H";
 
@@ -99,7 +104,7 @@ public class AeronStat
      * Main method for launching the process.
      *
      * @param args passed to the process.
-     * @throws IOException if an error occurs writing to the console.
+     * @throws IOException          if an error occurs writing to the console.
      * @throws InterruptedException if the thread sleep delay is interrupted.
      */
     public static void main(final String[] args) throws IOException, InterruptedException
@@ -180,33 +185,35 @@ public class AeronStat
         }
     }
 
+    @SuppressWarnings("try")
     private static void workLoop(final long delayMs, final Runnable outputPrinter)
         throws IOException, InterruptedException
     {
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        do
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            clearScreen();
-            outputPrinter.run();
-            Thread.sleep(delayMs);
+            do
+            {
+                clearScreen();
+                outputPrinter.run();
+                Thread.sleep(delayMs);
+            }
+            while (running.get());
         }
-        while (running.get());
     }
 
     private static void printOutput(final CncFileReader cncFileReader, final CounterFilter counterFilter)
     {
-        final SimpleDateFormat dateFormat = new SimpleDateFormat("HH:mm:ss");
-
-        System.out.print(dateFormat.format(new Date()));
+        System.out.print(DATE_FORMAT.format(new Date()));
         System.out.println(
             " - Aeron Stat (CnC v" + cncFileReader.semanticVersion() + ")" +
-            ", pid " + SystemUtil.getPid() +
+            ", pid " + cncFileReader.driverPid() +
             ", heartbeat age " + cncFileReader.driverHeartbeatAgeMs() + "ms");
         System.out.println("======================================================================");
 
         final CountersReader counters = cncFileReader.countersReader();
+        final int maxIdWidth = AsciiEncoding.digitCount(counters.maxCounterId());
+        final String formatString = "%" + maxIdWidth + "d: %,26d - %s%n";
 
         counters.forEach(
             (counterId, typeId, keyBuffer, label) ->
@@ -214,7 +221,7 @@ public class AeronStat
                 if (counterFilter.filter(typeId, keyBuffer))
                 {
                     final long value = counters.getCounterValue(counterId);
-                    System.out.format("%3d: %,20d - %s%n", counterId, value, label);
+                    System.out.format(formatString, counterId, value, label);
                 }
             }
         );
@@ -248,7 +255,7 @@ public class AeronStat
     {
         if (SystemUtil.isWindows())
         {
-            new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
+            new ProcessBuilder("C:\\Windows\\System32\\cmd.exe", "/c", "cls").inheritIO().start().waitFor();
         }
         else
         {

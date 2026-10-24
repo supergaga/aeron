@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,4 +64,30 @@ public class RecordingSummary
      * The stream-id of the recorded stream.
      */
     public int streamId;
+
+    /**
+     * Default constructor.
+     */
+    public RecordingSummary()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "RecordingSummary{" +
+            "recordingId=" + recordingId +
+            ", startPosition=" + startPosition +
+            ", stopPosition=" + stopPosition +
+            ", initialTermId=" + initialTermId +
+            ", segmentFileLength=" + segmentFileLength +
+            ", termBufferLength=" + termBufferLength +
+            ", mtuLength=" + mtuLength +
+            ", sessionId=" + sessionId +
+            ", streamId=" + streamId +
+            '}';
+    }
 }

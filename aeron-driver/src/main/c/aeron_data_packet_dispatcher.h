@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,6 +48,7 @@ typedef struct aeron_data_packet_dispatcher_stct
 
     aeron_driver_conductor_proxy_t *conductor_proxy;
     aeron_driver_receiver_t *receiver;
+    int32_t stream_session_limit;
 }
 aeron_data_packet_dispatcher_t;
 
@@ -60,8 +61,9 @@ int aeron_data_packet_dispatcher_close(aeron_data_packet_dispatcher_t *dispatche
 typedef struct aeron_data_packet_dispatcher_stream_interest_stct
 {
     bool is_all_sessions;
-    aeron_int64_to_tagged_ptr_hash_map_t image_by_session_id_map;
     aeron_int64_to_ptr_hash_map_t subscribed_sessions;
+    aeron_int64_to_ptr_hash_map_t image_by_session_id_map;
+    aeron_int64_counter_map_t state_by_session_id_map;
 }
 aeron_data_packet_dispatcher_stream_interest_t;
 
@@ -77,6 +79,7 @@ int aeron_data_packet_dispatcher_add_publication_image(
 int aeron_data_packet_dispatcher_remove_publication_image(
     aeron_data_packet_dispatcher_t *dispatcher, aeron_publication_image_t *image);
 
+// Used by ATS
 bool aeron_data_packet_dispatcher_has_interest_in(
     aeron_data_packet_dispatcher_t *dispatcher, int32_t stream_id, int32_t session_id);
 
@@ -87,7 +90,8 @@ int aeron_data_packet_dispatcher_on_data(
     aeron_data_header_t *header,
     uint8_t *buffer,
     size_t length,
-    struct sockaddr_storage *addr);
+    struct sockaddr_storage *addr,
+    struct timespec *media_receive_timestamp);
 
 int aeron_data_packet_dispatcher_on_setup(
     aeron_data_packet_dispatcher_t *dispatcher,
@@ -107,6 +111,15 @@ int aeron_data_packet_dispatcher_on_rttm(
     size_t length,
     struct sockaddr_storage *addr);
 
+// Used by ATS
+int aeron_data_packet_dispatcher_try_connect_stream(
+    aeron_data_packet_dispatcher_t *dispatcher,
+    aeron_receive_channel_endpoint_t *endpoint,
+    aeron_receive_destination_t *destination,
+    int32_t stream_id,
+    int32_t session_id,
+    struct sockaddr_storage *addr);
+
 int aeron_data_packet_dispatcher_elicit_setup_from_source(
     aeron_data_packet_dispatcher_t *dispatcher,
     aeron_data_packet_dispatcher_stream_interest_t *stream_interest,
@@ -116,7 +129,7 @@ int aeron_data_packet_dispatcher_elicit_setup_from_source(
     int32_t stream_id,
     int32_t session_id);
 
-inline int aeron_data_packet_dispatcher_remove_with_state(
+inline void aeron_data_packet_dispatcher_remove_matching_state(
     aeron_data_packet_dispatcher_t *dispatcher,
     int32_t session_id,
     int32_t stream_id,
@@ -128,28 +141,30 @@ inline int aeron_data_packet_dispatcher_remove_with_state(
 
     if (NULL != stream_interest)
     {
-        uint32_t tag = 0;
-        aeron_int64_to_tagged_ptr_hash_map_get(&stream_interest->image_by_session_id_map, session_id, &tag, NULL);
-        if (image_state == tag)
+        if (AERON_DATA_PACKET_DISPATCHER_IMAGE_ACTIVE == image_state)
         {
-            aeron_int64_to_tagged_ptr_hash_map_remove(&stream_interest->image_by_session_id_map, session_id, NULL, NULL);
+            aeron_int64_to_ptr_hash_map_remove(&stream_interest->image_by_session_id_map, session_id);
+        }
+        else
+        {
+            int64_t state = aeron_int64_counter_map_get(&stream_interest->state_by_session_id_map, session_id);
+
+            // If not found state will be -1 so won't match.
+            if ((int64_t)image_state == state)
+            {
+                aeron_int64_counter_map_remove(&stream_interest->state_by_session_id_map, session_id);
+            }
         }
     }
-
-    return 0;
 }
 
-inline int aeron_data_packet_dispatcher_remove_pending_setup(
-    aeron_data_packet_dispatcher_t *dispatcher, int32_t session_id, int32_t stream_id)
-{
-    return aeron_data_packet_dispatcher_remove_with_state(
-        dispatcher, session_id, stream_id, AERON_DATA_PACKET_DISPATCHER_IMAGE_PENDING_SETUP_FRAME);
-}
+void aeron_data_packet_dispatcher_remove_pending_setup(
+    aeron_data_packet_dispatcher_t *dispatcher, int32_t session_id, int32_t stream_id);
 
-inline int aeron_data_packet_dispatcher_remove_cool_down(
+inline void aeron_data_packet_dispatcher_remove_cool_down(
     aeron_data_packet_dispatcher_t *dispatcher, int32_t session_id, int32_t stream_id)
 {
-    return aeron_data_packet_dispatcher_remove_with_state(
+    aeron_data_packet_dispatcher_remove_matching_state(
         dispatcher, session_id, stream_id, AERON_DATA_PACKET_DISPATCHER_IMAGE_COOL_DOWN);
 }
 

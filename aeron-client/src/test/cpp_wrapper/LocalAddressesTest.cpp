@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 #include "TestUtil.h"
 
 using namespace aeron;
+using namespace aeron::concurrent::status;
 using testing::MockFunction;
 using testing::_;
 
@@ -103,12 +104,22 @@ TEST_F(LocalAddressesTest, shouldGetLocalAddressesForIpc)
 
     AgentInvoker<ClientConductor> &invoker = aeron->conductorAgentInvoker();
     std::int64_t subId = aeron->addSubscription(channel, streamId);
+    std::int64_t pubId = aeron->addPublication(channel, streamId);
+    std::int64_t exclusivePubId = aeron->addExclusivePublication(channel, streamId);
 
     {
         POLL_FOR_NON_NULL(sub, aeron->findSubscription(subId), invoker);
         auto subAddresses = sub->localSocketAddresses();
         ASSERT_EQ(0U, subAddresses.size()) << join(subAddresses);
         ASSERT_EQ(channel, sub->tryResolveChannelEndpointPort());
+
+        POLL_FOR_NON_NULL(pub, aeron->findPublication(pubId), invoker);
+        auto pubAddresses = pub->localSocketAddresses();
+        ASSERT_EQ(0U, pubAddresses.size()) << join(pubAddresses);
+
+        POLL_FOR_NON_NULL(exclusivePub, aeron->findExclusivePublication(exclusivePubId), invoker);
+        auto exclusivePubAddresses = exclusivePub->localSocketAddresses();
+        ASSERT_EQ(0U, exclusivePubAddresses.size()) << join(exclusivePubAddresses);
     }
 
     invoker.invoke();
@@ -143,6 +154,30 @@ TEST_F(LocalAddressesTest, shouldGetLocalAddressesForMds)
             std::string expectedAddress = "127.0.0.1:" + std::to_string(9000 + i);
             ASSERT_EQ(expectedAddress, subAddresses[i]);
         }
+    }
+
+    invoker.invoke();
+}
+
+TEST_F(LocalAddressesTest, shouldGetChannelStatusForPublications)
+{
+    std::int32_t streamId = 10001;
+    std::string channel = "aeron:udp?endpoint=127.0.0.1:23456";
+
+    Context ctx;
+    ctx.useConductorAgentInvoker(true);
+    std::shared_ptr<Aeron> aeron = Aeron::connect(ctx);
+
+    AgentInvoker<ClientConductor> &invoker = aeron->conductorAgentInvoker();
+    std::int64_t pubId = aeron->addPublication(channel, streamId);
+    std::int64_t exclusivePubId = aeron->addExclusivePublication(channel, streamId);
+
+    {
+        POLL_FOR_NON_NULL(pub, aeron->findPublication(pubId), invoker);
+        POLL_FOR_NON_NULL(exclusivePub, aeron->findExclusivePublication(exclusivePubId), invoker);
+
+        EXPECT_EQ(ChannelEndpointStatus::CHANNEL_ENDPOINT_ACTIVE, pub->channelStatus());
+        EXPECT_EQ(ChannelEndpointStatus::CHANNEL_ENDPOINT_ACTIVE, exclusivePub->channelStatus());
     }
 
     invoker.invoke();

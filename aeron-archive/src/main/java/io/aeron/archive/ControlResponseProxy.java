@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,9 @@ package io.aeron.archive;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
-import io.aeron.archive.client.ArchiveException;
+import io.aeron.archive.client.ArchiveEvent;
 import io.aeron.archive.codecs.*;
+import io.aeron.archive.logging.ArchiveTracing;
 import io.aeron.exceptions.AeronException;
 import io.aeron.logbuffer.BufferClaim;
 import org.agrona.DirectBuffer;
@@ -48,8 +49,9 @@ class ControlResponseProxy
         new RecordingSubscriptionDescriptorEncoder();
     private final RecordingSignalEventEncoder recordingSignalEventEncoder = new RecordingSignalEventEncoder();
     private final ChallengeEncoder challengeEncoder = new ChallengeEncoder();
+    private final PingEncoder pingEncoder = new PingEncoder();
 
-    int sendDescriptor(
+    boolean sendDescriptor(
         final long controlSessionId,
         final long correlationId,
         final UnsafeBuffer descriptorBuffer,
@@ -67,23 +69,23 @@ class ControlResponseProxy
         final Publication publication = session.controlPublication();
         do
         {
-            final long result = publication.offer(
+            final long position = publication.offer(
                 buffer,
                 0,
                 DESCRIPTOR_PREFIX_LENGTH,
                 descriptorBuffer,
                 DESCRIPTOR_CONTENT_OFFSET,
                 contentLength);
-            if (result > 0)
+            if (position > 0)
             {
-                return messageLength;
+                return true;
             }
 
-            checkResult(session, result);
+            checkResult(session, position);
         }
         while (--attempts > 0);
 
-        return 0;
+        return false;
     }
 
     boolean sendSubscriptionDescriptor(
@@ -122,7 +124,23 @@ class ControlResponseProxy
             .version(AeronArchive.Configuration.PROTOCOL_SEMANTIC_VERSION)
             .errorMessage(errorMessage);
 
-        return sendResponseHook(session, buffer, MESSAGE_HEADER_LENGTH + responseEncoder.encodedLength());
+        final int length = MESSAGE_HEADER_LENGTH + responseEncoder.encodedLength();
+        final int offset = 0;
+        int attempts = SEND_ATTEMPTS;
+        do
+        {
+            final long position = session.controlPublication().offer(buffer, offset, length);
+            if (position > 0)
+            {
+                logSendResponse(buffer, offset, length);
+                return true;
+            }
+
+            checkResult(session, position);
+        }
+        while (--attempts > 0);
+
+        return false;
     }
 
     boolean sendChallenge(
@@ -149,19 +167,19 @@ class ControlResponseProxy
         final RecordingSignal recordingSignal,
         final Publication controlPublication)
     {
-        final int messageLength = MESSAGE_HEADER_LENGTH + RecordingSignalEventEncoder.BLOCK_LENGTH;
+        final int length = MESSAGE_HEADER_LENGTH + RecordingSignalEventEncoder.BLOCK_LENGTH;
 
         int attempts = SEND_ATTEMPTS;
         do
         {
-            final long result = controlPublication.tryClaim(messageLength, bufferClaim);
+            final long result = controlPublication.tryClaim(length, bufferClaim);
             if (result > 0)
             {
                 final MutableDirectBuffer buffer = bufferClaim.buffer();
-                final int bufferOffset = bufferClaim.offset();
+                final int offset = bufferClaim.offset();
 
                 recordingSignalEventEncoder
-                    .wrapAndApplyHeader(buffer, bufferOffset, messageHeaderEncoder)
+                    .wrapAndApplyHeader(buffer, offset, messageHeaderEncoder)
                     .controlSessionId(controlSessionId)
                     .correlationId(correlationId)
                     .recordingId(recordingId)
@@ -169,6 +187,31 @@ class ControlResponseProxy
                     .position(position)
                     .signal(recordingSignal);
 
+                bufferClaim.commit();
+
+                logSendSignal(buffer, offset, length);
+                return true;
+            }
+        }
+        while (--attempts > 0);
+
+        return false;
+    }
+
+    public boolean sendPing(final long controlSessionId, final Publication controlPublication)
+    {
+        final int length = MESSAGE_HEADER_LENGTH + PingEncoder.BLOCK_LENGTH;
+
+        int attempts = SEND_ATTEMPTS;
+        do
+        {
+            final long result = controlPublication.tryClaim(length, bufferClaim);
+            if (result > 0)
+            {
+                final MutableDirectBuffer buffer = bufferClaim.buffer();
+                final int offset = bufferClaim.offset();
+                pingEncoder.wrapAndApplyHeader(buffer, offset, messageHeaderEncoder)
+                    .controlSessionId(controlSessionId);
                 bufferClaim.commit();
                 return true;
             }
@@ -178,23 +221,18 @@ class ControlResponseProxy
         return false;
     }
 
-    private boolean sendResponseHook(final ControlSession session, final DirectBuffer buffer, final int length)
-    {
-        return send(session, buffer, length);
-    }
-
     private boolean send(final ControlSession session, final DirectBuffer buffer, final int length)
     {
         int attempts = SEND_ATTEMPTS;
         do
         {
-            final long result = session.controlPublication().offer(buffer, 0, length);
-            if (result > 0)
+            final long position = session.controlPublication().offer(buffer, 0, length);
+            if (position > 0)
             {
                 return true;
             }
 
-            checkResult(session, result);
+            checkResult(session, position);
         }
         while (--attempts > 0);
 
@@ -205,21 +243,31 @@ class ControlResponseProxy
     {
         if (result == Publication.NOT_CONNECTED)
         {
-            session.abort();
-            throw new ArchiveException(
-                "response publication is not connected: " + session, AeronException.Category.WARN);
+            session.abort(ControlSession.RESPONSE_NOT_CONNECTED_MSG);
+            throw new ArchiveEvent(ControlSession.RESPONSE_NOT_CONNECTED_MSG + ": " + session);
         }
 
         if (result == Publication.CLOSED)
         {
-            session.abort();
-            throw new ArchiveException("response publication is closed: " + session);
+            session.abort("control response publication is closed");
+            throw new ArchiveEvent("response publication is closed: " + session, AeronException.Category.ERROR);
         }
 
         if (result == Publication.MAX_POSITION_EXCEEDED)
         {
-            session.abort();
-            throw new ArchiveException("response publication at max position: " + session);
+            session.abort("control response publication is at max position");
+            throw new ArchiveEvent(
+                "response publication is at max position: " + session, AeronException.Category.ERROR);
         }
+    }
+
+    private void logSendResponse(final DirectBuffer buffer, final int offset, final int length)
+    {
+        ArchiveTracing.traceControlResponse(buffer, offset, length);
+    }
+
+    private void logSendSignal(final DirectBuffer buffer, final int offset, final int length)
+    {
+        ArchiveTracing.traceRecordingSignal(buffer, offset, length);
     }
 }

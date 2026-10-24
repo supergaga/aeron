@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -55,12 +56,9 @@ class PublishFromArbitraryPositionTest
     @RegisterExtension
     final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Tests::onError)
-        .threadingMode(ThreadingMode.SHARED),
-        testWatcher);
+    private TestMediaDriver driver;
 
-    private final Aeron aeron = Aeron.connect();
+    private Aeron aeron;
 
     @RegisterExtension
     final TestWatcher randomSeedWatcher = new TestWatcher()
@@ -71,11 +69,22 @@ class PublishFromArbitraryPositionTest
         }
     };
 
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .errorHandler(Tests::onError)
+                .threadingMode(ThreadingMode.SHARED),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
+    }
+
     @AfterEach
     void after()
     {
         CloseHelper.closeAll(aeron, driver);
-        driver.context().deleteDirectory();
     }
 
     @Test

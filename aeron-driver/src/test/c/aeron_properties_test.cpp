@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -169,6 +169,11 @@ TEST_F(DriverConfigurationTest, shouldParseContinuationWithBlankLine)
     EXPECT_EQ(parseLine("   Value"), 1);
     EXPECT_EQ(m_name, "propertyName");
     EXPECT_EQ(m_value, "propertyValue");
+}
+
+TEST_F(DriverConfigurationTest, shouldIgnoreMissingPropertiesFile)
+{
+    EXPECT_EQ(aeron_properties_file_load("/tmp/aeron-nonexistent-properties-file.properties"), 0);
 }
 
 TEST_F(DriverConfigurationTest, DISABLED_shouldHttpRetrieve)

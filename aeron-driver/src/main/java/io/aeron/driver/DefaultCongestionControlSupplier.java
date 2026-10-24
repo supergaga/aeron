@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,8 +30,16 @@ import java.net.InetSocketAddress;
 public class DefaultCongestionControlSupplier implements CongestionControlSupplier
 {
     /**
+     * Default constructor.
+     */
+    public DefaultCongestionControlSupplier()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public CongestionControl newInstance(
         final long registrationId,
         final UdpChannel udpChannel,

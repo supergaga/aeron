@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ public class ControlProtocolException extends AeronException
      */
     public ControlProtocolException(final ErrorCode code, final String msg)
     {
-        super(msg);
+        super(msg, errorToCategory(code));
         this.code = code;
     }
 
@@ -49,7 +49,20 @@ public class ControlProtocolException extends AeronException
      */
     public ControlProtocolException(final ErrorCode code, final Exception rootCause)
     {
-        super(rootCause);
+        super(rootCause, errorToCategory(code));
+        this.code = code;
+    }
+
+    /**
+     * Construct an exception to indicate an invalid command has been sent to the media driver.
+     *
+     * @param code      for the type of error.
+     * @param msg       providing more detail.
+     * @param rootCause of the error.
+     */
+    public ControlProtocolException(final ErrorCode code, final String msg, final Exception rootCause)
+    {
+        super(msg, rootCause, errorToCategory(code));
         this.code = code;
     }
 
@@ -61,5 +74,10 @@ public class ControlProtocolException extends AeronException
     public ErrorCode errorCode()
     {
         return code;
+    }
+
+    static Category errorToCategory(final ErrorCode errorCode)
+    {
+        return ErrorCode.RESOURCE_TEMPORARILY_UNAVAILABLE == errorCode ? Category.WARN : Category.ERROR;
     }
 }

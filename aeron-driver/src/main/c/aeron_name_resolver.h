@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include "aeron_driver_common.h"
 #include "aeron_driver_context.h"
 #include "aeron_system_counters.h"
+#include "util/aeron_parse_util.h"
 
 #define AERON_NAME_RESOLVER_CSV_TABLE "csv_table"
 #define AERON_NAME_RESOLVER_DRIVER "driver"
@@ -43,8 +44,10 @@ typedef int (*aeron_name_resolver_lookup_func_t)(
     aeron_name_resolver_t *resolver,
     const char *name,
     const char *uri_param_name,
-    bool is_re_resolution,
+    bool is_re_lookup,
     const char **resolved_name);
+
+typedef int (*aeron_name_resolver_on_start_func_t)(aeron_name_resolver_t *resolver);
 
 typedef int (*aeron_name_resolver_do_work_func_t)(aeron_name_resolver_t *resolver, int64_t now_ms);
 
@@ -55,9 +58,9 @@ typedef struct aeron_name_resolver_stct
     const char *name;
     aeron_name_resolver_lookup_func_t lookup_func;
     aeron_name_resolver_resolve_func_t resolve_func;
+    aeron_name_resolver_on_start_func_t start_func;
     aeron_name_resolver_do_work_func_t do_work_func;
     aeron_name_resolver_close_func_t close_func;
-    aeron_driver_name_resolver_on_resolve_t on_resolve_func;
     void *state;
 }
 aeron_name_resolver_t;
@@ -80,12 +83,23 @@ int aeron_default_name_resolver_lookup(
     aeron_name_resolver_t *resolver,
     const char *name,
     const char *uri_param_name,
-    bool is_re_resolution,
+    bool is_re_lookup,
     const char **resolved_name);
+
+int aeron_default_name_resolver_start(aeron_name_resolver_t *resolver);
 
 int aeron_default_name_resolver_do_work(aeron_name_resolver_t *resolver, int64_t now_ms);
 
 int aeron_default_name_resolver_close(aeron_name_resolver_t *resolver);
+
+typedef struct aeron_name_resolver_async_resolve_stct
+{
+    const char *uri_param_name;
+    bool is_re_resolution;
+    char endpoint_name[AERON_MAX_HOST_LENGTH + 1];
+    struct sockaddr_storage resolved_address;
+}
+aeron_name_resolver_async_resolve_t;
 
 int aeron_name_resolver_resolve_host_and_port(
     aeron_name_resolver_t *resolver,

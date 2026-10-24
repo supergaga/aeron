@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,6 +95,6 @@ public class TestLogFactory implements LogFactory
 
     private static UnsafeBuffer newLogBuffer(final int termBufferLength)
     {
-        return new UnsafeBuffer(ByteBuffer.allocate(termBufferLength));
+        return new UnsafeBuffer(ByteBuffer.allocateDirect(termBufferLength));
     }
 }

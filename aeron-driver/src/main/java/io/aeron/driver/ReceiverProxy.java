@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,35 +15,25 @@
  */
 package io.aeron.driver;
 
+import io.aeron.driver.logging.DriverTracing;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
 import io.aeron.driver.media.ReceiveDestinationTransport;
 import io.aeron.driver.media.UdpChannel;
-import org.agrona.concurrent.AgentTerminationException;
-import org.agrona.concurrent.QueuedPipe;
+import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
 
-import static io.aeron.driver.ThreadingMode.INVOKER;
-import static io.aeron.driver.ThreadingMode.SHARED;
-
 /**
  * Proxy for offering into the {@link Receiver} Thread's command queue.
  */
-final class ReceiverProxy
+final class ReceiverProxy extends CommandProxy
 {
-    private final ThreadingMode threadingMode;
-    private final QueuedPipe<Runnable> commandQueue;
-    private final AtomicCounter failCount;
-
     private Receiver receiver;
 
-    ReceiverProxy(
-        final ThreadingMode threadingMode, final QueuedPipe<Runnable> commandQueue, final AtomicCounter failCount)
+    ReceiverProxy(final OneToOneConcurrentArrayQueue<Runnable> commandQueue, final AtomicCounter failCount)
     {
-        this.threadingMode = threadingMode;
-        this.commandQueue = commandQueue;
-        this.failCount = failCount;
+        super(commandQueue, failCount);
     }
 
     void receiver(final Receiver receiver)
@@ -56,163 +46,79 @@ final class ReceiverProxy
         return receiver;
     }
 
-    boolean isApplyingBackpressure()
-    {
-        return commandQueue.remainingCapacity() < 1;
-    }
-
     void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onAddSubscription(mediaEndpoint, streamId);
-        }
-        else
-        {
-            offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId));
-        }
+        offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId));
     }
 
     void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId, final int sessionId)
     {
-        if (notConcurrent())
-        {
-            receiver.onAddSubscription(mediaEndpoint, streamId, sessionId);
-        }
-        else
-        {
-            offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId, sessionId));
-        }
+        offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId, sessionId));
     }
 
     void removeSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveSubscription(mediaEndpoint, streamId);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId));
-        }
+        offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId));
     }
 
     void removeSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId, final int sessionId)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveSubscription(mediaEndpoint, streamId, sessionId);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId, sessionId));
-        }
+        offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId, sessionId));
     }
 
     void newPublicationImage(final ReceiveChannelEndpoint channelEndpoint, final PublicationImage image)
     {
-        if (notConcurrent())
-        {
-            receiver.onNewPublicationImage(channelEndpoint, image);
-        }
-        else
-        {
-            offer(() -> receiver.onNewPublicationImage(channelEndpoint, image));
-        }
+        offer(() -> receiver.onNewPublicationImage(channelEndpoint, image));
     }
 
     void registerReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            receiver.onRegisterReceiveChannelEndpoint(channelEndpoint);
-        }
-        else
-        {
-            offer(() -> receiver.onRegisterReceiveChannelEndpoint(channelEndpoint));
-        }
+        DriverTracing.traceReceiveChannelCreation(channelEndpoint.udpChannel().description());
+        offer(() -> receiver.onRegisterReceiveChannelEndpoint(channelEndpoint));
     }
 
     void closeReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            receiver.onCloseReceiveChannelEndpoint(channelEndpoint);
-        }
-        else
-        {
-            offer(() -> receiver.onCloseReceiveChannelEndpoint(channelEndpoint));
-        }
+        DriverTracing.traceReceiveChannelClose(channelEndpoint.udpChannel().description());
+        offer(() -> receiver.onCloseReceiveChannelEndpoint(channelEndpoint));
     }
 
     void removeCoolDown(final ReceiveChannelEndpoint channelEndpoint, final int sessionId, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveCoolDown(channelEndpoint, sessionId, streamId);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveCoolDown(channelEndpoint, sessionId, streamId));
-        }
+        offer(() -> receiver.onRemoveCoolDown(channelEndpoint, sessionId, streamId));
+    }
+
+    void removeInitInProgress(final ReceiveChannelEndpoint channelEndpoint, final int sessionId, final int streamId)
+    {
+        offer(() -> receiver.onRemoveInitInProgress(channelEndpoint, sessionId, streamId));
     }
 
     void addDestination(final ReceiveChannelEndpoint channelEndpoint, final ReceiveDestinationTransport transport)
     {
-        if (notConcurrent())
-        {
-            receiver.onAddDestination(channelEndpoint, transport);
-        }
-        else
-        {
-            offer(() -> receiver.onAddDestination(channelEndpoint, transport));
-        }
+        offer(() -> receiver.onAddDestination(channelEndpoint, transport));
     }
 
     void removeDestination(final ReceiveChannelEndpoint channelEndpoint, final UdpChannel udpChannel)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveDestination(channelEndpoint, udpChannel);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveDestination(channelEndpoint, udpChannel));
-        }
+        offer(() -> receiver.onRemoveDestination(channelEndpoint, udpChannel));
     }
 
     void onResolutionChange(
         final ReceiveChannelEndpoint channelEndpoint, final UdpChannel udpChannel, final InetSocketAddress newAddress)
     {
-        if (notConcurrent())
-        {
-            receiver.onResolutionChange(channelEndpoint, udpChannel, newAddress);
-        }
-        else
-        {
-            offer(() -> receiver.onResolutionChange(channelEndpoint, udpChannel, newAddress));
-        }
+        offer(() -> receiver.onResolutionChange(channelEndpoint, udpChannel, newAddress));
     }
 
-    private boolean notConcurrent()
+    void requestSetup(
+        final ReceiveChannelEndpoint channelEndpoint,
+        final int streamId,
+        final int sessionId)
     {
-        return threadingMode == SHARED || threadingMode == INVOKER;
+        offer(() -> receiver.onRequestSetup(channelEndpoint, streamId, sessionId));
     }
 
-    private void offer(final Runnable cmd)
+    void rejectImage(final long imageCorrelationId, final long position, final String reason)
     {
-        while (!commandQueue.offer(cmd))
-        {
-            if (!failCount.isClosed())
-            {
-                failCount.increment();
-            }
-
-            Thread.yield();
-            if (Thread.currentThread().isInterrupted())
-            {
-                throw new AgentTerminationException("interrupted");
-            }
-        }
+        offer(() -> receiver.onRejectImage(imageCorrelationId, position, reason));
     }
 }

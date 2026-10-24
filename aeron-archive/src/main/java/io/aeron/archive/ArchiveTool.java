@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,16 +15,18 @@
  */
 package io.aeron.archive;
 
+import io.aeron.Aeron;
 import io.aeron.CncFileDescriptor;
 import io.aeron.CommonContext;
 import io.aeron.archive.checksum.Checksum;
 import io.aeron.archive.codecs.*;
-import io.aeron.archive.codecs.mark.MarkFileHeaderDecoder;
 import io.aeron.driver.Configuration;
 import io.aeron.exceptions.AeronException;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.protocol.HeaderFlyweight;
 import org.agrona.*;
+import org.agrona.collections.Long2ObjectHashMap;
+import org.agrona.collections.MutableBoolean;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -53,8 +55,7 @@ import static io.aeron.archive.ReplaySession.isInvalidHeader;
 import static io.aeron.archive.checksum.Checksums.newInstance;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.client.AeronArchive.segmentFileBasePosition;
-import static io.aeron.archive.codecs.RecordingState.INVALID;
-import static io.aeron.archive.codecs.RecordingState.VALID;
+import static io.aeron.archive.codecs.RecordingState.*;
 import static io.aeron.logbuffer.FrameDescriptor.*;
 import static io.aeron.logbuffer.LogBufferDescriptor.computeTermIdFromPosition;
 import static io.aeron.logbuffer.LogBufferDescriptor.positionBitsToShift;
@@ -65,7 +66,9 @@ import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_PAD;
 import static java.lang.Math.min;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.file.StandardOpenOption.*;
+import static java.util.Collections.emptyList;
 import static java.util.Collections.emptySet;
 import static java.util.stream.Collectors.toMap;
 import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
@@ -77,7 +80,7 @@ import static org.agrona.concurrent.SystemEpochClock.INSTANCE;
  * Tool for inspecting and performing administrative tasks on an {@link Archive} and its contents which is described
  * in a {@link Catalog}.
  */
-public class ArchiveTool
+public final class ArchiveTool
 {
     /**
      * Allows user to confirm or reject an action.
@@ -94,6 +97,10 @@ public class ArchiveTool
          * @return {@code true} confirms the action and {@code false} to reject the action.
          */
         boolean confirm(T context);
+    }
+
+    private ArchiveTool()
+    {
     }
 
     /**
@@ -119,7 +126,11 @@ public class ArchiveTool
         }
 
         final PrintStream out = System.out;
-        if (args.length == 2 && "describe".equals(args[1]))
+        if (args.length > 1 && "describe-all".equals(args[1]))
+        {
+            describeAll(out, archiveDir);
+        }
+        else if (args.length == 2 && "describe".equals(args[1]))
         {
             describe(out, archiveDir);
         }
@@ -267,11 +278,11 @@ public class ArchiveTool
         }
         else if (args.length == 2 && "max-entries".equals(args[1]))
         {
-            out.println(maxEntries(archiveDir));
+            out.println("max-entries is deprecated please use capacity.");
         }
         else if (args.length == 3 && "max-entries".equals(args[1]))
         {
-            out.println(maxEntries(archiveDir, Long.parseLong(args[2])));
+            out.println("max-entries is deprecated please use capacity.");
         }
         else if (args.length == 2 && "migrate".equals(args[1]))
         {
@@ -285,22 +296,49 @@ public class ArchiveTool
         }
         else if (args.length == 2 && "compact".equals(args[1]))
         {
-            out.print("WARNING: Compacting the Catalog is non-recoverable operation! All recordings in state " +
-                "`INVALID` will be deleted along with the corresponding segment files.");
+            out.print("WARNING: Compacting the Catalog is non-recoverable operation! All non-ACTIVE recordings" +
+                " will be deleted along with the corresponding segment files.");
 
             if (readContinueAnswer("Continue? (y/n)"))
             {
                 compact(out, archiveDir);
             }
         }
-        else if (args.length == 2 && "delete-orphaned-segments".equals(args[1]))
+        else if (args.length >= 2 && "delete-orphaned-segments".equals(args[1]))
         {
-            out.print("WARNING: All orphaned segment files will be deleted.");
-
-            if (readContinueAnswer("Continue? (y/n)"))
+            if (args.length == 2)
             {
-                deleteOrphanedSegments(out, archiveDir);
+                out.print("WARNING: All orphaned segment files will be deleted.");
+                if (readContinueAnswer("Continue? (y/n)"))
+                {
+                    deleteOrphanedSegments(out, archiveDir);
+                }
             }
+            else
+            {
+                final long recordingId = Long.parseLong(args[2]);
+                out.print("WARNING: All orphaned segment files owned by the RecordingId[");
+                out.print(recordingId);
+                out.print("] will be deleted.");
+                if (readContinueAnswer("Continue? (y/n)"))
+                {
+                    deleteOrphanedSegments(out, archiveDir, recordingId);
+                }
+            }
+        }
+        else if (args.length == 3 && "mark-valid".equals(args[1]))
+        {
+            markRecordingValid(
+                out,
+                archiveDir,
+                Long.parseLong(args[2]));
+        }
+        else if (args.length == 3 && "mark-invalid".equals(args[1]))
+        {
+            markRecordingInvalid(
+                out,
+                archiveDir,
+                Long.parseLong(args[2]));
         }
         else
         {
@@ -316,7 +354,7 @@ public class ArchiveTool
      * @param archiveDir containing the {@link Catalog}.
      * @return the maximum number of entries supported by a {@link Catalog}.
      * @see #capacity(File)
-     * @deprecated Use {@link #capacity} instead.
+     * @deprecated Use {@link #capacity(File)} instead.
      */
     @Deprecated
     public static int maxEntries(final File archiveDir)
@@ -339,11 +377,8 @@ public class ArchiveTool
     @Deprecated
     public static int maxEntries(final File archiveDir, final long newMaxEntries)
     {
-        final long capacity = newMaxEntries * DEFAULT_RECORD_LENGTH;
-        try (Catalog catalog = new Catalog(archiveDir, null, 0, capacity, INSTANCE, null, null))
-        {
-            return (int)(catalog.capacity() / DEFAULT_RECORD_LENGTH);
-        }
+        final long newCapacity = capacity(archiveDir, newMaxEntries * DEFAULT_RECORD_LENGTH);
+        return (int)(newCapacity / DEFAULT_RECORD_LENGTH);
     }
 
     /**
@@ -377,7 +412,26 @@ public class ArchiveTool
     }
 
     /**
-     * Describe the metadata for entries in the {@link Catalog}.
+     * Describe the metadata for all entries in the {@link Catalog}.
+     * This will include entries that have been invalidated.
+     *
+     * @param out        to which the entries will be printed.
+     * @param archiveDir containing the {@link Catalog}.
+     */
+    public static void describeAll(final PrintStream out, final File archiveDir)
+    {
+        try (Catalog catalog = openCatalogReadOnly(archiveDir, INSTANCE);
+            ArchiveMarkFile markFile = openMarkFile(archiveDir, out::println))
+        {
+            printMarkInformation(markFile, out);
+            out.println("Catalog capacity in bytes: " + catalog.capacity());
+            catalog.forEach((recordingDescriptorOffset, he, hd, e, d) -> out.println(d + "|" + hd.state()));
+        }
+    }
+
+    /**
+     * Describe the metadata for all valid entries in the {@link Catalog}.
+     * This will not include entries that have been invalidated.
      *
      * @param out        to which the entries will be printed.
      * @param archiveDir containing the {@link Catalog}.
@@ -389,7 +443,13 @@ public class ArchiveTool
         {
             printMarkInformation(markFile, out);
             out.println("Catalog capacity in bytes: " + catalog.capacity());
-            catalog.forEach((recordingDescriptorOffset, he, hd, e, d) -> out.println(d));
+            catalog.forEach((recordingDescriptorOffset, he, hd, e, d) ->
+            {
+                if (hd.state() == VALID)
+                {
+                    out.println(d);
+                }
+            });
         }
     }
 
@@ -402,9 +462,22 @@ public class ArchiveTool
      */
     public static void describeRecording(final PrintStream out, final File archiveDir, final long recordingId)
     {
-        try (Catalog catalog = openCatalogReadOnly(archiveDir, INSTANCE))
+        try (Catalog catalog = openCatalogReadWrite(archiveDir, INSTANCE, MIN_CAPACITY, null, null))
         {
-            catalog.forEntry(recordingId, (recordingDescriptorOffset, he, hd, e, d) -> out.println(d));
+            final MutableBoolean found = new MutableBoolean(false);
+            catalog.forEach((recordingDescriptorOffset, headerEnc, headerDec, encoder, decoder) ->
+            {
+                if (decoder.recordingId() == recordingId)
+                {
+                    found.set(true);
+                    out.println(decoder);
+                }
+            });
+
+            if (!found.get())
+            {
+                throw new AeronException("no recording found with recordingId: " + recordingId);
+            }
         }
     }
 
@@ -528,7 +601,7 @@ public class ArchiveTool
         VERIFY_ALL_SEGMENT_FILES("-a"),
 
         /**
-         * Perform checksum for each data frame within a segment file being verify.
+         * Perform checksum for each data frame within a segment file being verified.
          */
         APPLY_CHECKSUM("-checksum");
 
@@ -596,7 +669,7 @@ public class ArchiveTool
      * @return {@code true} if no errors have been encountered, {@code false} otherwise (the recording is marked
      * as unusable if {@code false} is returned)
      * @throws AeronException if there is no recording with {@code recordingId} in the archive
-     **/
+     */
     public static boolean verifyRecording(
         final PrintStream out,
         final File archiveDir,
@@ -616,7 +689,7 @@ public class ArchiveTool
     }
 
     /**
-     * Compute and persist CRC-32 checksums for every fragment of a segment file for all recordings in the catalog.
+     * Compute and persist CRC-32(c) checksums for every fragment of a segment file for all recordings in the catalog.
      *
      * @param out               stream to print results and errors to.
      * @param archiveDir        that contains {@link org.agrona.MarkFile}, {@link Catalog}, and recordings.
@@ -630,7 +703,7 @@ public class ArchiveTool
     }
 
     /**
-     * Compute and persist CRC-32 checksums for every fragment of a segment file(s) for a given recording.
+     * Compute and persist CRC-32(c) checksums for every fragment of a segment file(s) for a given recording.
      *
      * @param out               stream to print results and errors to.
      * @param archiveDir        that contains {@link org.agrona.MarkFile}, {@link Catalog}, and recordings.
@@ -648,6 +721,32 @@ public class ArchiveTool
     {
         checksumRecording(
             out, archiveDir, recordingId, allFiles, newInstance(validateChecksumClass(checksumClassName)), INSTANCE);
+    }
+
+    /**
+     * Mark a recording valid by marking it as {@link RecordingState#VALID} in the catalog.
+     *
+     * @param out         stream to print results and errors to.
+     * @param archiveDir  that contains {@link org.agrona.MarkFile}, {@link Catalog}, and recordings.
+     * @param recordingId to revive
+     * @throws AeronException if there is no recording with {@code recordingId} in the archive
+     */
+    public static void markRecordingValid(final PrintStream out, final File archiveDir, final long recordingId)
+    {
+        changeRecordingState(out, archiveDir, recordingId, INVALID, VALID);
+    }
+
+    /**
+     * Mark a recording invalid by marking it as {@link RecordingState#INVALID} in the catalog.
+     *
+     * @param out         stream to print results and errors to.
+     * @param archiveDir  that contains {@link org.agrona.MarkFile}, {@link Catalog}, and recordings.
+     * @param recordingId to invalidate
+     * @throws AeronException if there is no recording with {@code recordingId} in the archive
+     */
+    public static void markRecordingInvalid(final PrintStream out, final File archiveDir, final long recordingId)
+    {
+        changeRecordingState(out, archiveDir, recordingId, VALID, INVALID);
     }
 
     /**
@@ -703,27 +802,64 @@ public class ArchiveTool
     }
 
     /**
-     * Delete orphaned recording segments that have been detached, i.e. outside the start and stop recording range,
-     * but are not deleted.
+     * Delete orphaned recording segments that have been detached for all recordings, i.e. outside the start and stop
+     * recording range, but are not deleted.
      *
      * @param out        stream to print results and errors to.
      * @param archiveDir that contains {@link MarkFile}, {@link Catalog}, and recordings.
      */
     public static void deleteOrphanedSegments(final PrintStream out, final File archiveDir)
     {
-        deleteOrphanedSegments(out, archiveDir, INSTANCE);
+        deleteOrphanedSegments(out, archiveDir, INSTANCE, NULL_RECORD_ID);
     }
 
-    static void deleteOrphanedSegments(final PrintStream out, final File archiveDir, final EpochClock epochClock)
+    /**
+     * Delete orphaned recording segments that have been detached, i.e. outside the start and stop recording range,
+     * but are not deleted.
+     *
+     * @param out               stream to print results and errors to.
+     * @param archiveDir        that contains {@link MarkFile}, {@link Catalog}, and recordings.
+     * @param targetRecordingId optional recordingId to delete orphaned segments for a specific recording.
+     *                          If {@link Aeron#NULL_VALUE}, delete orphaned segments for all recordings.
+     */
+    public static void deleteOrphanedSegments(
+        final PrintStream out,
+        final File archiveDir,
+        final long targetRecordingId)
+    {
+        deleteOrphanedSegments(out, archiveDir, INSTANCE, targetRecordingId);
+    }
+
+    static void deleteOrphanedSegments(
+        final PrintStream out,
+        final File archiveDir,
+        final EpochClock epochClock,
+        final long targetRecordingId)
     {
         try (Catalog catalog = openCatalogReadOnly(archiveDir, epochClock))
         {
-            catalog.forEach(
-                (recordingDescriptorOffset, headerEncoder, headerDecoder, descriptorEncoder, descriptorDecoder) ->
+            final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId = indexSegmentFiles(archiveDir);
+
+            final MutableBoolean found = new MutableBoolean(false);
+            catalog.forEach((recordingDescriptorOffset,
+                headerEncoder,
+                headerDecoder,
+                descriptorEncoder,
+                descriptorDecoder) ->
+            {
+                final long recordingId = descriptorDecoder.recordingId();
+                if (NULL_RECORD_ID == targetRecordingId || targetRecordingId == recordingId)
                 {
-                    final ArrayList<String> files = listSegmentFiles(archiveDir, descriptorDecoder.recordingId());
+                    found.set(true);
+                    final List<String> files = segmentFilesByRecordingId.getOrDefault(recordingId, emptyList());
                     deleteOrphanedSegmentFiles(out, archiveDir, descriptorDecoder, files);
-                });
+                }
+            });
+
+            if (NULL_RECORD_ID != targetRecordingId && !found.get())
+            {
+                throw new AeronException("no recording found with recordingId: " + targetRecordingId);
+            }
         }
     }
 
@@ -732,11 +868,15 @@ public class ArchiveTool
         final File compactFile = new File(archiveDir, CATALOG_FILE_NAME + ".compact");
         try
         {
+            final MutableInteger offset = new MutableInteger(CatalogHeaderEncoder.BLOCK_LENGTH);
+            final MutableInteger deletedRecords = new MutableInteger();
+            final MutableInteger reclaimedBytes = new MutableInteger();
+
             final Path compactFilePath = compactFile.toPath();
             try (FileChannel channel = FileChannel.open(compactFilePath, READ, WRITE, CREATE_NEW);
                 Catalog catalog = openCatalogReadOnly(archiveDir, epochClock))
             {
-                final MappedByteBuffer mappedByteBuffer = channel.map(READ_WRITE, 0, MAX_CATALOG_LENGTH);
+                final MappedByteBuffer mappedByteBuffer = channel.map(READ_WRITE, 0, catalog.capacity());
                 mappedByteBuffer.order(CatalogHeaderEncoder.BYTE_ORDER);
                 try
                 {
@@ -749,9 +889,7 @@ public class ArchiveTool
                         .nextRecordingId(catalog.nextRecordingId())
                         .alignment(catalog.alignment());
 
-                    final MutableInteger offset = new MutableInteger(CatalogHeaderEncoder.BLOCK_LENGTH);
-                    final MutableInteger deletedRecords = new MutableInteger();
-                    final MutableInteger reclaimedBytes = new MutableInteger();
+                    final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId = indexSegmentFiles(archiveDir);
 
                     catalog.forEach(
                         (recordingDescriptorOffset,
@@ -761,13 +899,13 @@ public class ArchiveTool
                         descriptorDecoder) ->
                         {
                             final int frameLength = headerDecoder.encodedLength() + headerDecoder.length();
-                            if (INVALID == headerDecoder.state())
+                            if (VALID != headerDecoder.state())
                             {
                                 deletedRecords.increment();
                                 reclaimedBytes.addAndGet(frameLength);
 
-                                final ArrayList<String> segmentFiles = listSegmentFiles(
-                                    archiveDir, descriptorDecoder.recordingId());
+                                final List<String> segmentFiles = segmentFilesByRecordingId.getOrDefault(
+                                    descriptorDecoder.recordingId(), emptyList());
 
                                 for (final String segmentFile : segmentFiles)
                                 {
@@ -780,15 +918,17 @@ public class ArchiveTool
                                 unsafeBuffer.putBytes(index, headerDecoder.buffer(), 0, frameLength);
                             }
                         });
-
-                    out.println("Compaction result: deleted " + deletedRecords.get() + " records and reclaimed " +
-                        reclaimedBytes.get() + " bytes");
                 }
                 finally
                 {
                     BufferUtil.free(mappedByteBuffer);
                 }
+
+                channel.truncate(offset.get()); // trim to size
             }
+
+            out.println("Compaction result: deleted " + deletedRecords.get() + " records and reclaimed " +
+                reclaimedBytes.get() + " bytes");
 
             final Path catalogFilePath = compactFilePath.resolveSibling(CATALOG_FILE_NAME);
             Files.delete(catalogFilePath);
@@ -833,9 +973,20 @@ public class ArchiveTool
     {
         try (Catalog catalog = openCatalogReadWrite(archiveDir, epochClock, MIN_CAPACITY, checksum, null))
         {
+            final MutableBoolean foundRecording = new MutableBoolean();
             final MutableInteger errorCount = new MutableInteger();
-            if (!catalog.forEntry(recordingId, createVerifyEntryProcessor(
-                out, archiveDir, options, catalog, checksum, epochClock, errorCount, truncateOnPageStraddle)))
+            final CatalogEntryProcessor delegate = createVerifyEntryProcessor(
+                out, archiveDir, options, catalog, checksum, epochClock, errorCount, truncateOnPageStraddle);
+            catalog.forEach((recordingDescriptorOffset, he, hd, encoder, decoder) ->
+            {
+                if (decoder.recordingId() == recordingId)
+                {
+                    foundRecording.set(true);
+                    delegate.accept(recordingDescriptorOffset, he, hd, encoder, decoder);
+                }
+            });
+
+            if (!foundRecording.get())
             {
                 throw new AeronException("no recording found with recordingId: " + recordingId);
             }
@@ -857,6 +1008,42 @@ public class ArchiveTool
         final IntConsumer versionCheck)
     {
         return new Catalog(archiveDir, epochClock, capacity, true, checksum, versionCheck);
+    }
+
+    private static void changeRecordingState(
+        final PrintStream out,
+        final File archiveDir,
+        final long recordingId,
+        final RecordingState expectedState,
+        final RecordingState targetState)
+    {
+        try (Catalog catalog = openCatalogReadWrite(archiveDir, INSTANCE, MIN_CAPACITY, null, null))
+        {
+            final MutableBoolean found = new MutableBoolean(false);
+            catalog.forEach((recordingDescriptorOffset, he, hDecoder, descriptorEncoder, descriptorDecoder) ->
+            {
+                if (descriptorDecoder.recordingId() == recordingId)
+                {
+                    found.set(true);
+                    final RecordingState currentState = hDecoder.state();
+                    if (targetState != currentState)
+                    {
+                        if (expectedState != currentState)
+                        {
+                            throw new AeronException("(recordingId=" + recordingId + ") state transition " +
+                                currentState + " -> " + targetState + " is not allowed");
+                        }
+                        he.state(targetState);
+                        out.println("(recordingId=" + recordingId + ") changed state to " + targetState);
+                    }
+                }
+            });
+
+            if (!found.get())
+            {
+                throw new AeronException("no recording found with recordingId: " + recordingId);
+            }
+        }
     }
 
     private static String validateChecksumClass(final String checksumClassName)
@@ -900,10 +1087,13 @@ public class ArchiveTool
         buffer.order(LITTLE_ENDIAN);
         final DataHeaderFlyweight headerFlyweight = new DataHeaderFlyweight(buffer);
 
+        final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId = indexSegmentFiles(archiveDir);
+
         return (recordingDescriptorOffset, headerEncoder, headerDecoder, descriptorEncoder, descriptorDecoder) ->
             verifyRecording(
                 out,
                 archiveDir,
+                segmentFilesByRecordingId,
                 options,
                 catalog,
                 checksum,
@@ -944,18 +1134,43 @@ public class ArchiveTool
     private static ArchiveMarkFile openMarkFile(final File archiveDir, final Consumer<String> logger)
     {
         return new ArchiveMarkFile(
-            archiveDir, ArchiveMarkFile.FILENAME, INSTANCE, TimeUnit.SECONDS.toMillis(5), logger);
+            resolveMarkFileDir(archiveDir), ArchiveMarkFile.FILENAME, INSTANCE, TimeUnit.SECONDS.toMillis(5), logger);
     }
 
     private static ArchiveMarkFile openMarkFileReadWrite(final File archiveDir, final EpochClock epochClock)
     {
         return new ArchiveMarkFile(
-            archiveDir,
+            resolveMarkFileDir(archiveDir),
             ArchiveMarkFile.FILENAME,
             epochClock,
             TimeUnit.SECONDS.toMillis(5),
             (version) -> {},
             null);
+    }
+
+    private static File resolveMarkFileDir(final File archiveDir)
+    {
+        final File linkFile = new File(archiveDir, ArchiveMarkFile.LINK_FILENAME);
+        final File markFileDir;
+        if (linkFile.exists())
+        {
+            try
+            {
+                final byte[] bytes = Files.readAllBytes(linkFile.toPath());
+                final String markFileDirPath = new String(bytes, US_ASCII).trim();
+                markFileDir = new File(markFileDirPath);
+            }
+            catch (final IOException ex)
+            {
+                throw new RuntimeException("failed to read link file=" + linkFile, ex);
+            }
+        }
+        else
+        {
+            markFileDir = archiveDir;
+        }
+
+        return markFileDir;
     }
 
     private static void dump(
@@ -1031,6 +1246,7 @@ public class ArchiveTool
     private static void verifyRecording(
         final PrintStream out,
         final File archiveDir,
+        final Long2ObjectHashMap<List<String>> segmentFileByRecordingId,
         final Set<VerifyOption> options,
         final Catalog catalog,
         final Checksum checksum,
@@ -1045,6 +1261,13 @@ public class ArchiveTool
         final RecordingDescriptorDecoder decoder)
     {
         final long recordingId = decoder.recordingId();
+        final RecordingState state = headerDecoder.state();
+        if (VALID != state && INVALID != state)
+        {
+            out.println("(recordingId=" + recordingId + ") skipping: " + state);
+            return;
+        }
+
         final long startPosition = decoder.startPosition();
         final long stopPosition = decoder.stopPosition();
         if (isPositionInvariantViolated(out, recordingId, startPosition, stopPosition))
@@ -1056,7 +1279,7 @@ public class ArchiveTool
 
         final int segmentLength = decoder.segmentFileLength();
         final int termLength = decoder.termBufferLength();
-        final ArrayList<String> segmentFiles = listSegmentFiles(archiveDir, recordingId);
+        final List<String> segmentFiles = segmentFileByRecordingId.getOrDefault(recordingId, emptyList());
         final String maxSegmentFile;
         final long computedStopPosition;
 
@@ -1164,7 +1387,10 @@ public class ArchiveTool
             encoder.stopTimestamp(epochClock.time());
         }
 
-        headerEncoder.state(VALID);
+        if (INVALID == state && !segmentFiles.isEmpty())
+        {
+            headerEncoder.state(VALID);
+        }
         out.println("(recordingId=" + recordingId + ") OK");
     }
 
@@ -1302,11 +1528,7 @@ public class ArchiveTool
         out.println("Archive error log:");
         CommonContext.printErrorLog(markFile.errorBuffer(), out);
 
-        final MarkFileHeaderDecoder decoder = markFile.decoder();
-        decoder.skipControlChannel();
-        decoder.skipLocalControlChannel();
-        decoder.skipEventsChannel();
-        final String aeronDirectory = decoder.aeronDirectory();
+        final String aeronDirectory = markFile.aeronDirectory();
 
         out.println();
         out.println("Aeron driver error log (directory: " + aeronDirectory + "):");
@@ -1330,6 +1552,8 @@ public class ArchiveTool
     {
         try (Catalog catalog = openCatalogReadWrite(archiveDir, epochClock, MIN_CAPACITY, checksum, null))
         {
+            final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId = indexSegmentFiles(archiveDir);
+
             final CatalogEntryProcessor catalogEntryProcessor =
                 (recordingDescriptorOffset, headerEncoder, headerDecoder, descriptorEncoder, descriptorDecoder) ->
                 {
@@ -1337,7 +1561,7 @@ public class ArchiveTool
                         align(descriptorDecoder.mtuLength(), CACHE_LINE_LENGTH));
                     buffer.order(LITTLE_ENDIAN);
                     catalog.updateChecksum(recordingDescriptorOffset);
-                    checksum(buffer, out, archiveDir, allFiles, checksum, descriptorDecoder);
+                    checksum(buffer, out, archiveDir, segmentFilesByRecordingId, allFiles, checksum, descriptorDecoder);
                 };
 
             if (!catalog.forEntry(recordingId, catalogEntryProcessor))
@@ -1351,6 +1575,7 @@ public class ArchiveTool
         final ByteBuffer buffer,
         final PrintStream out,
         final File archiveDir,
+        final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId,
         final boolean allFiles,
         final Checksum checksum,
         final RecordingDescriptorDecoder descriptorDecoder)
@@ -1358,7 +1583,7 @@ public class ArchiveTool
         final long recordingId = descriptorDecoder.recordingId();
         final long startPosition = descriptorDecoder.startPosition();
         final int termLength = descriptorDecoder.termBufferLength();
-        final ArrayList<String> segmentFiles = listSegmentFiles(archiveDir, recordingId);
+        final List<String> segmentFiles = segmentFilesByRecordingId.getOrDefault(recordingId, emptyList());
 
         if (allFiles)
         {
@@ -1458,6 +1683,7 @@ public class ArchiveTool
             final ByteBuffer buffer = ByteBuffer.allocateDirect(
                 align(Configuration.MAX_UDP_PAYLOAD_LENGTH, CACHE_LINE_LENGTH));
             buffer.order(LITTLE_ENDIAN);
+            final Long2ObjectHashMap<List<String>> segmentFilesByRecordingId = indexSegmentFiles(archiveDir);
 
             catalog.forEach(
                 (recordingDescriptorOffset, headerEncoder, headerDecoder, descriptorEncoder, descriptorDecoder) ->
@@ -1465,7 +1691,8 @@ public class ArchiveTool
                     try
                     {
                         catalog.updateChecksum(recordingDescriptorOffset);
-                        checksum(buffer, out, archiveDir, allFiles, checksum, descriptorDecoder);
+                        checksum(
+                            buffer, out, archiveDir, segmentFilesByRecordingId, allFiles, checksum, descriptorDecoder);
                     }
                     catch (final Exception ex)
                     {
@@ -1481,7 +1708,7 @@ public class ArchiveTool
         final PrintStream out,
         final File archiveDir,
         final RecordingDescriptorDecoder descriptorDecoder,
-        final ArrayList<String> segmentFiles)
+        final List<String> segmentFiles)
     {
         final long minBaseOffset = segmentFileBasePosition(
             descriptorDecoder.startPosition(),
@@ -1533,12 +1760,15 @@ public class ArchiveTool
             "     (e.g. io.aeron.archive.checksum.Crc32).%n" +
             "     Only the last segment file of each recording is processed by default,%n" +
             "     unless flag '-a' is specified in which case all of the segment files are processed.%n%n" +
-            "  compact: compacts Catalog file by removing entries in state `INVALID` and deleting the%n" +
+            "  compact: compacts Catalog file by removing entries in non-valid state and deleting the%n" +
             "     corresponding segment files.%n%n" +
             "  count-entries: queries the number of `VALID` recording entries in the catalog.%n%n" +
-            "  delete-orphaned-segments: deletes orphaned recording segments that have been detached,%n" +
+            "  delete-orphaned-segments [recordingId]: deletes orphaned recording segments that have been detached,%n" +
+            "     If recordingId is specified, only delete orphaned segments for that recording.%n" +
             "     i.e. outside the start and stop recording range, but are not deleted.%n%n" +
-            "  describe [recordingId]: prints out descriptor(s) in the catalog.%n%n" +
+            "  describe: prints out descriptors for all valid recordings in the catalog.%n%n" +
+            "  describe recordingId: prints out descriptor for the specified recording entry in the catalog.%n%n" +
+            "  describe-all: prints out descriptors for all recordings in the catalog.%n%n" +
             "  dump [data fragment limit per recording]: prints descriptor(s)%n" +
             "     in the catalog and associated recorded data.%n%n" +
             "  errors: prints errors for the archive and media driver.%n%n" +
@@ -1550,7 +1780,9 @@ public class ArchiveTool
             "     verified unless flag '-a' is specified, i.e. meaning verify all segment files.%n" +
             "     To perform checksum for each data frame specify the '-checksum' flag together with%n" +
             "     the Checksum implementation class name (e.g. io.aeron.archive.checksum.Crc32).%n" +
-            "     Faulty entries are marked as `INVALID`.%n%n");
+            "     Faulty entries are marked as `INVALID`.%n%n" +
+            "  mark-invalid <recordingId>: marks a recording as invalid. %n%n" +
+            "  mark-valid <recordingId>: marks a previously invalidated recording as valid. %n%n");
         System.out.flush();
     }
 }

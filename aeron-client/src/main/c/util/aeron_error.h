@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,8 +47,11 @@ void aeron_error_dll_thread_detach();
 void aeron_error_dll_process_detach();
 void aeron_err_set_windows(
     int errcode, const char *function, const char *filename, int line_number, const char *format, ...);
+void aeron_err_append_windows(
+    int errcode, const char *function, const char *filename, int line_number, const char *format, ...);
 #define __FILENAME__ (strrchr(__FILE__, '\\') ? strrchr(__FILE__, '\\') + 1 : __FILE__)
 #define AERON_SET_ERR_WIN(errcode, fmt, ...) aeron_err_set_windows(errcode, __func__, __FILENAME__, __LINE__, fmt, __VA_ARGS__)
+#define AERON_APPEND_ERR_WIN(errcode, fmt, ...) aeron_err_append_windows(errcode, __func__, __FILENAME__, __LINE__, fmt, __VA_ARGS__)
 #else
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #endif

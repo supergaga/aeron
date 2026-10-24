@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.NanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import java.io.File;
@@ -60,7 +61,10 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
     private final FileChannel archiveDirChannel;
     private final File archiveDir;
     private final CountedErrorHandler countedErrorHandler;
+    private final NanoClock nanoClock;
     private final Archive.Context ctx;
+
+    private final ArchiveConductor.Recorder recorder;
 
     private long segmentBasePosition;
     private int segmentOffset;
@@ -73,7 +77,8 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
         final long startPosition,
         final int segmentLength,
         final Image image,
-        final Archive.Context ctx)
+        final Archive.Context ctx,
+        final ArchiveConductor.Recorder recorder)
     {
         this.recordingId = recordingId;
         this.archiveDirChannel = ctx.archiveDirChannel();
@@ -86,7 +91,9 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
         countedErrorHandler = ctx.countedErrorHandler();
         checksumBuffer = ctx.recordChecksumBuffer();
         checksum = ctx.recordChecksum();
+        nanoClock = ctx.nanoClock();
         this.ctx = ctx;
+        this.recorder = recorder;
 
         final int termLength = image.termBufferLength();
         final long joinPosition = image.joinPosition();
@@ -97,6 +104,7 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onBlock(
         final DirectBuffer termBuffer, final int termOffset, final int length, final int sessionId, final int termId)
     {
@@ -106,6 +114,7 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
             final int dataLength = isPaddingFrame ? HEADER_LENGTH : length;
             final ByteBuffer byteBuffer;
 
+            final long startNs = nanoClock.nanoTime();
             if (null == checksum || isPaddingFrame)
             {
                 byteBuffer = termBuffer.byteBuffer();
@@ -130,6 +139,10 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
             {
                 recordingFileChannel.force(forceMetadata);
             }
+
+            final long writeTimeNs = nanoClock.nanoTime() - startNs;
+            recorder.bytesWritten(dataLength);
+            recorder.writeTimeNs(writeTimeNs);
 
             segmentOffset += length;
             if (segmentOffset >= segmentLength)
@@ -157,6 +170,7 @@ final class RecordingWriter implements BlockHandler, AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         if (!isClosed)

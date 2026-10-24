@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@
 #include <array>
 #include <cstdint>
 #include <thread>
-#include <exception>
 
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
@@ -28,10 +27,9 @@
 extern "C"
 {
 #include "aeron_driver_conductor.h"
-#include "util/aeron_error.h"
+#include "aeron_driver_native_resource_agent.h"
 #include "aeron_driver_sender.h"
 #include "aeron_driver_receiver.h"
-#include "aeron_counters.h"
 #include "concurrent/aeron_broadcast_receiver.h"
 #include "concurrent/aeron_counters_manager.h"
 #include "concurrent/aeron_mpsc_rb.h"
@@ -40,11 +38,11 @@ extern "C"
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
-#define CHANNEL_1 "aeron:udp?endpoint=localhost:40001"
-#define CHANNEL_1_UNRELIABLE "aeron:udp?endpoint=localhost:40001|reliable=false"
-#define CHANNEL_2 "aeron:udp?endpoint=localhost:40002"
-#define CHANNEL_3 "aeron:udp?endpoint=localhost:40003"
-#define CHANNEL_4 "aeron:udp?endpoint=localhost:40004"
+#define CHANNEL_1 "aeron:udp?endpoint=localhost:10001"
+#define CHANNEL_1_UNRELIABLE "aeron:udp?endpoint=localhost:10001|reliable=false"
+#define CHANNEL_2 "aeron:udp?endpoint=localhost:10002"
+#define CHANNEL_3 "aeron:udp?endpoint=localhost:10003"
+#define CHANNEL_4 "aeron:udp?endpoint=localhost:10004"
 #define CHANNEL_MDC_MANUAL "aeron:udp?control-mode=manual"
 #define INVALID_URI "aeron:udp://"
 
@@ -58,10 +56,10 @@ extern "C"
 #define MTU_1 (4096)
 #define MTU_2 (8192)
 
-#define CHANNEL_1_WITH_TAG_1001 "aeron:udp?endpoint=localhost:40001|tags=1001"
+#define CHANNEL_1_WITH_TAG_1001 "aeron:udp?endpoint=localhost:10001|tags=1001"
 #define CHANNEL_TAG_1001 "aeron:udp?tags=1001"
 
-#define CHANNEL_1_WITH_SESSION_ID_1 "aeron:udp?endpoint=localhost:40001|session-id=" STR(SESSION_ID_1_)
+#define CHANNEL_1_WITH_SESSION_ID_1 "aeron:udp?endpoint=localhost:10001|session-id=" STR(SESSION_ID_1_)
 
 #define SESSION_ID_1 (SESSION_ID_1_)
 #define SESSION_ID_3 (100000)
@@ -81,6 +79,9 @@ extern "C"
 #define CONTROL_UDP_PORT (43657)
 
 #define TEST_CONDUCTOR_CYCLE_TIME_THRESHOLD (600 * 1000 * 1000)
+
+#define CAPACITY (32 * 1024)
+typedef std::array<std::uint8_t, CAPACITY> buffer_t;
 
 static int64_t nano_time = 0;
 static bool free_map_raw_log = true;
@@ -129,18 +130,12 @@ static int test_malloc_raw_log_map(
     return 0;
 }
 
-static int test_malloc_raw_log_close(aeron_mapped_raw_log_t *log, const char *filename)
-{
-    free(log->mapped_file.addr);
-    log->mapped_file.addr = nullptr;
-    return 0;
-}
-
 static bool test_malloc_raw_log_free(aeron_mapped_raw_log_t *log, const char *filename)
 {
     if (free_map_raw_log)
     {
-        test_malloc_raw_log_close(log, filename);
+        free(log->mapped_file.addr);
+        log->mapped_file.addr = nullptr;
         return true;
     }
     return false;
@@ -228,7 +223,6 @@ struct TestDriverContext
         /* control files */
         m_context->usable_fs_space_func = test_uint64_max_usable_fs_space;
         m_context->raw_log_map_func = test_malloc_raw_log_map;
-        m_context->raw_log_close_func = test_malloc_raw_log_close;
         m_context->raw_log_free_func = test_malloc_raw_log_free;
 
         aeron_driver_context_set_conductor_cycle_threshold_ns(m_context, TEST_CONDUCTOR_CYCLE_TIME_THRESHOLD);
@@ -241,6 +235,11 @@ struct TestDriverContext
     }
 
     aeron_driver_context_t *m_context = nullptr;
+    aeron_counters_manager_t m_counters_manager = {};
+    aeron_system_counters_t m_system_counters = {};
+    aeron_distinct_error_log_t m_error_log = {};
+    AERON_DECL_ALIGNED(buffer_t m_error_log_buffer, 16) = {};
+
     std::unique_ptr<uint8_t[]> m_cnc;
 };
 
@@ -254,6 +253,7 @@ struct TestDriverConductor
         }
 
         context.m_context->conductor_proxy = &m_conductor.conductor_proxy;
+        context.m_context->system_counters = &m_conductor.system_counters;
 
         if (aeron_driver_sender_init(
             &m_sender, context.m_context, &m_conductor.system_counters, &m_conductor.error_log) < 0)
@@ -270,12 +270,23 @@ struct TestDriverConductor
         }
 
         context.m_context->receiver_proxy = &m_receiver.receiver_proxy;
+
+        if (aeron_driver_native_resource_agent_init(&m_native_resource_agent, context.m_context) < 0)
+        {
+            throw std::runtime_error("could not init native_resource_agent: " + std::string(aeron_errmsg()));
+        }
+        context.m_context->native_resource_agent_proxy = &m_native_resource_agent.native_resource_agent_proxy;
+
         m_destination.has_control_addr = false;
+        m_destination.transport.fd = -1;
+        m_destination.data_paths = &m_receiver.receiver_proxy.receiver->data_paths;
+        m_destination.transport.data_paths = m_destination.data_paths;
     }
 
     virtual ~TestDriverConductor()
     {
         aeron_driver_conductor_on_close(&m_conductor);
+        aeron_driver_native_resource_agent_on_close(&m_native_resource_agent);
         aeron_driver_sender_on_close(&m_sender);
         aeron_driver_receiver_on_close(&m_receiver);
     }
@@ -288,6 +299,7 @@ struct TestDriverConductor
     aeron_driver_conductor_t m_conductor = {};
     aeron_driver_sender_t m_sender = {};
     aeron_driver_receiver_t m_receiver = {};
+    aeron_driver_native_resource_agent_t m_native_resource_agent = {};
     aeron_receive_destination_t m_destination = {};
 };
 
@@ -304,6 +316,41 @@ public:
             &m_broadcast_receiver,
             m_context.m_context->to_clients_buffer,
             m_context.m_context->to_clients_buffer_length);
+
+        int64_t free_to_reuse_timeout_ms = 0;
+        if (m_context.m_context->counter_free_to_reuse_ns > 0)
+        {
+            free_to_reuse_timeout_ms = (int64_t)m_context.m_context->counter_free_to_reuse_ns / (1000 * 1000LL);
+            free_to_reuse_timeout_ms = free_to_reuse_timeout_ms <= 0 ? 1 : free_to_reuse_timeout_ms;
+        }
+
+        aeron_counters_manager_init(
+            &m_context.m_counters_manager,
+            m_context.m_context->counters_metadata_buffer,
+            AERON_COUNTERS_METADATA_BUFFER_LENGTH(m_context.m_context->counters_values_buffer_length),
+            m_context.m_context->counters_values_buffer,
+            m_context.m_context->counters_values_buffer_length,
+            m_context.m_context->cached_clock,
+            free_to_reuse_timeout_ms);
+
+        aeron_system_counters_init(&m_context.m_system_counters, &m_context.m_counters_manager);
+
+        aeron_distinct_error_log_init(
+            &m_context.m_error_log, m_context.m_error_log_buffer.data(), m_context.m_error_log_buffer.size(), aeron_epoch_clock);
+
+        m_context.m_context->counters_manager = &m_context.m_counters_manager;
+        m_context.m_context->system_counters = &m_context.m_system_counters;
+        m_context.m_context->error_log = &m_context.m_error_log;
+        m_context.m_context->error_buffer = m_context.m_error_log_buffer.data();
+        m_context.m_context->error_buffer_length = m_context.m_error_log_buffer.size();
+    }
+
+    ~DriverConductorTest()
+    {
+        aeron_broadcast_receiver_close(&m_broadcast_receiver);
+        aeron_system_counters_close(&m_context.m_system_counters);
+        aeron_counters_manager_close(&m_context.m_counters_manager);
+        aeron_distinct_error_log_close(&m_context.m_error_log);
     }
 
     size_t readAllBroadcastsFromConductor(aeron_broadcast_receiver_handler_t handler, size_t message_limit = SIZE_MAX)
@@ -373,27 +420,28 @@ public:
 
     int removePublication(int64_t client_id, int64_t correlation_id, int64_t registration_id)
     {
-        auto *cmd = reinterpret_cast<aeron_remove_command_t *>(m_command_buffer);
+        auto *cmd = reinterpret_cast<aeron_remove_publication_command_t *>(m_command_buffer);
 
         cmd->correlated.client_id = client_id;
         cmd->correlated.correlation_id = correlation_id;
         cmd->registration_id = registration_id;
+        cmd->flags = 0;
 
-        return writeCommand(AERON_COMMAND_REMOVE_PUBLICATION, sizeof(aeron_remove_command_t));
+        return writeCommand(AERON_COMMAND_REMOVE_PUBLICATION, sizeof(aeron_remove_publication_command_t));
     }
 
     int addIpcSubscription(int64_t client_id, int64_t correlation_id, int32_t stream_id, int64_t registration_id)
     {
-        return addNetworkSubscription(client_id, correlation_id, AERON_IPC_CHANNEL, stream_id);
+        return addSubscription(client_id, correlation_id, AERON_IPC_CHANNEL, stream_id);
     }
 
     int addSubscription(
         int64_t client_id, int64_t correlation_id, std::string &channel, int32_t stream_id, int64_t registration_id)
     {
-        return addNetworkSubscription(client_id, correlation_id, channel.c_str(), stream_id);
+        return addSubscription(client_id, correlation_id, channel.c_str(), stream_id);
     }
 
-    int addNetworkSubscription(int64_t client_id, int64_t correlation_id, const char *channel, int32_t stream_id)
+    int addSubscription(int64_t client_id, int64_t correlation_id, const char *channel, int32_t stream_id)
     {
         auto *cmd = reinterpret_cast<aeron_subscription_command_t *>(m_command_buffer);
 
@@ -411,18 +459,18 @@ public:
         int64_t client_id, int64_t correlation_id, const char *channel, int32_t stream_id, int64_t registration_id)
     {
         std::string channel_str(AERON_SPY_PREFIX + std::string(channel));
-        return addNetworkSubscription(client_id, correlation_id, channel_str.c_str(), stream_id);
+        return addSubscription(client_id, correlation_id, channel_str.c_str(), stream_id);
     }
 
     int removeSubscription(int64_t client_id, int64_t correlation_id, int64_t registration_id)
     {
-        auto *cmd = reinterpret_cast<aeron_remove_command_t *>(m_command_buffer);
+        auto *cmd = reinterpret_cast<aeron_remove_subscription_command_t *>(m_command_buffer);
 
         cmd->correlated.client_id = client_id;
         cmd->correlated.correlation_id = correlation_id;
         cmd->registration_id = registration_id;
 
-        return writeCommand(AERON_COMMAND_REMOVE_SUBSCRIPTION, sizeof(aeron_remove_command_t));
+        return writeCommand(AERON_COMMAND_REMOVE_SUBSCRIPTION, sizeof(aeron_remove_subscription_command_t));
     }
 
     int clientKeepalive(int64_t client_id)
@@ -467,13 +515,13 @@ public:
 
     int removeCounter(int64_t client_id, int64_t correlation_id, int64_t registration_id)
     {
-        auto *cmd = reinterpret_cast<aeron_remove_command_t *>(m_command_buffer);
+        auto *cmd = reinterpret_cast<aeron_remove_counter_command_t *>(m_command_buffer);
 
         cmd->correlated.client_id = client_id;
         cmd->correlated.correlation_id = correlation_id;
         cmd->registration_id = registration_id;
 
-        return writeCommand(AERON_COMMAND_REMOVE_COUNTER, sizeof(aeron_remove_command_t));
+        return writeCommand(AERON_COMMAND_REMOVE_COUNTER, sizeof(aeron_remove_counter_command_t));
     }
 
     int addDestination(
@@ -542,17 +590,19 @@ public:
 
     int doWork()
     {
-        return aeron_driver_conductor_do_work(&m_conductor.m_conductor);
+        int work_count = 0;
+        work_count += aeron_driver_conductor_do_work(&m_conductor.m_conductor);
+        work_count += aeron_driver_native_resource_agent_do_work(&m_conductor.m_native_resource_agent);
+        work_count += aeron_driver_sender_do_work(&m_conductor.m_sender);
+        work_count += aeron_driver_receiver_do_work(&m_conductor.m_receiver);
+        return work_count;
     }
 
     void doWorkUntilDone()
     {
-        while (true)
+        while (0 != doWork())
         {
-            if (0 == doWork())
-            {
-                break;
-            }
+            std::this_thread::yield();
         }
     }
 
@@ -609,10 +659,12 @@ public:
         fill_sockaddr_ipv4(&cmd.control_address, CONTROL_IP_ADDR, CONTROL_UDP_PORT);
 
         aeron_driver_conductor_on_create_publication_image(&m_conductor.m_conductor, &cmd);
+
+        doWorkUntilDone();
     }
 
 protected:
-    uint8_t m_command_buffer[AERON_MAX_PATH] = {};
+    uint8_t m_command_buffer[128 * 1024] = {};
     TestDriverContext m_context = {};
     TestDriverConductor m_conductor;
     aeron_broadcast_receiver_t m_broadcast_receiver = {};

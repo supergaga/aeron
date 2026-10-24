@@ -1,20 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-/*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,33 +42,38 @@ class RegistrationAndOwnerTest
             .errorHandler(Tests::onError)
             .dirDeleteOnStart(true);
 
-        try (
-            TestMediaDriver mediaDriver = TestMediaDriver.launch(ctx, testWatcher);
-            Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
-            Subscription subscription = aeron.addSubscription(channel, STREAM_ID);
-            Publication publication = aeron.addPublication(channel, STREAM_ID);
-            Counter userCounter = aeron.addCounter(1002, "Test Counter"))
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(ctx, testWatcher))
         {
-            awaitConnected(subscription);
-            awaitConnected(publication);
+            testWatcher.dataCollector().add(mediaDriver.context().aeronDirectory());
 
-            final CountersReader countersReader = aeron.countersReader();
-            final int subscriberPositionId = subscription.imageAtIndex(0).subscriberPositionId();
+            try (
+                Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
+                Subscription subscription = aeron.addSubscription(channel, STREAM_ID);
+                Publication publication = aeron.addPublication(channel, STREAM_ID);
+                Counter userCounter = aeron.addCounter(1002, "Test Counter"))
+            {
+                testWatcher.dataCollector().add(mediaDriver.context().aeronDirectory());
 
-            assertEquals(aeron.clientId(), countersReader.getCounterOwnerId(subscriberPositionId));
-            assertEquals(aeron.clientId(), countersReader.getCounterOwnerId(publication.positionLimitId()));
-            assertEquals(aeron.clientId(), countersReader.getCounterOwnerId(userCounter.id()));
+                awaitConnected(subscription);
+                awaitConnected(publication);
 
-            assertEquals(subscription.registrationId(), countersReader.getCounterRegistrationId(subscriberPositionId));
+                final CountersReader countersReader = aeron.countersReader();
+                final int subscriberPositionId = subscription.imageAtIndex(0).subscriberPositionId();
 
-            assertEquals(
-                publication.registrationId(), countersReader.getCounterRegistrationId(publication.positionLimitId()));
+                assertEquals(aeron.clientId(), countersReader.getCounterOwnerId(subscriberPositionId));
+                assertEquals(aeron.clientId(), countersReader.getCounterOwnerId(publication.positionLimitId()));
+                assertEquals(aeron.clientId(), countersReader.getCounterOwnerId(userCounter.id()));
 
-            assertEquals(userCounter.registrationId(), countersReader.getCounterRegistrationId(userCounter.id()));
-        }
-        finally
-        {
-            ctx.deleteDirectory();
+                assertEquals(
+                    subscription.registrationId(), countersReader.getCounterRegistrationId(subscriberPositionId));
+
+                assertEquals(
+                    publication.registrationId(),
+                    countersReader.getCounterRegistrationId(publication.positionLimitId()));
+
+                assertEquals(userCounter.registrationId(),
+                    countersReader.getCounterRegistrationId(userCounter.id()));
+            }
         }
     }
 }

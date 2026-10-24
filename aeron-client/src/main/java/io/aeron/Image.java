@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,27 @@
  */
 package io.aeron;
 
-import io.aeron.logbuffer.*;
+import io.aeron.logbuffer.BlockHandler;
+import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
-import org.agrona.*;
+import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.logbuffer.Header;
+import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.logbuffer.RawBlockHandler;
+import io.aeron.logbuffer.TermBlockScanner;
+import org.agrona.BitUtil;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.Position;
 
 import java.nio.channels.FileChannel;
 
-import static io.aeron.logbuffer.ControlledFragmentHandler.Action.*;
-import static io.aeron.logbuffer.FrameDescriptor.*;
-import static io.aeron.logbuffer.LogBufferDescriptor.endOfStreamPosition;
-import static io.aeron.logbuffer.LogBufferDescriptor.indexByPosition;
+import static io.aeron.logbuffer.ControlledFragmentHandler.Action.ABORT;
+import static io.aeron.logbuffer.ControlledFragmentHandler.Action.BREAK;
+import static io.aeron.logbuffer.ControlledFragmentHandler.Action.COMMIT;
+import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
+import static io.aeron.logbuffer.FrameDescriptor.frameLengthVolatile;
+import static io.aeron.logbuffer.FrameDescriptor.isPaddingFrame;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static io.aeron.protocol.DataHeaderFlyweight.TERM_ID_FIELD_OFFSET;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
@@ -47,12 +56,16 @@ public final class Image
 {
     private final long correlationId;
     private final long joinPosition;
-    private long finalPosition;
     private final int sessionId;
     private final int initialTermId;
     private final int termLengthMask;
     private final int positionBitsToShift;
+    private final int mtu;
+
+    private long finalPosition;
+    private long eosPosition = Long.MAX_VALUE;
     private boolean isEos;
+    private boolean isRevoked;
     private volatile boolean isClosed;
 
     private final Position subscriberPosition;
@@ -95,9 +108,10 @@ public final class Image
         termBuffers = logBuffers.duplicateTermBuffers();
 
         final int termLength = logBuffers.termLength();
-        this.termLengthMask = termLength - 1;
-        this.positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
-        this.initialTermId = LogBufferDescriptor.initialTermId(logBuffers.metaDataBuffer());
+        termLengthMask = termLength - 1;
+        positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
+        initialTermId = LogBufferDescriptor.initialTermId(logBuffers.metaDataBuffer());
+        mtu = LogBufferDescriptor.mtuLength(logBuffers.metaDataBuffer());
         header = new Header(initialTermId, positionBitsToShift, this);
     }
 
@@ -149,7 +163,7 @@ public final class Image
      */
     public int mtuLength()
     {
-        return LogBufferDescriptor.mtuLength(logBuffers.metaDataBuffer());
+        return mtu;
     }
 
     /**
@@ -218,20 +232,6 @@ public final class Image
     }
 
     /**
-     * Set the subscriber position for this {@link Image} to indicate where it has been consumed to.
-     *
-     * @param newPosition for the consumption point.
-     */
-    public void position(final long newPosition)
-    {
-        if (!isClosed)
-        {
-            validatePosition(newPosition);
-            subscriberPosition.setOrdered(newPosition);
-        }
-    }
-
-    /**
      * The counter id for the subscriber position counter.
      *
      * @return the id for the subscriber position counter.
@@ -253,7 +253,23 @@ public final class Image
             return isEos;
         }
 
-        return subscriberPosition.get() >= endOfStreamPosition(logBuffers.metaDataBuffer());
+        return subscriberPosition.get() >= LogBufferDescriptor.endOfStreamPosition(logBuffers.metaDataBuffer());
+    }
+
+    /**
+     * The position the stream reached when EOS was received from the publisher. The position will be
+     * {@link Long#MAX_VALUE} until the stream ends and EOS is set.
+     *
+     * @return position the stream reached when EOS was received from the publisher.
+     */
+    public long endOfStreamPosition()
+    {
+        if (isClosed)
+        {
+            return eosPosition;
+        }
+
+        return LogBufferDescriptor.endOfStreamPosition(logBuffers.metaDataBuffer());
     }
 
     /**
@@ -272,6 +288,21 @@ public final class Image
         }
 
         return LogBufferDescriptor.activeTransportCount(logBuffers.metaDataBuffer());
+    }
+
+    /**
+     * Has the associated publication been revoked?
+     *
+     * @return true if the associated publication was revoked otherwise false.
+     */
+    public boolean isPublicationRevoked()
+    {
+        if (isClosed)
+        {
+            return isRevoked;
+        }
+
+        return LogBufferDescriptor.isPublicationRevoked(logBuffers.metaDataBuffer());
     }
 
     /**
@@ -303,17 +334,51 @@ public final class Image
             return 0;
         }
 
-        final long position = subscriberPosition.get();
+        int fragmentsRead = 0;
+        final long initialPosition = subscriberPosition.get();
+        final int initialOffset = (int)initialPosition & termLengthMask;
+        int offset = initialOffset;
+        final UnsafeBuffer termBuffer = activeTermBuffer(initialPosition);
+        final int capacity = termBuffer.capacity();
+        final Header header = this.header;
+        header.buffer(termBuffer);
 
-        return TermReader.read(
-            activeTermBuffer(position),
-            (int)position & termLengthMask,
-            fragmentHandler,
-            fragmentLimit,
-            header,
-            errorHandler,
-            position,
-            subscriberPosition);
+        try
+        {
+            while (fragmentsRead < fragmentLimit && offset < capacity && !isClosed)
+            {
+                final int frameLength = frameLengthVolatile(termBuffer, offset);
+                if (frameLength <= 0)
+                {
+                    break;
+                }
+
+                final int frameOffset = offset;
+                offset += BitUtil.align(frameLength, FRAME_ALIGNMENT);
+
+                if (!isPaddingFrame(termBuffer, frameOffset))
+                {
+                    ++fragmentsRead;
+                    header.offset(frameOffset);
+                    fragmentHandler.onFragment(
+                        termBuffer, frameOffset + HEADER_LENGTH, frameLength - HEADER_LENGTH, header);
+                }
+            }
+        }
+        catch (final Exception ex)
+        {
+            errorHandler.onError(ex);
+        }
+        finally
+        {
+            final long newPosition = initialPosition + (offset - initialOffset);
+            if (newPosition > initialPosition && !isClosed)
+            {
+                subscriberPosition.setRelease(newPosition);
+            }
+        }
+
+        return fragmentsRead;
     }
 
     /**
@@ -346,7 +411,7 @@ public final class Image
 
         try
         {
-            while (fragmentsRead < fragmentLimit && offset < capacity)
+            while (fragmentsRead < fragmentLimit && offset < capacity && !isClosed)
             {
                 final int length = frameLengthVolatile(termBuffer, offset);
                 if (length <= 0)
@@ -385,7 +450,10 @@ public final class Image
                 {
                     initialPosition += (offset - initialOffset);
                     initialOffset = offset;
-                    subscriberPosition.setOrdered(initialPosition);
+                    if (!isClosed)
+                    {
+                        subscriberPosition.setRelease(initialPosition);
+                    }
                 }
             }
         }
@@ -396,9 +464,9 @@ public final class Image
         finally
         {
             final long resultingPosition = initialPosition + (offset - initialOffset);
-            if (resultingPosition > initialPosition)
+            if (resultingPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(resultingPosition);
+                subscriberPosition.setRelease(resultingPosition);
             }
         }
 
@@ -442,7 +510,7 @@ public final class Image
 
         try
         {
-            while (fragmentsRead < fragmentLimit && offset < limitOffset)
+            while (fragmentsRead < fragmentLimit && offset < limitOffset && !isClosed)
             {
                 final int length = frameLengthVolatile(termBuffer, offset);
                 if (length <= 0)
@@ -471,9 +539,9 @@ public final class Image
         finally
         {
             final long resultingPosition = initialPosition + (offset - initialOffset);
-            if (resultingPosition > initialPosition)
+            if (resultingPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(resultingPosition);
+                subscriberPosition.setRelease(resultingPosition);
             }
         }
 
@@ -502,6 +570,7 @@ public final class Image
             return 0;
         }
 
+        final Position subscriberPosition = this.subscriberPosition;
         long initialPosition = subscriberPosition.get();
         if (initialPosition >= limitPosition)
         {
@@ -518,7 +587,7 @@ public final class Image
 
         try
         {
-            while (fragmentsRead < fragmentLimit && offset < limitOffset)
+            while (fragmentsRead < fragmentLimit && offset < limitOffset && !isClosed)
             {
                 final int length = frameLengthVolatile(termBuffer, offset);
                 if (length <= 0)
@@ -557,7 +626,10 @@ public final class Image
                 {
                     initialPosition += (offset - initialOffset);
                     initialOffset = offset;
-                    subscriberPosition.setOrdered(initialPosition);
+                    if (!isClosed)
+                    {
+                        subscriberPosition.setRelease(initialPosition);
+                    }
                 }
             }
         }
@@ -568,104 +640,13 @@ public final class Image
         finally
         {
             final long resultingPosition = initialPosition + (offset - initialOffset);
-            if (resultingPosition > initialPosition)
+            if (resultingPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(resultingPosition);
+                subscriberPosition.setRelease(resultingPosition);
             }
         }
 
         return fragmentsRead;
-    }
-
-    /**
-     * Peek for new messages in a stream by scanning forward from an initial position. If new messages are found then
-     * they will be delivered to the {@link ControlledFragmentHandler} up to a limited position.
-     * <p>
-     * Use a {@link ControlledFragmentAssembler} to assemble messages which span multiple fragments. Scans must also
-     * start at the beginning of a message so that the assembler is reset.
-     *
-     * @param initialPosition from which to peek forward.
-     * @param handler         to which message fragments are delivered.
-     * @param limitPosition   up to which can be scanned.
-     * @return the resulting position after the scan terminates which is a complete message.
-     * @see ControlledFragmentAssembler
-     * @see ImageControlledFragmentAssembler
-     */
-    public long controlledPeek(
-        final long initialPosition, final ControlledFragmentHandler handler, final long limitPosition)
-    {
-        if (isClosed)
-        {
-            return initialPosition;
-        }
-
-        validatePosition(initialPosition);
-        if (initialPosition >= limitPosition)
-        {
-            return initialPosition;
-        }
-
-        int initialOffset = (int)initialPosition & termLengthMask;
-        int offset = initialOffset;
-        long position = initialPosition;
-        final UnsafeBuffer termBuffer = activeTermBuffer(initialPosition);
-        final Header header = this.header;
-        final int limitOffset = (int)Math.min(termBuffer.capacity(), (limitPosition - initialPosition) + offset);
-        header.buffer(termBuffer);
-        long resultingPosition = initialPosition;
-
-        try
-        {
-            while (offset < limitOffset)
-            {
-                final int length = frameLengthVolatile(termBuffer, offset);
-                if (length <= 0)
-                {
-                    break;
-                }
-
-                final int frameOffset = offset;
-                offset += BitUtil.align(length, FRAME_ALIGNMENT);
-
-                if (isPaddingFrame(termBuffer, frameOffset))
-                {
-                    position += (offset - initialOffset);
-                    initialOffset = offset;
-                    resultingPosition = position;
-
-                    continue;
-                }
-
-                header.offset(frameOffset);
-
-                final Action action = handler.onFragment(
-                    termBuffer, frameOffset + HEADER_LENGTH, length - HEADER_LENGTH, header);
-
-                if (ABORT == action)
-                {
-                    break;
-                }
-
-                position += (offset - initialOffset);
-                initialOffset = offset;
-
-                if ((header.flags() & END_FRAG_FLAG) == END_FRAG_FLAG)
-                {
-                    resultingPosition = position;
-                }
-
-                if (BREAK == action)
-                {
-                    break;
-                }
-            }
-        }
-        catch (final Exception ex)
-        {
-            errorHandler.onError(ex);
-        }
-
-        return resultingPosition;
     }
 
     /**
@@ -692,7 +673,7 @@ public final class Image
 
         final long position = subscriberPosition.get();
         final int offset = (int)position & termLengthMask;
-        final int limitOffset = Math.min(offset + blockLengthLimit, termLengthMask + 1);
+        final int limitOffset = (int)Math.min((long)offset + blockLengthLimit, termLengthMask + 1);
         final UnsafeBuffer termBuffer = activeTermBuffer(position);
         final int resultingOffset = TermBlockScanner.scan(termBuffer, offset, limitOffset);
         final int length = resultingOffset - offset;
@@ -710,7 +691,10 @@ public final class Image
             }
             finally
             {
-                subscriberPosition.setOrdered(position + length);
+                if (!isClosed)
+                {
+                    subscriberPosition.setRelease(position + length);
+                }
             }
         }
 
@@ -743,10 +727,10 @@ public final class Image
 
         final long position = subscriberPosition.get();
         final int offset = (int)position & termLengthMask;
-        final int activeIndex = indexByPosition(position, positionBitsToShift);
+        final int activeIndex = LogBufferDescriptor.indexByPosition(position, positionBitsToShift);
         final UnsafeBuffer termBuffer = termBuffers[activeIndex];
         final int capacity = termBuffer.capacity();
-        final int limitOffset = Math.min(offset + blockLengthLimit, capacity);
+        final int limitOffset = (int)Math.min((long)offset + blockLengthLimit, capacity);
         final int resultingOffset = TermBlockScanner.scan(termBuffer, offset, limitOffset);
         final int length = resultingOffset - offset;
 
@@ -765,16 +749,29 @@ public final class Image
             }
             finally
             {
-                subscriberPosition.setOrdered(position + length);
+                if (!isClosed)
+                {
+                    subscriberPosition.setRelease(position + length);
+                }
             }
         }
 
         return length;
     }
 
+    /**
+     * Reject this image.
+     *
+     * @param reason a String indicating the reason why this image is being rejected.
+     */
+    public void reject(final String reason)
+    {
+        subscription.rejectImage(correlationId, position(), reason);
+    }
+
     private UnsafeBuffer activeTermBuffer(final long position)
     {
-        return termBuffers[indexByPosition(position, positionBitsToShift)];
+        return termBuffers[LogBufferDescriptor.indexByPosition(position, positionBitsToShift)];
     }
 
     private void validatePosition(final long position)
@@ -801,13 +798,16 @@ public final class Image
     void close()
     {
         finalPosition = subscriberPosition.getVolatile();
-        isEos = finalPosition >= endOfStreamPosition(logBuffers.metaDataBuffer());
+        eosPosition = LogBufferDescriptor.endOfStreamPosition(logBuffers.metaDataBuffer());
+        isEos = finalPosition >= eosPosition;
+        isRevoked = LogBufferDescriptor.isPublicationRevoked(logBuffers.metaDataBuffer());
         isClosed = true;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "Image{" +
@@ -819,6 +819,7 @@ public final class Image
             ", termLength=" + termBufferLength() +
             ", joinPosition=" + joinPosition +
             ", position=" + position() +
+            ", endOfStreamPosition=" + endOfStreamPosition() +
             ", activeTransportCount=" + activeTransportCount() +
             ", sourceIdentity='" + sourceIdentity + '\'' +
             ", subscription=" + subscription +

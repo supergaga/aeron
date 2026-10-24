@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,19 +15,22 @@
  */
 package io.aeron.samples;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.CommonContext;
+import io.aeron.Publication;
+import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.BufferClaim;
 import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.agrona.SystemUtil.loadPropertiesFiles;
 
 /**
- * Throughput test using {@link ExclusivePublication#tryClaim(int, BufferClaim)} over UDP transport.
+ * Throughput test using {@link Publication#tryClaim(int, BufferClaim)} over IPC transport.
  */
 public class EmbeddedBufferClaimIpcThroughput
 {
@@ -47,13 +50,12 @@ public class EmbeddedBufferClaimIpcThroughput
     {
         loadPropertiesFiles(args);
 
-        final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .threadingMode(ThreadingMode.SHARED);
 
-        try (MediaDriver mediaDriver = MediaDriver.launch(ctx);
+        final AtomicBoolean running = new AtomicBoolean(true);
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier(() -> running.set(false));
+            MediaDriver mediaDriver = MediaDriver.launch(ctx.terminationHook(barrier::signalAll));
             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
             Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID);
             Publication publication = aeron.addPublication(CHANNEL, STREAM_ID))
@@ -69,6 +71,8 @@ public class EmbeddedBufferClaimIpcThroughput
             rateReporterThread.start();
             subscriberThread.start();
             publisherThread.start();
+
+            barrier.await();
 
             subscriberThread.join();
             publisherThread.join();

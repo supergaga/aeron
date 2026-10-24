@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,12 +29,15 @@ import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -75,15 +78,23 @@ class ExclusivePublicationTest
         .sharedIdleStrategy(YieldingIdleStrategy.INSTANCE)
         .threadingMode(ThreadingMode.SHARED);
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(driverContext, testWatcher);
+    private TestMediaDriver driver;
+    private Aeron aeron;
 
-    private final Aeron aeron = Aeron.connect();
+    @BeforeEach
+    void setUp(final @TempDir Path tempDir)
+    {
+        driver = TestMediaDriver.launch(
+            driverContext.aeronDirectoryName(tempDir.resolve("driver").toString()), testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
+    }
 
     @AfterEach
     void after()
     {
         CloseHelper.closeAll(aeron, driver);
-        driver.context().deleteDirectory();
     }
 
     @ParameterizedTest

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,20 @@
  */
 package io.aeron.driver.media;
 
+import io.aeron.driver.logging.DriverTracing;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
+import io.aeron.exceptions.AeronEvent;
 import io.aeron.exceptions.AeronException;
-import io.aeron.protocol.HeaderFlyweight;
+import io.aeron.logbuffer.FrameDescriptor;
+import io.aeron.protocol.DataHeaderFlyweight;
+import io.aeron.protocol.ErrorFlyweight;
+import io.aeron.protocol.NakFlyweight;
+import io.aeron.protocol.ResolutionEntryFlyweight;
+import io.aeron.protocol.ResponseSetupFlyweight;
+import io.aeron.protocol.RttMeasurementFlyweight;
+import io.aeron.protocol.SetupFlyweight;
+import io.aeron.protocol.StatusMessageFlyweight;
 import io.aeron.status.ChannelEndpointStatus;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
@@ -32,9 +42,19 @@ import java.net.PortUnreachableException;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
-import java.nio.channels.SelectionKey;
 
-import static io.aeron.logbuffer.FrameDescriptor.frameVersion;
+import static io.aeron.driver.Configuration.SOCKET_TOS_DEFAULT;
+import static io.aeron.protocol.HeaderFlyweight.CURRENT_VERSION;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_DATA;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_ERR;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_NAK;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_PAD;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_RES;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_RSP_SETUP;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_RTTM;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_SETUP;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_SM;
+import static io.aeron.protocol.HeaderFlyweight.MIN_HEADER_LENGTH;
 import static java.net.StandardSocketOptions.SO_RCVBUF;
 import static java.net.StandardSocketOptions.SO_SNDBUF;
 
@@ -73,23 +93,15 @@ public abstract class UdpChannelTransport implements AutoCloseable
      */
     protected InetSocketAddress connectAddress;
 
-    /**
-     * To be used when polling the transport.
-     */
-    protected SelectionKey selectionKey;
-
-    private UdpTransportPoller transportPoller;
-    private final InetSocketAddress bindAddress;
+    private InetSocketAddress bindAddress;
     private final InetSocketAddress endPointAddress;
-    private final AtomicCounter invalidPackets;
+    final AtomicCounter invalidPackets;
+    private final PortManager portManager;
 
-    /**
-     * Can be used to check if the transport is closed so an operation does not proceed.
-     */
-    protected boolean isClosed = false;
     private int multicastTtl = 0;
     private final int socketSndbufLength;
     private final int socketRcvbufLength;
+    private final int socketTos;
 
     /**
      * Construct transport for a given channel.
@@ -99,27 +111,33 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param bindAddress        for listening on.
      * @param connectAddress     for sending data to.
      * @param context            for configuration.
+     * @param portManager        for port binding.
      * @param socketRcvbufLength set SO_RCVBUF for socket, 0 for OS default.
      * @param socketSndbufLength set SO_SNDBUF for socket, 0 for OS default.
+     * @param socketTos          set IP_TOS for socket, -1 for OS default.
      */
     protected UdpChannelTransport(
         final UdpChannel udpChannel,
         final InetSocketAddress endPointAddress,
         final InetSocketAddress bindAddress,
         final InetSocketAddress connectAddress,
+        final PortManager portManager,
         final MediaDriver.Context context,
         final int socketRcvbufLength,
-        final int socketSndbufLength)
+        final int socketSndbufLength,
+        final int socketTos)
     {
         this.context = context;
         this.udpChannel = udpChannel;
-        this.errorHandler = context.errorHandler();
+        this.errorHandler = context.countedErrorHandler();
+        this.portManager = portManager;
         this.endPointAddress = endPointAddress;
         this.bindAddress = bindAddress;
         this.connectAddress = connectAddress;
         this.invalidPackets = context.systemCounters().get(SystemCounterDescriptor.INVALID_PACKETS);
         this.socketRcvbufLength = socketRcvbufLength;
         this.socketSndbufLength = socketSndbufLength;
+        this.socketTos = socketTos;
     }
 
     /**
@@ -129,6 +147,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param endPointAddress to which data will be sent.
      * @param bindAddress     for listening on.
      * @param connectAddress  for sending data to.
+     * @param portManager     for port binding.
      * @param context         for configuration.
      */
     protected UdpChannelTransport(
@@ -136,6 +155,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
         final InetSocketAddress endPointAddress,
         final InetSocketAddress bindAddress,
         final InetSocketAddress connectAddress,
+        final PortManager portManager,
         final MediaDriver.Context context)
     {
         this(
@@ -143,9 +163,11 @@ public abstract class UdpChannelTransport implements AutoCloseable
             endPointAddress,
             bindAddress,
             connectAddress,
+            portManager,
             context,
             udpChannel.socketRcvbufLengthOrDefault(context.socketRcvbufLength()),
-            udpChannel.socketSndbufLengthOrDefault(context.socketSndbufLength()));
+            udpChannel.socketSndbufLengthOrDefault(context.socketSndbufLength()),
+            udpChannel.socketTosOrDefault(context.socketTos()));
     }
 
     /**
@@ -154,11 +176,28 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param bytesToSend expected to be sent to the network.
      * @param ex          experienced.
      * @param destination to which the send operation was addressed.
+     * @see #onSendError(IOException, InetSocketAddress, ErrorHandler)
+     * @deprecated {@link #onSendError(IOException, InetSocketAddress, ErrorHandler)} is used instead.
      */
+    @Deprecated(forRemoval = true, since = "1.46.6")
     public static void sendError(final int bytesToSend, final IOException ex, final InetSocketAddress destination)
     {
         throw new AeronException(
             "failed to send " + bytesToSend + " byte packet to " + destination, ex, AeronException.Category.WARN);
+    }
+
+    /**
+     * Report an {@link AeronEvent} with a message for a send error.
+     *
+     * @param ex           experienced.
+     * @param destination  to which the send operation was addressed.
+     * @param errorHandler to report error to.
+     */
+    public static void onSendError(
+        final IOException ex, final InetSocketAddress destination, final ErrorHandler errorHandler)
+    {
+        errorHandler.onError(new AeronEvent(
+            "failed to send datagram to " + destination + ", cause: " + ex, AeronException.Category.WARN));
     }
 
     /**
@@ -199,6 +238,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
             }
             else
             {
+                bindAddress = portManager.getManagedPort(udpChannel, bindAddress);
                 sendDatagramChannel.bind(bindAddress);
             }
 
@@ -217,6 +257,11 @@ public abstract class UdpChannelTransport implements AutoCloseable
                 receiveDatagramChannel.setOption(SO_RCVBUF, socketRcvbufLength());
             }
 
+            if (SOCKET_TOS_DEFAULT != socketTos)
+            {
+                sendDatagramChannel.setOption(StandardSocketOptions.IP_TOS, socketTos);
+            }
+
             sendDatagramChannel.configureBlocking(false);
             receiveDatagramChannel.configureBlocking(false);
         }
@@ -224,7 +269,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
         {
             if (null != statusIndicator)
             {
-                statusIndicator.setOrdered(ChannelEndpointStatus.ERRORED);
+                statusIndicator.setRelease(ChannelEndpointStatus.ERRORED);
             }
 
             CloseHelper.quietClose(sendDatagramChannel);
@@ -244,14 +289,17 @@ public abstract class UdpChannelTransport implements AutoCloseable
     }
 
     /**
-     * Register this transport for reading from a {@link UdpTransportPoller}.
-     *
-     * @param transportPoller to register for read with.
+     * {@inheritDoc}
      */
-    public void registerForRead(final UdpTransportPoller transportPoller)
+    @Override
+    public void close()
     {
-        this.transportPoller = transportPoller;
-        selectionKey = transportPoller.registerForRead(this);
+        CloseHelper.close(errorHandler, sendDatagramChannel);
+        if (receiveDatagramChannel != sendDatagramChannel)
+        {
+            CloseHelper.close(errorHandler, receiveDatagramChannel);
+        }
+        portManager.freeManagedPort(bindAddress);
     }
 
     /**
@@ -309,45 +357,6 @@ public abstract class UdpChannelTransport implements AutoCloseable
     }
 
     /**
-     * Close transport, canceling any pending read operations and closing channel.
-     */
-    public void close()
-    {
-        if (!isClosed)
-        {
-            isClosed = true;
-            if (null != selectionKey)
-            {
-                selectionKey.cancel();
-            }
-
-            if (null != transportPoller)
-            {
-                transportPoller.cancelRead(this);
-                transportPoller.selectNowWithoutProcessing();
-            }
-
-            CloseHelper.close(errorHandler, sendDatagramChannel);
-            CloseHelper.close(errorHandler, receiveDatagramChannel);
-
-            if (null != transportPoller)
-            {
-                transportPoller.selectNowWithoutProcessing();
-            }
-        }
-    }
-
-    /**
-     * Has the channel been closed by calling {@link #close()}.
-     *
-     * @return true if the channel has been closed.
-     */
-    public boolean isClosed()
-    {
-        return isClosed;
-    }
-
-    /**
      * Is transport representing a multicast media?
      *
      * @return true if transport is multicast media, otherwise false.
@@ -367,20 +376,42 @@ public abstract class UdpChannelTransport implements AutoCloseable
      */
     public boolean isValidFrame(final UnsafeBuffer buffer, final int length)
     {
-        boolean isFrameValid = true;
-
-        if (frameVersion(buffer, 0) != HeaderFlyweight.CURRENT_VERSION)
+        final int frameLength;
+        if (length > MIN_HEADER_LENGTH &&
+            (frameLength = FrameDescriptor.frameLength(buffer, 0)) >= 0 &&
+            CURRENT_VERSION == FrameDescriptor.frameVersion(buffer, 0))
         {
-            isFrameValid = false;
-            invalidPackets.increment();
-        }
-        else if (length < HeaderFlyweight.MIN_HEADER_LENGTH)
-        {
-            isFrameValid = false;
-            invalidPackets.increment();
+            final int frameType = FrameDescriptor.frameType(buffer, 0);
+            if (HDR_TYPE_DATA == frameType || HDR_TYPE_PAD == frameType)
+            {
+                if (length >= DataHeaderFlyweight.HEADER_LENGTH && FrameDescriptor.isFrameAligned(length))
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                final boolean valid = switch (frameType)
+                {
+                    case HDR_TYPE_NAK -> length >= NakFlyweight.HEADER_LENGTH && frameLength <= length;
+                    case HDR_TYPE_SM -> length >= StatusMessageFlyweight.HEADER_LENGTH && frameLength <= length;
+                    case HDR_TYPE_ERR -> length >= ErrorFlyweight.HEADER_LENGTH && frameLength <= length;
+                    case HDR_TYPE_SETUP -> length >= SetupFlyweight.HEADER_LENGTH && frameLength <= length;
+                    case HDR_TYPE_RTTM -> length >= RttMeasurementFlyweight.HEADER_LENGTH && frameLength <= length;
+                    case HDR_TYPE_RES -> length >= MIN_HEADER_LENGTH + ResolutionEntryFlyweight.MIN_IPV4_FRAME_LENGTH &&
+                        frameLength <= length;
+                    case HDR_TYPE_RSP_SETUP -> length >= ResponseSetupFlyweight.HEADER_LENGTH && frameLength <= length;
+                    default -> false;
+                };
+                if (valid)
+                {
+                    return true;
+                }
+            }
         }
 
-        return isFrameValid;
+        invalidPackets.increment();
+        return false;
     }
 
     /**
@@ -389,9 +420,9 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param buffer  containing the packet.
      * @param address to which the packet will be sent.
      */
-    @SuppressWarnings("unused")
     public void sendHook(final ByteBuffer buffer, final InetSocketAddress address)
     {
+        DriverTracing.traceFrameOut(buffer, address);
     }
 
     /**
@@ -401,9 +432,24 @@ public abstract class UdpChannelTransport implements AutoCloseable
      * @param length  length of the packet in bytes.
      * @param address from which the packet came.
      */
-    @SuppressWarnings("unused")
     public void receiveHook(final UnsafeBuffer buffer, final int length, final InetSocketAddress address)
     {
+        DriverTracing.traceFrameIn(address, buffer, 0, length);
+    }
+
+    /**
+     * Useful hook for logging resend calls.
+     *
+     * @param sessionId  to resend
+     * @param streamId   to resend
+     * @param termId     to resend
+     * @param termOffset to resend
+     * @param length     to resend
+     */
+    public void resendHook(
+        final int sessionId, final int streamId, final int termId, final int termOffset, final int length)
+    {
+        DriverTracing.traceResend(sessionId, streamId, termId, termOffset, length, udpChannel.originalUriString());
     }
 
     /**
@@ -453,7 +499,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
 
                 if (null != statusIndicator)
                 {
-                    statusIndicator.setOrdered(ChannelEndpointStatus.ACTIVE);
+                    statusIndicator.setRelease(ChannelEndpointStatus.ACTIVE);
                 }
             }
         }
@@ -461,7 +507,7 @@ public abstract class UdpChannelTransport implements AutoCloseable
         {
             if (null != statusIndicator)
             {
-                statusIndicator.setOrdered(ChannelEndpointStatus.ERRORED);
+                statusIndicator.setRelease(ChannelEndpointStatus.ERRORED);
             }
 
             final String message = "re-resolve endpoint channel error - " + ex.getMessage() +
@@ -489,5 +535,15 @@ public abstract class UdpChannelTransport implements AutoCloseable
     public int socketRcvbufLength()
     {
         return socketRcvbufLength;
+    }
+
+    /**
+     * Get the configured IP_TOS value for the endpoint's socket.
+     *
+     * @return IP_TOS value or {@link io.aeron.driver.Configuration#SOCKET_TOS_DEFAULT} if using the OS default.
+     */
+    public int socketTos()
+    {
+        return socketTos;
     }
 }

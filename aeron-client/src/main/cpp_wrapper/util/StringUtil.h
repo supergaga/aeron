@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -90,7 +90,7 @@ valueType parse(const std::string &input)
 
     if (stream.fail() || !stream.eof())
     {
-        throw ParseException(std::string("failed to parse: ") + input, SOURCEINFO);
+        throw ParseException(std::string("failed to parse: ") + input, SOURCEINFO, EINVAL);
     }
 
     return value;

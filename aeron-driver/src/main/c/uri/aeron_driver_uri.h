@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@
 #include "aeron_driver_common.h"
 #include "aeronmd.h"
 
+#define AERON_URI_PROTOTYPE_VALUE_CORRELATION_ID (-2)
+
 typedef struct aeron_driver_uri_publication_params_stct
 {
     bool has_position;
@@ -35,9 +37,18 @@ typedef struct aeron_driver_uri_publication_params_stct
     int32_t initial_term_id;
     int32_t term_id;
     uint64_t linger_timeout_ns;
+    uint64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_linger_timeout_ns;
+    uint64_t untethered_resting_timeout_ns;
     bool has_session_id;
     int32_t session_id;
     int64_t entity_tag;
+    int64_t response_correlation_id;
+    bool has_max_resend;
+    uint32_t max_resend;
+    bool has_publication_window_length;
+    int32_t publication_window_length;
+    bool is_response;
 }
 aeron_driver_uri_publication_params_t;
 
@@ -47,10 +58,14 @@ typedef struct aeron_driver_uri_subscription_params_stct
     bool is_sparse;
     bool is_tether;
     bool is_rejoin;
-    aeron_inferable_boolean_t group;
     bool has_session_id;
+    bool is_response;
+    aeron_inferable_boolean_t group;
     int32_t session_id;
     size_t initial_window_length;
+    uint64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_linger_timeout_ns;
+    uint64_t untethered_resting_timeout_ns;
 }
 aeron_driver_uri_subscription_params_t;
 
@@ -71,12 +86,9 @@ int aeron_driver_uri_subscription_params(
 int aeron_publication_params_validate_mtu_for_sndbuf(
     aeron_driver_uri_publication_params_t *params,
     size_t endpoint_socket_sndbuf,
+    size_t channel_socket_sndbuf,
+    size_t context_socket_sndbuf,
     size_t os_default_socket_sndbuf);
-
-int aeron_subscription_params_validate_initial_window_for_rcvbuf(
-    aeron_driver_uri_subscription_params_t *params,
-    size_t endpoint_socket_rcvbuf,
-    size_t os_default_socket_rcvbuf);
 
 int aeron_driver_uri_get_timestamp_offset(aeron_uri_t *uri, const char *key, int32_t *offset);
 const char *aeron_driver_uri_get_offset_info(int32_t offset);

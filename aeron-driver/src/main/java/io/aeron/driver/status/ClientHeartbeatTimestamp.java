@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,17 +20,23 @@ import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 
+import static io.aeron.status.HeartbeatTimestamp.HEARTBEAT_TYPE_ID;
+
 /**
  * Counter for tracking the timestamp of a last heartbeat from an Aeron client.
  *
  * @see HeartbeatTimestamp
  */
-public class ClientHeartbeatTimestamp extends HeartbeatTimestamp
+public final class ClientHeartbeatTimestamp
 {
     /**
      * Human-readable name for the counter.
      */
     public static final String NAME = "client-heartbeat";
+
+    private ClientHeartbeatTimestamp()
+    {
+    }
 
     /**
      * Allocate a new counter by delegating to

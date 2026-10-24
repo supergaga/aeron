@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -80,6 +80,7 @@ final class ServiceAdapter implements AutoCloseable
                     joinLogDecoder.logStreamId(),
                     joinLogDecoder.isStartup() == BooleanType.TRUE,
                     Cluster.Role.get(joinLogDecoder.role()),
+                    joinLogDecoder.isStandby() == BooleanType.TRUE,
                     joinLogDecoder.logChannel());
                 break;
 
@@ -90,7 +91,9 @@ final class ServiceAdapter implements AutoCloseable
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
-                clusteredServiceAgent.onServiceTerminationPosition(serviceTerminationPositionDecoder.logPosition());
+                clusteredServiceAgent.onServiceTerminationPosition(
+                    serviceTerminationPositionDecoder.logPosition(),
+                    BooleanType.TRUE == serviceTerminationPositionDecoder.ackRequired());
                 break;
 
             case RequestServiceAckDecoder.TEMPLATE_ID:

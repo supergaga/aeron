@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import org.agrona.CloseHelper;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -56,23 +57,30 @@ class PublicationUnblockTest
     @RegisterExtension
     final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .threadingMode(ThreadingMode.SHARED)
-        .errorHandler(Tests::onError)
-        .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-        .clientLivenessTimeoutNs(TimeUnit.MILLISECONDS.toNanos(400))
-        .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(10))
-        .publicationUnblockTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500)),
-        testWatcher);
+    private TestMediaDriver driver;
+    private Aeron aeron;
 
-    private final Aeron aeron = Aeron.connect(new Aeron.Context()
-        .keepAliveIntervalNs(TimeUnit.MILLISECONDS.toNanos(100)));
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .threadingMode(ThreadingMode.SHARED)
+                .errorHandler(Tests::onError)
+                .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
+                .clientLivenessTimeoutNs(TimeUnit.MILLISECONDS.toNanos(400))
+                .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(10))
+                .publicationUnblockTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500)),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect(new Aeron.Context()
+            .keepAliveIntervalNs(TimeUnit.MILLISECONDS.toNanos(100)));
+    }
 
     @AfterEach
     void after()
     {
         CloseHelper.closeAll(aeron, driver);
-        driver.context().deleteDirectory();
     }
 
     @ParameterizedTest

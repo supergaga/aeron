@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -453,7 +453,7 @@ ssize_t aeron_recvmsg(aeron_socket_t fd, struct msghdr *msghdr, int flags)
     if (SOCKET_ERROR == result)
     {
         const int err = WSAGetLastError();
-        if (WSAEWOULDBLOCK == err || WSAECONNRESET == err)
+        if (WSAEWOULDBLOCK == err || WSAEINTR == err || WSAECONNRESET == err)
         {
             return 0;
         }
@@ -472,12 +472,12 @@ ssize_t aeron_send(aeron_socket_t fd, const void *buf, size_t len, int flags)
     if (SOCKET_ERROR == size)
     {
         const int err = WSAGetLastError();
-        if (WSAEWOULDBLOCK == err || WSAECONNREFUSED == err)
+        if (WSAEWOULDBLOCK == err || WSAEINTR == err)
         {
             return 0;
         }
 
-        AERON_SET_ERR_WIN(err, "WSASendTo(fd=%d,...)", fd);
+        AERON_SET_ERR_WIN(err, "send(fd=%d,...)", fd);
         return -1;
     }
 
@@ -501,7 +501,7 @@ ssize_t aeron_sendmsg(aeron_socket_t fd, struct msghdr *msghdr, int flags)
     if (SOCKET_ERROR == result)
     {
         const int err = WSAGetLastError();
-        if (WSAEWOULDBLOCK == err)
+        if (WSAEWOULDBLOCK == err || WSAEINTR == err)
         {
             return 0;
         }
@@ -553,8 +553,6 @@ int aeron_connect(aeron_socket_t fd, struct sockaddr *address, socklen_t address
     {
         char addr_str[AERON_NETUTIL_FORMATTED_MAX_LENGTH];
         aeron_format_source_identity(addr_str, sizeof(addr_str), (struct sockaddr_storage *)address);
-        struct sockaddr_in *a = (struct sockaddr_in *) address;
-        printf("addr: %lu, %d\n", a->sin_addr.s_addr, a->sin_port);
         AERON_SET_ERR_WIN(WSAGetLastError(), "failed to connect to address: %s", addr_str);
 
         return -1;

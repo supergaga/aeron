@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,13 +22,14 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 import java.lang.reflect.Method;
 
 /**
- * JUnit extension used to start and reset the CollectingEventLogReaderAgent.
+ * JUnit framework extension used to start and reset the CollectingEventLogReaderAgent.
  */
 public class EventLogExtension implements BeforeEachCallback, AfterEachCallback
 {
     /**
      * {@inheritDoc}
      */
+    @Override
     public void beforeEach(final ExtensionContext context)
     {
         final String className = context.getTestClass().map(Class::getSimpleName).orElse("<UNKNOWN>");
@@ -40,6 +41,7 @@ public class EventLogExtension implements BeforeEachCallback, AfterEachCallback
     /**
      * {@inheritDoc}
      */
+    @Override
     public void afterEach(final ExtensionContext context)
     {
         Tests.resetLogCollecting();

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,14 +17,11 @@ package io.aeron.samples.cluster;
 
 import io.aeron.CommonContext;
 import io.aeron.archive.Archive;
-import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.ConsensusModule;
 import io.aeron.cluster.service.ClusteredService;
 import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.driver.MediaDriver;
-import io.aeron.driver.MinMulticastFlowControlSupplier;
-import io.aeron.driver.ThreadingMode;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.NoOpLock;
 
@@ -39,13 +36,44 @@ import java.util.List;
  */
 public final class ClusterConfig
 {
+    /**
+     * Number of ports per node reserved.
+     */
     public static final int PORTS_PER_NODE = 100;
+
+    /**
+     * Offset from base port that the archive control channel is on.
+     */
     public static final int ARCHIVE_CONTROL_PORT_OFFSET = 1;
+
+    /**
+     * Offset from base port that the client facing port is on for ingress.
+     */
     public static final int CLIENT_FACING_PORT_OFFSET = 2;
+
+    /**
+     * Offset from base port that the member listens on for consensus traffic.
+     */
     public static final int MEMBER_FACING_PORT_OFFSET = 3;
+
+    /**
+     * Offset from base port that the cluster log is on.
+     */
     public static final int LOG_PORT_OFFSET = 4;
+
+    /**
+     * Offset from base port that the transfer of files is on.
+     */
     public static final int TRANSFER_PORT_OFFSET = 5;
+
+    /**
+     * Subdirectory into which archive files are stored.
+     */
     public static final String ARCHIVE_SUB_DIR = "archive";
+
+    /**
+     * Subdirectory into which cluster files are stored.
+     */
     public static final String CLUSTER_SUB_DIR = "cluster";
 
     private final int memberId;
@@ -82,15 +110,15 @@ public final class ClusterConfig
      * addresses for ingress requests and 'internal' addresses that will handle all the cluster replication and
      * control traffic.
      *
-     * @param startingMemberId      id for the first member in the list of entries.
-     * @param memberId                id for this node.
-     * @param ingressHostnames      list of hostnames that will receive ingress request traffic.
-     * @param clusterHostnames      list of hostnames that will receive cluster traffic.
-     * @param portBase              base port to derive remaining ports from.
-     * @param parentDir             directory under which the persistent directories will be created.
-     * @param clusteredService      instance of the clustered service that will run with this configuration.
-     * @param additionalServices    instances of additional clustered services that will run with this configuration.
-     * @return                      configuration that wraps all aeron service configuration.
+     * @param startingMemberId   id for the first member in the list of entries.
+     * @param memberId           id for this node.
+     * @param ingressHostnames   list of hostnames that will receive ingress request traffic.
+     * @param clusterHostnames   list of hostnames that will receive cluster traffic.
+     * @param portBase           base port to derive remaining ports from.
+     * @param parentDir          directory under which the persistent directories will be created.
+     * @param clusteredService   instance of the clustered service that will run with this configuration.
+     * @param additionalServices instances of additional clustered services that will run with this configuration.
+     * @return configuration that wraps all aeron service configuration.
      */
     public static ClusterConfig create(
         final int startingMemberId,
@@ -114,14 +142,11 @@ public final class ClusterConfig
         final String aeronDirName = CommonContext.getAeronDirectoryName() + "-" + memberId + "-driver";
         final File baseDir = new File(parentDir, "aeron-cluster-" + memberId);
 
-        final String ingressHostname = clusterHostnames.get(memberId - startingMemberId);
+        final String ingressHostname = ingressHostnames.get(memberId - startingMemberId);
         final String hostname = clusterHostnames.get(memberId - startingMemberId);
 
         final MediaDriver.Context mediaDriverContext = new MediaDriver.Context()
-            .aeronDirectoryName(aeronDirName)
-            .threadingMode(ThreadingMode.SHARED)
-            .termBufferSparseFile(true)
-            .multicastFlowControlSupplier(new MinMulticastFlowControlSupplier());
+            .aeronDirectoryName(aeronDirName);
 
         final AeronArchive.Context replicationArchiveContext = new AeronArchive.Context()
             .controlResponseChannel("aeron:udp?endpoint=" + hostname + ":0");
@@ -133,8 +158,7 @@ public final class ClusterConfig
             .archiveClientContext(replicationArchiveContext)
             .localControlChannel("aeron:ipc?term-length=64k")
             .replicationChannel("aeron:udp?endpoint=" + hostname + ":0")
-            .recordingEventsEnabled(false)
-            .threadingMode(ArchiveThreadingMode.SHARED);
+            .recordingEventsEnabled(false);
 
         final AeronArchive.Context aeronArchiveContext = new AeronArchive.Context()
             .lock(NoOpLock.INSTANCE)
@@ -188,13 +212,13 @@ public final class ClusterConfig
      * addresses for ingress requests and 'internal' addresses that will handle all the cluster replication and
      * control traffic.
      *
-     * @param nodeId                id for this node.
-     * @param ingressHostnames      list of hostnames that will receive ingress request traffic.
-     * @param clusterHostnames      list of hostnames that will receive cluster traffic.
-     * @param portBase              base port to derive remaining ports from.
-     * @param clusteredService      instance of the clustered service that will run with this configuration.
-     * @param additionalServices    instances of additional clustered services that will run with this configuration.
-     * @return                      configuration that wraps all aeron service configuration.
+     * @param nodeId             id for this node.
+     * @param ingressHostnames   list of hostnames that will receive ingress request traffic.
+     * @param clusterHostnames   list of hostnames that will receive cluster traffic.
+     * @param portBase           base port to derive remaining ports from.
+     * @param clusteredService   instance of the clustered service that will run with this configuration.
+     * @param additionalServices instances of additional clustered services that will run with this configuration.
+     * @return configuration that wraps all aeron service configuration.
      */
     public static ClusterConfig create(
         final int nodeId,
@@ -218,11 +242,11 @@ public final class ClusterConfig
     /**
      * Create a new ClusterConfig. This only supports a single lists of hostnames.
      *
-     * @param nodeId            id for this node.
-     * @param hostnames         list of hostnames that will receive ingress request and cluster traffic.
-     * @param portBase          base port to derive remaining ports from.
-     * @param clusteredService  instance of the clustered service that will run on this node.
-     * @return                  configuration that wraps the detailed aeron service configuration.
+     * @param nodeId           id for this node.
+     * @param hostnames        list of hostnames that will receive ingress request and cluster traffic.
+     * @param portBase         base port to derive remaining ports from.
+     * @param clusteredService instance of the clustered service that will run on this node.
+     * @return configuration that wraps the detailed aeron service configuration.
      */
     public static ClusterConfig create(
         final int nodeId,
@@ -244,7 +268,7 @@ public final class ClusterConfig
         this.archiveContext.errorHandler(errorHandler);
         this.aeronArchiveContext.errorHandler(errorHandler);
         this.consensusModuleContext.errorHandler(errorHandler);
-        this.clusteredServiceContexts.forEach(ctx -> ctx.errorHandler(errorHandler));
+        this.clusteredServiceContexts.forEach((ctx) -> ctx.errorHandler(errorHandler));
     }
 
     /**
@@ -270,7 +294,7 @@ public final class ClusterConfig
     {
         this.archiveContext.archiveDir(new File(baseDir, ARCHIVE_SUB_DIR));
         this.consensusModuleContext.clusterDir(new File(baseDir, CLUSTER_SUB_DIR));
-        this.clusteredServiceContexts.forEach(ctx -> ctx.clusterDir(new File(baseDir, CLUSTER_SUB_DIR)));
+        this.clusteredServiceContexts.forEach((ctx) -> ctx.clusterDir(new File(baseDir, CLUSTER_SUB_DIR)));
     }
 
     /**
@@ -425,8 +449,8 @@ public final class ClusterConfig
     /**
      * Ingress endpoints generated from a list of hostnames.
      *
-     * @param hostnames for the cluster members.
-     * @param portBase Base port for the cluster
+     * @param hostnames              for the cluster members.
+     * @param portBase               Base port for the cluster
      * @param clientFacingPortOffset Offset for the client facing port
      * @return a formatted string of ingress endpoints for connecting to a cluster.
      */
@@ -459,8 +483,7 @@ public final class ClusterConfig
         {
             final int memberId = i + startingMemberId;
             sb.append(memberId).append('=');
-            sb.append(hostnames.get(i)).append(':').append(
-                calculatePort(memberId, portBase, clientFacingPortOffset));
+            sb.append(hostnames.get(i)).append(':').append(calculatePort(memberId, portBase, clientFacingPortOffset));
             sb.append(',');
         }
 
@@ -471,7 +494,7 @@ public final class ClusterConfig
 
     /**
      * Calculates a port for use with a node based on a specific offset.  Can be used with the predefined offsets, e.g.
-     * {@link ClusterConfig#ARCHIVE_CONTROL_PORT_OFFSET} or with custom offsets.  For custom offsets select a value
+     * {@link ClusterConfig#ARCHIVE_CONTROL_PORT_OFFSET} or with custom offsets. For custom offsets select a value
      * larger than largest predefined offsets.  A value larger than the largest predefined offset, but less than
      * {@link ClusterConfig#PORTS_PER_NODE} is required.
      *

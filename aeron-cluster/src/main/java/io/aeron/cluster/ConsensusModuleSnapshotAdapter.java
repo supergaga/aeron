@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ class ConsensusModuleSnapshotAdapter implements ControlledFragmentHandler
         messageHeaderDecoder.wrap(buffer, offset);
 
         final int schemaId = messageHeaderDecoder.schemaId();
-        if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
+        if (MessageHeaderDecoder.SCHEMA_ID != schemaId)
         {
             throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
@@ -92,7 +92,7 @@ class ConsensusModuleSnapshotAdapter implements ControlledFragmentHandler
                     messageHeaderDecoder.version());
 
                 final long typeId = snapshotMarkerDecoder.typeId();
-                if (typeId != SNAPSHOT_TYPE_ID)
+                if (SNAPSHOT_TYPE_ID != typeId)
                 {
                     throw new ClusterException("unexpected snapshot type: " + typeId);
                 }
@@ -122,6 +122,10 @@ class ConsensusModuleSnapshotAdapter implements ControlledFragmentHandler
                         listener.onLoadEndSnapshot(buffer, offset, length);
                         isDone = true;
                         return Action.BREAK;
+
+                    case SECTION:
+                    case NULL_VAL:
+                        break;
                 }
                 break;
 
@@ -173,19 +177,7 @@ class ConsensusModuleSnapshotAdapter implements ControlledFragmentHandler
                 break;
 
             case ClusterMembersDecoder.TEMPLATE_ID:
-                clusterMembersDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                listener.onLoadClusterMembers(
-                    clusterMembersDecoder.memberId(),
-                    clusterMembersDecoder.highMemberId(),
-                    clusterMembersDecoder.clusterMembers(),
-                    buffer,
-                    offset,
-                    length);
+                // Ignored
                 break;
 
             case PendingMessageTrackerDecoder.TEMPLATE_ID:

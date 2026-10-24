@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,25 +15,29 @@
  */
 package io.aeron.samples;
 
-import io.aeron.*;
+import io.aeron.CommonContext;
+import io.aeron.FragmentAssembler;
+import io.aeron.Image;
+import io.aeron.Subscription;
+import io.aeron.archive.client.AeronArchive;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.protocol.HeaderFlyweight;
 import org.agrona.DirectBuffer;
-import org.agrona.LangUtil;
+import org.agrona.IoUtil;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 
+import io.aeron.samples.archive.RecordingDescriptor;
+import io.aeron.samples.archive.RecordingDescriptorCollector;
 import java.io.File;
-import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 import static io.aeron.CncFileDescriptor.*;
 import static java.nio.channels.FileChannel.MapMode.READ_ONLY;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 
 /**
  * Utility functions for the samples.
@@ -158,8 +162,9 @@ public class SamplesUtil
     {
         final Subscription subscription = image.subscription();
         System.out.printf(
-            "Available image on %s streamId=%d sessionId=%d from %s%n",
-            subscription.channel(), subscription.streamId(), image.sessionId(), image.sourceIdentity());
+            "Available image on %s streamId=%d sessionId=%d mtu=%d term-length=%d from %s%n",
+            subscription.channel(), subscription.streamId(), image.sessionId(), image.mtuLength(),
+            image.termBufferLength(), image.sourceIdentity());
     }
 
     /**
@@ -183,24 +188,7 @@ public class SamplesUtil
      */
     public static MappedByteBuffer mapExistingFileReadOnly(final File location)
     {
-        if (!location.exists())
-        {
-            final String msg = "file not found: " + location.getAbsolutePath();
-            throw new IllegalStateException(msg);
-        }
-
-        MappedByteBuffer mappedByteBuffer = null;
-        try (RandomAccessFile file = new RandomAccessFile(location, "r");
-            FileChannel channel = file.getChannel())
-        {
-            mappedByteBuffer = channel.map(READ_ONLY, 0, channel.size());
-        }
-        catch (final IOException ex)
-        {
-            LangUtil.rethrowUnchecked(ex);
-        }
-
-        return mappedByteBuffer;
+        return IoUtil.mapExistingFile(location, READ_ONLY, location.getName());
     }
 
     /**
@@ -221,7 +209,8 @@ public class SamplesUtil
 
         return new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaData),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaData));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaData),
+            US_ASCII);
     }
 
     /**
@@ -244,6 +233,38 @@ public class SamplesUtil
 
         return new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaData),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaData));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaData),
+            US_ASCII);
+    }
+
+    /**
+     * Find the latest {@link RecordingDescriptor} for a stream.
+     *
+     * @param aeronArchive an {@link AeronArchive} instance.
+     * @param channelFragment a fragment of the recorded stream's channel
+     * @param streamId the stream ID of the recorded stream.
+     * @return the {@link CountersReader} over the CnC file.
+     */
+    public static RecordingDescriptor findLatestRecording(
+         final AeronArchive aeronArchive,
+         final String channelFragment,
+         final int streamId
+    )
+    {
+        final RecordingDescriptorCollector collector = new RecordingDescriptorCollector(1);
+
+        if (0 == aeronArchive.listRecordingsForUri(
+            0,
+            Integer.MAX_VALUE,
+            channelFragment,
+            streamId,
+            collector.reset())
+        )
+        {
+            return null;
+        }
+
+        final int lastIndex = collector.descriptors().size() - 1;
+        return collector.descriptors().get(lastIndex);
     }
 }

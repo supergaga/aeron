@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,13 +28,16 @@ import io.aeron.logbuffer.BufferClaim;
 import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -62,27 +65,32 @@ class RecordingReplicatorTest
     private static final String DST_ARCHIVE_REPLICATION_CHANNEL =
         "aeron:udp?alias=dst-replication-channel|endpoint=localhost:9999";
     private static final int TERM_BUFFER_LENGTH = 128 * 1024;
-    private MediaDriver srcMediaDriver;
-    private MediaDriver dstMediaDriver;
+
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
+
+    private TestMediaDriver srcMediaDriver;
+    private TestMediaDriver dstMediaDriver;
     private Archive srcArchive;
     private Archive dstArchive;
     private AeronArchive srcAeronArchive;
     private AeronArchive dstAeronArchive;
-    private final BufferClaim bufferClaim = new BufferClaim();
 
     @BeforeEach
     void setup(@TempDir final Path tempDir)
     {
-        srcMediaDriver = MediaDriver.launch(new MediaDriver.Context()
+        srcMediaDriver = TestMediaDriver.launch(new MediaDriver.Context()
             .aeronDirectoryName(tempDir.resolve("src-driver").toString())
             .termBufferSparseFile(true)
             .threadingMode(ThreadingMode.SHARED)
             .ipcTermBufferLength(TERM_BUFFER_LENGTH)
             .publicationTermBufferLength(TERM_BUFFER_LENGTH)
             .spiesSimulateConnection(true)
-            .dirDeleteOnStart(true));
+            .dirDeleteOnStart(true),
+            testWatcher);
+        testWatcher.dataCollector().add(srcMediaDriver.context().aeronDirectory());
 
-        dstMediaDriver = MediaDriver.launch(new MediaDriver.Context()
+        dstMediaDriver = TestMediaDriver.launch(new MediaDriver.Context()
             .spiesSimulateConnection(true)
             .aeronDirectoryName(tempDir.resolve("dst-driver").toString())
             .termBufferSparseFile(true)
@@ -90,23 +98,29 @@ class RecordingReplicatorTest
             .ipcTermBufferLength(TERM_BUFFER_LENGTH)
             .publicationTermBufferLength(TERM_BUFFER_LENGTH)
             .spiesSimulateConnection(true)
-            .dirDeleteOnStart(true));
+            .dirDeleteOnStart(true),
+            testWatcher);
+        testWatcher.dataCollector().add(dstMediaDriver.context().aeronDirectory());
 
         srcArchive = Archive.launch(new Archive.Context()
             .threadingMode(ArchiveThreadingMode.SHARED)
+            .recordingEventsEnabled(false)
             .aeronDirectoryName(srcMediaDriver.aeronDirectoryName())
             .archiveDir(tempDir.resolve("src-archive").toFile())
             .controlChannel(SRC_ARCHIVE_CONTROL_CHANNEL)
             .controlStreamId(SRC_ARCHIVE_CONTROL_STREAM_ID)
             .replicationChannel(SRC_ARCHIVE_REPLICATION_CHANNEL));
+        testWatcher.dataCollector().add(srcArchive.context().archiveDir());
 
         dstArchive = Archive.launch(new Archive.Context()
             .threadingMode(ArchiveThreadingMode.SHARED)
+            .recordingEventsEnabled(false)
             .aeronDirectoryName(dstMediaDriver.aeronDirectoryName())
             .archiveDir(tempDir.resolve("dst-archive").toFile())
             .controlChannel(DST_ARCHIVE_CONTROL_CHANNEL)
             .controlStreamId(DST_ARCHIVE_CONTROL_STREAM_ID)
             .replicationChannel(DST_ARCHIVE_REPLICATION_CHANNEL));
+        testWatcher.dataCollector().add(dstArchive.context().archiveDir());
 
         srcAeronArchive = AeronArchive.connect(new AeronArchive.Context()
             .aeronDirectoryName(srcMediaDriver.aeronDirectoryName())
@@ -131,7 +145,7 @@ class RecordingReplicatorTest
 
     @ParameterizedTest
     @ValueSource(ints = { 0, 9 })
-    @InterruptAfter(10)
+    @InterruptAfter(30)
     void replicateAsNewRecording(final int srcMessageCount)
     {
         createRecording(srcAeronArchive, IPC_CHANNEL, 555, 3);
@@ -153,7 +167,7 @@ class RecordingReplicatorTest
 
     @ParameterizedTest
     @ValueSource(ints = { 0, 7, 21 })
-    @InterruptAfter(10)
+    @InterruptAfter(30)
     void replicateOverAnExistingRecording(final int srcMessageCount)
     {
         createRecording(srcAeronArchive, IPC_CHANNEL, 555, 1);
@@ -197,20 +211,22 @@ class RecordingReplicatorTest
         try (ExclusivePublication publication = aeronArchive.addRecordedExclusivePublication(channel, streamId))
         {
             final CountersReader counters = aeronArchive.context().aeron().countersReader();
-            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId = Tests.awaitRecordingCounterId(
+                counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
+            final BufferClaim bufferClaim = new BufferClaim();
 
             for (int i = 0; i < numMessages; i++)
             {
                 final int messageSize = ThreadLocalRandom.current().nextInt(8, 500);
-                long result;
-                while ((result = publication.tryClaim(messageSize, bufferClaim)) < 0)
+                long position;
+                while ((position = publication.tryClaim(messageSize, bufferClaim)) < 0)
                 {
-                    if (result == Publication.CLOSED ||
-                        result == Publication.NOT_CONNECTED ||
-                        result == Publication.MAX_POSITION_EXCEEDED)
+                    if (position == Publication.CLOSED ||
+                        position == Publication.NOT_CONNECTED ||
+                        position == Publication.MAX_POSITION_EXCEEDED)
                     {
-                        fail("tryClaim failed: " + result);
+                        fail("tryClaim failed: " + Publication.errorString(position));
                     }
                     Tests.yield();
                 }
@@ -229,7 +245,7 @@ class RecordingReplicatorTest
                 (RecordingSignalCapture)aeronArchive.context().recordingSignalConsumer();
             signalCapture.reset();
             aeronArchive.stopRecording(publication);
-            signalCapture.awaitSignal(aeronArchive, recordingId, RecordingSignal.STOP);
+            signalCapture.awaitSignalForRecordingId(aeronArchive, recordingId, RecordingSignal.STOP);
 
             if (numMessages > 0)
             {
@@ -248,6 +264,11 @@ class RecordingReplicatorTest
 
         assertEquals(1, srcAeronArchive.listRecording(srcRecordingId, collector.reset()));
         final RecordingDescriptor srcRecording = collector.descriptors().get(0).retain();
+
+        while (dstAeronArchive.getStopPosition(dstRecordingId) == AeronArchive.NULL_POSITION)
+        {
+            Tests.yield();
+        }
 
         assertEquals(1, dstAeronArchive.listRecording(dstRecordingId, collector.reset()));
         final RecordingDescriptor dstRecording = collector.descriptors().get(0).retain();

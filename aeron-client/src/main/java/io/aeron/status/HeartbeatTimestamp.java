@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,8 +30,12 @@ import static org.agrona.concurrent.status.CountersReader.*;
 /**
  * Allocate a counter for tracking the last heartbeat of an entity with a given registration id.
  */
-public class HeartbeatTimestamp
+public final class HeartbeatTimestamp
 {
+    private HeartbeatTimestamp()
+    {
+    }
+
     /**
      * Type id of a heartbeat counter.
      */
@@ -88,7 +92,7 @@ public class HeartbeatTimestamp
         final int labelOffset = BitUtil.align(keyLength, SIZE_OF_INT);
         int labelLength = 0;
         labelLength += tempBuffer.putStringWithoutLengthAscii(labelOffset + labelLength, name);
-        labelLength += tempBuffer.putStringWithoutLengthAscii(labelOffset + labelLength, ": ");
+        labelLength += tempBuffer.putStringWithoutLengthAscii(labelOffset + labelLength, ": id=");
         labelLength += tempBuffer.putLongAscii(labelOffset + labelLength, registrationId);
 
         return countersManager.allocate(
@@ -114,15 +118,15 @@ public class HeartbeatTimestamp
     {
         final DirectBuffer buffer = countersReader.metaDataBuffer();
 
-        for (int i = 0, size = countersReader.maxCounterId(); i < size; i++)
+        for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
         {
-            final int counterState = countersReader.getCounterState(i);
+            final int counterState = countersReader.getCounterState(counterId);
             if (counterState == RECORD_ALLOCATED)
             {
-                if (countersReader.getCounterTypeId(i) == counterTypeId &&
-                    buffer.getLong(metaDataOffset(i) + KEY_OFFSET + REGISTRATION_ID_OFFSET) == registrationId)
+                if (countersReader.getCounterTypeId(counterId) == counterTypeId &&
+                    buffer.getLong(metaDataOffset(counterId) + KEY_OFFSET + REGISTRATION_ID_OFFSET) == registrationId)
                 {
-                    return i;
+                    return counterId;
                 }
             }
             else if (RECORD_UNUSED == counterState)

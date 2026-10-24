@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.aeron.protocol;
 
 import io.aeron.exceptions.AeronException;
+import io.aeron.logbuffer.FrameDescriptor;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import java.nio.ByteBuffer;
@@ -27,23 +28,23 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
 /**
  * Flyweight for a Status Message Frame.
  * <p>
- * <a target="_blank" href="https://github.com/real-logic/aeron/wiki/Transport-Protocol-Specification#status-messages">
- *     Status Message</a> wiki page.
+ * <a target="_blank" href="https://github.com/aeron-io/aeron/wiki/Transport-Protocol-Specification#status-messages">
+ * Status Message</a> wiki page.
  */
 public class StatusMessageFlyweight extends HeaderFlyweight
 {
     /**
-     * Length of the Status Message Frame
+     * Length of the Status Message Frame.
      */
     public static final int HEADER_LENGTH = 36;
 
     /**
-     * Publisher should send SETUP frame
+     * Publisher should send SETUP frame.
      */
     public static final short SEND_SETUP_FLAG = 0x80;
 
     /**
-     * Publisher should treat Subscriber as going away
+     * Publisher should treat Subscriber as going away.
      */
     public static final short END_OF_STREAM_FLAG = 0x40;
 
@@ -356,7 +357,7 @@ public class StatusMessageFlyweight extends HeaderFlyweight
      * Set long value into a field that is not aligned on an 8 byte boundary.
      *
      * @param offset of the field to put.
-     * @param value of the field to put.
+     * @param value  of the field to put.
      * @return this for fluent API.
      */
     public StatusMessageFlyweight putLongUnaligned(final int offset, final long value)
@@ -388,8 +389,23 @@ public class StatusMessageFlyweight extends HeaderFlyweight
     }
 
     /**
+     * Check if the SM frame is valid given the {@code termLength}.
+     *
+     * @param termLength to check against.
+     * @return {@code true} if valid.
+     */
+    public boolean isValid(final int termLength)
+    {
+        final int termOffset = consumptionTermOffset();
+        final int receiverWindowLength = receiverWindowLength();
+        return termOffset >= 0 && termOffset < termLength && FrameDescriptor.isFrameAligned(termOffset) &&
+            receiverWindowLength >= 0 && receiverWindowLength <= (termLength >> 1);
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "STATUS{" +

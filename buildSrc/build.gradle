@@ -1,13 +1,30 @@
+plugins {
+    alias(libs.plugins.versions)
+}
+
 repositories {
     mavenCentral()
 }
 
-dependencies {
-    implementation 'org.asciidoctor:asciidoctorj:2.5.5'
-    implementation 'org.eclipse.jgit:org.eclipse.jgit:5.13.1.202206130422-r'
+configurations.configureEach {
+    resolutionStrategy {
+        failOnVersionConflict()
+
+        force libs.asm,
+              libs.asm.analysis,
+              libs.asm.commons,
+              libs.asm.tree,
+              libs.asm.util
+    }
 }
 
-tasks.withType(JavaCompile) {
+dependencies {
+    implementation libs.asciidoctorj
+    implementation libs.jgit
+    implementation libs.json
+}
+
+tasks.withType(JavaCompile).configureEach {
     configure(options) {
         options.compilerArgs << '-Xlint:deprecation' << '-Xlint:unchecked' // examples
     }

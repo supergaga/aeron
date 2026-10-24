@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,13 @@ import org.agrona.LangUtil;
 public final class RethrowingErrorHandler implements ErrorHandler
 {
     /**
+     * Default constructor.
+     */
+    public RethrowingErrorHandler()
+    {
+    }
+
+    /**
      * Singleton instance to avoid allocation.
      */
     public static final RethrowingErrorHandler INSTANCE = new RethrowingErrorHandler();
@@ -31,6 +38,7 @@ public final class RethrowingErrorHandler implements ErrorHandler
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onError(final Throwable ex)
     {
         LangUtil.rethrowUnchecked(ex);

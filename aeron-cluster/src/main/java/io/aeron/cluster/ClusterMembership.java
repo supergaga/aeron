@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,13 @@ import static io.aeron.Aeron.NULL_VALUE;
 public class ClusterMembership
 {
     /**
+     * Create a mutable holder for membership information. Initialise all values to null/NULL_VALUE.
+     */
+    public ClusterMembership()
+    {
+    }
+
+    /**
      * Member id that the query is run against.
      */
     public int memberId = NULL_VALUE;
@@ -45,17 +52,7 @@ public class ClusterMembership
     public String activeMembersStr = null;
 
     /**
-     * List of active cluster members encoded to a String.
-     */
-    public String passiveMembersStr = null;
-
-    /**
      * Current active members of a cluster.
      */
     public List<ClusterMember> activeMembers = null;
-
-    /**
-     * Current passive members of a cluster.
-     */
-    public List<ClusterMember> passiveMembers = null;
 }

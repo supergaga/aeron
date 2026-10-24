@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,18 @@
  */
 package io.aeron.archive;
 
-import io.aeron.*;
-import io.aeron.archive.client.*;
+import io.aeron.Aeron;
+import io.aeron.ChannelUriStringBuilder;
+import io.aeron.CommonContext;
+import io.aeron.ExclusivePublication;
+import io.aeron.Image;
+import io.aeron.Publication;
+import io.aeron.Subscription;
+import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.ArchiveProxy;
+import io.aeron.archive.client.ControlResponseAdapter;
+import io.aeron.archive.client.RecordingEventsAdapter;
+import io.aeron.archive.client.ReplayParams;
 import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
@@ -24,9 +34,19 @@ import io.aeron.driver.status.SystemCounterDescriptor;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.logbuffer.Header;
-import io.aeron.test.*;
+import io.aeron.test.EventLogExtension;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.TestContexts;
+import io.aeron.test.Tests;
 import io.aeron.test.driver.TestMediaDriver;
-import org.agrona.*;
+import org.agrona.BitUtil;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.IoUtil;
+import org.agrona.LangUtil;
+import org.agrona.SystemUtil;
 import org.agrona.collections.MutableBoolean;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.YieldingIdleStrategy;
@@ -45,17 +65,21 @@ import java.util.stream.Stream;
 
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ArchiveSystemTest
 {
     private static Stream<Arguments> threadingModes()
     {
         return Stream.of(
-            arguments(ThreadingMode.INVOKER, ArchiveThreadingMode.SHARED),
             arguments(ThreadingMode.SHARED, ArchiveThreadingMode.SHARED),
+            arguments(ThreadingMode.SHARED_NETWORK, ArchiveThreadingMode.SHARED),
             arguments(ThreadingMode.DEDICATED, ArchiveThreadingMode.DEDICATED));
     }
 
@@ -76,7 +100,7 @@ class ArchiveSystemTest
     @RegisterExtension
     final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
 
-    private long controlSessionId;
+    private long controlSessionId = -1;
     private String publishUri;
     private Aeron client;
     private Archive archive;
@@ -134,22 +158,17 @@ class ArchiveSystemTest
             .recordingEventsChannel("aeron:udp?control-mode=dynamic|control=localhost:8030")
             .recordingEventsEnabled(true)
             .idleStrategySupplier(YieldingIdleStrategy::new);
-        try
-        {
-            driver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
 
-            if (threadingMode == ThreadingMode.INVOKER)
-            {
-                archiveContext.mediaDriverAgentInvoker(driver.sharedAgentInvoker());
-            }
+        driver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
+        systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
 
-            archive = Archive.launch(archiveContext);
-        }
-        finally
+        if (threadingMode == ThreadingMode.INVOKER)
         {
-            systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
-            systemTestWatcher.dataCollector().add(archiveContext.archiveDir());
+            archiveContext.mediaDriverAgentInvoker(driver.sharedAgentInvoker());
         }
+
+        archive = Archive.launch(archiveContext);
+        systemTestWatcher.dataCollector().add(archiveContext.archiveDir());
 
         client = Aeron.connect();
 
@@ -204,7 +223,7 @@ class ArchiveSystemTest
         final String recordingChannel = archive.context().recordingEventsChannel();
         final int recordingStreamId = archive.context().recordingEventsStreamId();
 
-        final Publication controlPublication = client.addPublication(controlChannel, controlStreamId);
+        final ExclusivePublication controlPublication = client.addExclusivePublication(controlChannel, controlStreamId);
         final Subscription recordingEvents = client.addSubscription(recordingChannel, recordingStreamId);
         final ArchiveProxy archiveProxy = new ArchiveProxy(controlPublication);
 
@@ -242,7 +261,7 @@ class ArchiveSystemTest
         final String recordingChannel = archive.context().recordingEventsChannel();
         final int recordingStreamId = archive.context().recordingEventsStreamId();
 
-        final Publication controlPublication = client.addPublication(controlChannel, controlStreamId);
+        final ExclusivePublication controlPublication = client.addExclusivePublication(controlChannel, controlStreamId);
         final Subscription recordingEvents = client.addSubscription(recordingChannel, recordingStreamId);
         final ArchiveProxy archiveProxy = new ArchiveProxy(controlPublication);
 
@@ -278,7 +297,7 @@ class ArchiveSystemTest
     {
         before(threadingMode, archiveThreadingMode);
 
-        final Publication controlPublication = client.addPublication(
+        final ExclusivePublication controlPublication = client.addExclusivePublication(
             archive.context().localControlChannel(), archive.context().localControlStreamId());
         final ArchiveProxy archiveProxy = new ArchiveProxy(controlPublication);
 
@@ -384,6 +403,13 @@ class ArchiveSystemTest
                 Tests.yield();
             }
         }
+        final Archive.Context context = archive.context();
+        Tests.await(() -> context.totalWriteBytesCounter().get() >= totalDataLength);
+        final long totalWriteTimeNs = context.totalWriteTimeCounter().get();
+        assertNotEquals(0, totalWriteTimeNs);
+        final long maxWriteTimeNs = context.maxWriteTimeCounter().get();
+        assertNotEquals(0, maxWriteTimeNs);
+        assertTrue(totalWriteTimeNs > maxWriteTimeNs);
 
         verifyDescriptorListOngoingArchive(archiveProxy, termBufferLength);
         validateArchiveFile(recordingId);
@@ -488,14 +514,6 @@ class ArchiveSystemTest
         await(complete);
     }
 
-    private void prepAndSendMessages(final Subscription recordingEvents, final ExclusivePublication publication)
-    {
-        final CountDownLatch complete = new CountDownLatch(1);
-        prepMessagesAndListener(recordingEvents, complete);
-        publishDataToBeRecorded(publication);
-        await(complete);
-    }
-
     private void await(final CountDownLatch latch)
     {
         try
@@ -523,6 +541,7 @@ class ArchiveSystemTest
 
     private void publishDataToBeRecorded(final Publication publication)
     {
+        Tests.awaitConnected(publication);
         startPosition = publication.position();
 
         final UnsafeBuffer buffer = new UnsafeBuffer(new byte[4096]);
@@ -566,17 +585,16 @@ class ArchiveSystemTest
         {
             final long replayCorrelationId = client.nextCorrelationId();
 
-            if (!archiveProxy.replay(
-                recordingId,
-                startPosition,
-                totalRecordingLength,
-                REPLAY_URI,
-                REPLAY_STREAM_ID,
-                replayCorrelationId,
-                controlSessionId))
-            {
-                throw new IllegalStateException("failed to replay");
-            }
+            assertTrue(
+                archiveProxy.replay(
+                    recordingId,
+                    startPosition,
+                    totalRecordingLength,
+                    REPLAY_URI,
+                    REPLAY_STREAM_ID,
+                    replayCorrelationId,
+                    controlSessionId),
+                "failed to replay");
 
             ArchiveTests.awaitOk(controlResponse, replayCorrelationId);
             Tests.awaitConnected(replay);
@@ -602,6 +620,13 @@ class ArchiveSystemTest
             assertEquals(MESSAGE_COUNT, messageCount);
             assertEquals(0L, remaining);
         }
+
+        final Archive.Context context = archive.context();
+        Tests.await(() -> context.totalReadBytesCounter().get() >= totalDataLength);
+        final long totalReadTimeNs = context.totalReadTimeCounter().get();
+        assertNotEquals(0, totalReadTimeNs);
+        final long maxReadTimeNs = context.maxReadTimeCounter().get();
+        assertNotEquals(0, maxReadTimeNs);
     }
 
     private void validateArchiveFile(final long recordingId)

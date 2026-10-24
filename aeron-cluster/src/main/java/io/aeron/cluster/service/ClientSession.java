@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,12 +86,12 @@ public interface ClientSession
 
     /**
      * Non-blocking publish by gathering buffer vectors into a message. The first vector will be replaced by the cluster
-     * egress header so must be left unused.
+     * egress header so must be left unused. Will return the result of {@link Publication#offer(DirectBufferVector[])}
+     * when in {@link Cluster.Role#LEADER}, otherwise {@link #MOCKED_OFFER} when a follower.
      *
      * @param vectors which make up the message.
      * @return the same as {@link Publication#offer(DirectBufferVector[])}.
-     * @see Publication#offer(DirectBufferVector[]) when in {@link Cluster.Role#LEADER},
-     * otherwise {@link #MOCKED_OFFER} when a follower.
+     * @see Publication#offer(DirectBufferVector[])
      */
     long offer(DirectBufferVector[] vectors);
 

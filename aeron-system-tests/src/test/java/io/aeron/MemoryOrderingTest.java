@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,18 +30,21 @@ import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
+import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.fail;
 
 @ExtendWith(InterruptingTestCallback.class)
 class MemoryOrderingTest
 {
-    private static final String CHANNEL = "aeron:udp?endpoint=localhost:24325";
     private static final int STREAM_ID = 1001;
     private static final int FRAGMENT_COUNT_LIMIT = 10;
     private static final int MESSAGE_LENGTH = 2000;
@@ -55,31 +58,39 @@ class MemoryOrderingTest
     @RegisterExtension
     final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Tests::onError)
-        .dirDeleteOnStart(true)
-        .threadingMode(ThreadingMode.SHARED)
-        .publicationTermBufferLength(TERM_BUFFER_LENGTH),
-        testWatcher);
+    private TestMediaDriver driver;
+    private Aeron aeron;
 
-    private final Aeron aeron = Aeron.connect();
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .errorHandler(Tests::onError)
+                .dirDeleteOnStart(true)
+                .threadingMode(ThreadingMode.SHARED)
+                .publicationTermBufferLength(TERM_BUFFER_LENGTH),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
+    }
 
     @AfterEach
     void after()
     {
         CloseHelper.closeAll(aeron, driver);
-        driver.context().deleteDirectory();
     }
 
-    @Test
+    @ParameterizedTest
+    @MethodSource("channels")
     @InterruptAfter(10)
-    void shouldReceiveMessagesInOrderWithFirstLongWordIntact() throws Exception
+    void shouldReceiveMessagesInOrderWithFirstLongWordIntact(final String channel) throws Exception
     {
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(ByteBuffer.allocate(MESSAGE_LENGTH));
         srcBuffer.setMemory(0, MESSAGE_LENGTH, (byte)7);
 
-        try (Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID);
-            Publication publication = aeron.addPublication(CHANNEL, STREAM_ID))
+        try (Subscription subscription = aeron.addSubscription(channel, STREAM_ID);
+            Publication publication = aeron.addPublication(channel, STREAM_ID))
         {
             final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
             final Thread subscriberThread = new Thread(new Subscriber(subscription));
@@ -88,19 +99,13 @@ class MemoryOrderingTest
 
             for (int i = 0; i < NUM_MESSAGES; i++)
             {
-                if (null != failedMessage)
-                {
-                    fail(failedMessage);
-                }
+                failOnError();
 
                 srcBuffer.putLong(0, i);
 
                 while (publication.offer(srcBuffer) < 0L)
                 {
-                    if (null != failedMessage)
-                    {
-                        fail(failedMessage);
-                    }
+                    failOnError();
 
                     idleStrategy.idle();
                     Tests.checkInterruptStatus();
@@ -119,18 +124,22 @@ class MemoryOrderingTest
             }
 
             subscriberThread.join();
+
+            failOnError();
         }
     }
 
-    @Test
-    @InterruptAfter(10)
-    void shouldReceiveMessagesInOrderWithFirstLongWordIntactFromExclusivePublication() throws InterruptedException
+    @ParameterizedTest
+    @MethodSource("channels")
+    @InterruptAfter(20)
+    void shouldReceiveMessagesInOrderWithFirstLongWordIntactFromExclusivePublication(final String channel)
+        throws InterruptedException
     {
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(ByteBuffer.allocate(MESSAGE_LENGTH));
         srcBuffer.setMemory(0, MESSAGE_LENGTH, (byte)7);
 
-        try (Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID);
-            ExclusivePublication publication = aeron.addExclusivePublication(CHANNEL, STREAM_ID))
+        try (Subscription subscription = aeron.addSubscription(channel, STREAM_ID);
+            ExclusivePublication publication = aeron.addExclusivePublication(channel, STREAM_ID))
         {
             final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
             final Thread subscriberThread = new Thread(new Subscriber(subscription));
@@ -139,19 +148,13 @@ class MemoryOrderingTest
 
             for (int i = 0; i < NUM_MESSAGES; i++)
             {
-                if (null != failedMessage)
-                {
-                    fail(failedMessage);
-                }
+                failOnError();
 
                 srcBuffer.putLong(0, i);
 
                 while (publication.offer(srcBuffer) < 0L)
                 {
-                    if (null != failedMessage)
-                    {
-                        fail(failedMessage);
-                    }
+                    failOnError();
 
                     idleStrategy.idle();
                     Tests.checkInterruptStatus();
@@ -170,7 +173,25 @@ class MemoryOrderingTest
             }
 
             subscriberThread.join();
+
+            failOnError();
         }
+    }
+
+    private static void failOnError()
+    {
+        if (null != failedMessage)
+        {
+            fail(failedMessage);
+        }
+    }
+
+    private static List<String> channels()
+    {
+        return asList(
+            "aeron:ipc?term-length=4m",
+            "aeron:udp?endpoint=localhost:24325|term-length=4m"
+        );
     }
 
     static class Subscriber implements Runnable, FragmentHandler

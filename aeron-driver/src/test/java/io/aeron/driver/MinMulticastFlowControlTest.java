@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.driver;
 
 import io.aeron.driver.media.UdpChannel;
 import io.aeron.protocol.StatusMessageFlyweight;
+import io.aeron.test.Tests;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.CountersManager;
 import org.junit.jupiter.api.Test;
@@ -24,11 +25,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.stream.Stream;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MinMulticastFlowControlTest
 {
@@ -38,13 +39,8 @@ class MinMulticastFlowControlTest
     private static final int COUNTERS_BUFFER_LENGTH = 16 * 1024;
 
     private final UnsafeBuffer tempBuffer = new UnsafeBuffer(new byte[8192]);
-    private final UnsafeBuffer counterBuffer = new UnsafeBuffer(ByteBuffer.allocate(COUNTERS_BUFFER_LENGTH));
-    private final UnsafeBuffer metaDataBuffer = new UnsafeBuffer(
-        ByteBuffer.allocate(Configuration.countersMetadataBufferLength(COUNTERS_BUFFER_LENGTH)));
-
     private final MinMulticastFlowControl flowControl = new MinMulticastFlowControl();
-    private final CountersManager countersManager = new CountersManager(
-        metaDataBuffer, counterBuffer, StandardCharsets.US_ASCII);
+    private final CountersManager countersManager = Tests.newCountersManager(COUNTERS_BUFFER_LENGTH);
 
     private static Stream<Arguments> validUris()
     {
@@ -149,6 +145,51 @@ class MinMulticastFlowControlTest
         assertEquals(senderLimit, onStatusMessage(flowControl, 1, termOffset0, senderLimit));
         assertEquals(senderLimit, onStatusMessage(flowControl, 2, termOffset1, senderLimit));
         assertEquals(termOffset2 + WINDOW_LENGTH, onStatusMessage(flowControl, 3, termOffset2, senderLimit));
+    }
+
+    @Test
+    void shouldRemoveOnlyTimedOutReceiversWhenTheLastReceiverHasAlsoTimedOut()
+    {
+        final UdpChannel udpChannel = UdpChannel.parse(
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost|fc=min,g:/1,t:100ms");
+
+        flowControl.initialize(
+            newContext(), countersManager, udpChannel, 0, 0, 0, 0, 0);
+
+        final long senderLimit = 5000;
+        final int termOffsetOne = 1000;
+        final int termOffsetTwo = 2000;
+        final int termOffsetThree = 3000;
+
+        onStatusMessage(flowControl, 1, termOffsetOne, senderLimit, 0);
+        onStatusMessage(flowControl, 2, termOffsetTwo, senderLimit, 0);
+        onStatusMessage(flowControl, 3, termOffsetThree, senderLimit, 0);
+
+        onStatusMessage(flowControl, 2, termOffsetTwo, senderLimit, 50_000_000);
+
+        // receivers one and three have timed out, receiver two has not
+        assertEquals(termOffsetTwo + WINDOW_LENGTH, flowControl.onIdle(100_000_001, senderLimit, 0, false));
+
+        // receiver two must be the receiver that survived the removal pass
+        assertEquals(termOffsetTwo + WINDOW_LENGTH, flowControl.onIdle(100_000_002, senderLimit, 0, false));
+    }
+
+    private long onStatusMessage(
+        final MinMulticastFlowControl flowControl,
+        final long receiverId,
+        final int termOffset,
+        final long senderLimit,
+        final long timeNs)
+    {
+        final StatusMessageFlyweight statusMessageFlyweight = new StatusMessageFlyweight();
+        statusMessageFlyweight.wrap(new byte[1024]);
+
+        statusMessageFlyweight.receiverId(receiverId);
+        statusMessageFlyweight.consumptionTermId(0);
+        statusMessageFlyweight.consumptionTermOffset(termOffset);
+        statusMessageFlyweight.receiverWindowLength(WINDOW_LENGTH);
+
+        return flowControl.onStatusMessage(statusMessageFlyweight, null, senderLimit, 0, 0, timeNs);
     }
 
     private long onStatusMessage(

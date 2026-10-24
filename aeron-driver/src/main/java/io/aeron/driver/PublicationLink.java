@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,6 +46,7 @@ final class PublicationLink implements DriverManagedResource
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         if (publication instanceof NetworkPublication)
@@ -58,9 +59,22 @@ final class PublicationLink implements DriverManagedResource
         }
     }
 
+    void revoke()
+    {
+        if (publication instanceof NetworkPublication)
+        {
+            ((NetworkPublication)publication).revoke();
+        }
+        else
+        {
+            ((IpcPublication)publication).revoke();
+        }
+    }
+
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         if (client.hasTimedOut())
@@ -72,6 +86,7 @@ final class PublicationLink implements DriverManagedResource
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,10 +21,9 @@ import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.protocol.RttMeasurementFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import org.agrona.BufferUtil;
-import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
 import org.agrona.LangUtil;
-import org.agrona.collections.ArrayUtil;
+import org.agrona.collections.ArrayListUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.nio.TransportPoller;
 
@@ -33,9 +32,14 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SelectionKey;
+import java.util.ArrayList;
+import java.util.function.Consumer;
 
 import static io.aeron.logbuffer.FrameDescriptor.frameType;
-import static io.aeron.protocol.HeaderFlyweight.*;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_DATA;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_PAD;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_RTTM;
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_SETUP;
 import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
 
 /**
@@ -43,15 +47,16 @@ import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
  */
 public final class DataTransportPoller extends UdpTransportPoller
 {
-    private static final ChannelAndTransport[] EMPTY_TRANSPORTS = new ChannelAndTransport[0];
-
     private final ByteBuffer byteBuffer = BufferUtil.allocateDirectAligned(
         Configuration.MAX_UDP_PAYLOAD_LENGTH, CACHE_LINE_LENGTH);
     private final UnsafeBuffer unsafeBuffer = new UnsafeBuffer(byteBuffer);
     private final DataHeaderFlyweight dataMessage = new DataHeaderFlyweight(unsafeBuffer);
     private final SetupFlyweight setupMessage = new SetupFlyweight(unsafeBuffer);
     private final RttMeasurementFlyweight rttMeasurement = new RttMeasurementFlyweight(unsafeBuffer);
-    private ChannelAndTransport[] channelAndTransports = EMPTY_TRANSPORTS;
+    private final Consumer<SelectionKey> selectorPoller =
+        (selectionKey) -> poll((ChannelAndTransport)selectionKey.attachment());
+    private final ArrayList<ChannelAndTransport> channelAndTransports = new ArrayList<>();
+    private int totalBytesReceived;
 
     /**
      * Construct a new {@link TransportPoller} with an {@link ErrorHandler} for logging.
@@ -66,60 +71,53 @@ public final class DataTransportPoller extends UdpTransportPoller
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         for (final ChannelAndTransport transport : channelAndTransports)
         {
-            final ReceiveChannelEndpoint receiveChannelEndpoint = transport.channelEndpoint;
-            receiveChannelEndpoint.closeMultiRcvDestination(this);
-            CloseHelper.close(errorHandler, receiveChannelEndpoint);
+            try
+            {
+                final ReceiveChannelEndpoint receiveChannelEndpoint = transport.channelEndpoint;
+                cancelSingle(transport);
+                receiveChannelEndpoint.close();
+            }
+            catch (final Exception ex)
+            {
+                errorHandler.onError(ex);
+            }
         }
-
         super.close();
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public int pollTransports()
     {
-        int bytesReceived = 0;
-        try
+        totalBytesReceived = 0;
+
+        if (channelAndTransports.size() <= ITERATION_THRESHOLD)
         {
-            if (channelAndTransports.length <= ITERATION_THRESHOLD)
+            for (final ChannelAndTransport channelAndTransport : channelAndTransports)
             {
-                for (final ChannelAndTransport channelAndTransport : channelAndTransports)
-                {
-                    bytesReceived += poll(channelAndTransport);
-                }
-            }
-            else
-            {
-                selector.selectNow();
-
-                final SelectionKey[] keys = selectedKeySet.keys();
-                for (int i = 0, length = selectedKeySet.size(); i < length; i++)
-                {
-                    bytesReceived += poll((ChannelAndTransport)keys[i].attachment());
-                }
-
-                selectedKeySet.reset();
+                poll(channelAndTransport);
             }
         }
-        catch (final IOException ex)
+        else
         {
-            LangUtil.rethrowUnchecked(ex);
+            try
+            {
+                selector.selectNow(selectorPoller);
+            }
+            catch (final IOException ex)
+            {
+                errorHandler.onError(ex);
+            }
         }
 
-        return bytesReceived;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public SelectionKey registerForRead(final UdpChannelTransport transport)
-    {
-        return registerForRead((ReceiveChannelEndpoint)transport, transport, 0);
+        return totalBytesReceived;
     }
 
     /**
@@ -127,35 +125,24 @@ public final class DataTransportPoller extends UdpTransportPoller
      *
      * @param channelEndpoint to which the transport belongs.
      * @param transport       new transport to be registered.
-     * @param transportIndex for the transport in the channel.
-     * @return {@link SelectionKey} for registration to cancel.
+     * @param transportIndex  for the transport in the channel.
      */
-    public SelectionKey registerForRead(
+    public void registerForRead(
         final ReceiveChannelEndpoint channelEndpoint, final UdpChannelTransport transport, final int transportIndex)
     {
-        SelectionKey key = null;
         try
         {
             final ChannelAndTransport channelAndTransport = new ChannelAndTransport(
                 channelEndpoint, transport, transportIndex);
 
-            key = transport.receiveDatagramChannel().register(selector, SelectionKey.OP_READ, channelAndTransport);
-            channelAndTransports = ArrayUtil.add(channelAndTransports, channelAndTransport);
+            channelAndTransport.selectionKey = transport.receiveDatagramChannel()
+                .register(selector, SelectionKey.OP_READ, channelAndTransport);
+            channelAndTransports.add(channelAndTransport);
         }
         catch (final ClosedChannelException ex)
         {
             LangUtil.rethrowUnchecked(ex);
         }
-
-        return key;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public void cancelRead(final UdpChannelTransport transport)
-    {
-        cancelRead((ReceiveChannelEndpoint)transport, transport);
     }
 
     /**
@@ -166,22 +153,44 @@ public final class DataTransportPoller extends UdpTransportPoller
      */
     public void cancelRead(final ReceiveChannelEndpoint channelEndpoint, final UdpChannelTransport transport)
     {
-        final ChannelAndTransport[] transports = channelAndTransports;
-        int index = ArrayUtil.UNKNOWN_INDEX;
-
-        for (int i = 0, length = transports.length; i < length; i++)
+        final ArrayList<ChannelAndTransport> transports = channelAndTransports;
+        for (int i = transports.size() - 1; i >= 0; i--)
         {
-            if (channelEndpoint == transports[i].channelEndpoint && transport == transports[i].transport)
+            final ChannelAndTransport channelAndTransport = transports.get(i);
+            if (channelEndpoint == channelAndTransport.channelEndpoint && transport == channelAndTransport.transport)
             {
-                index = i;
+                cancelSingle(channelAndTransport);
+                ArrayListUtil.fastUnorderedRemove(transports, i);
                 break;
             }
         }
+    }
 
-        if (index != ArrayUtil.UNKNOWN_INDEX)
+    /**
+     * Cancel all reads of a given channel.
+     *
+     * @param channelEndpoint to which the transport belongs.
+     */
+    public void cancelReadForAllTransports(final ReceiveChannelEndpoint channelEndpoint)
+    {
+        final ArrayList<ChannelAndTransport> transports = channelAndTransports;
+        for (int i = transports.size() - 1; i >= 0; i--)
         {
-            channelAndTransports = 1 == transports.length ? EMPTY_TRANSPORTS : ArrayUtil.remove(transports, index);
+            final ChannelAndTransport transport = transports.get(i);
+            if (channelEndpoint == transport.channelEndpoint)
+            {
+                transport.selectionKey.cancel();
+                ArrayListUtil.fastUnorderedRemove(transports, i);
+            }
         }
+
+        selectNowWithoutProcessing();
+    }
+
+    private void cancelSingle(final ChannelAndTransport transport)
+    {
+        transport.selectionKey.cancel();
+        selectNowWithoutProcessing();
     }
 
     /**
@@ -198,14 +207,26 @@ public final class DataTransportPoller extends UdpTransportPoller
         }
     }
 
-    private int poll(final ChannelAndTransport channelAndTransport)
+    private void poll(final ChannelAndTransport channelAndTransport)
     {
-        int bytesReceived = 0;
+        try
+        {
+            receive(channelAndTransport);
+        }
+        catch (final Exception ex)
+        {
+            errorHandler.onError(ex);
+        }
+    }
+
+    private void receive(final ChannelAndTransport channelAndTransport)
+    {
         final InetSocketAddress srcAddress = channelAndTransport.transport.receive(byteBuffer);
 
         if (null != srcAddress)
         {
             final int length = byteBuffer.position();
+            totalBytesReceived += length;
             final ReceiveChannelEndpoint channelEndpoint = channelAndTransport.channelEndpoint;
 
             if (channelEndpoint.isValidFrame(unsafeBuffer, length))
@@ -215,7 +236,7 @@ public final class DataTransportPoller extends UdpTransportPoller
                 final int frameType = frameType(unsafeBuffer, 0);
                 if (HDR_TYPE_DATA == frameType || HDR_TYPE_PAD == frameType)
                 {
-                    bytesReceived = channelEndpoint.onDataPacket(
+                    channelEndpoint.onDataPacket(
                         dataMessage, unsafeBuffer, length, srcAddress, channelAndTransport.transportIndex);
                 }
                 else if (HDR_TYPE_SETUP == frameType)
@@ -230,8 +251,15 @@ public final class DataTransportPoller extends UdpTransportPoller
                 }
             }
         }
+    }
 
-        return bytesReceived;
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "DataTransportPoller{}";
     }
 
     static class ChannelAndTransport
@@ -239,6 +267,7 @@ public final class DataTransportPoller extends UdpTransportPoller
         final ReceiveChannelEndpoint channelEndpoint;
         final UdpChannelTransport transport;
         final int transportIndex;
+        SelectionKey selectionKey;
 
         ChannelAndTransport(
             final ReceiveChannelEndpoint channelEndpoint, final UdpChannelTransport transport, final int transportIndex)

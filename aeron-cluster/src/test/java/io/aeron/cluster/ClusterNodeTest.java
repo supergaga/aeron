@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,22 +40,23 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
+import java.util.concurrent.atomic.AtomicLong;
+
+import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.cluster.ClusterTestConstants.CLUSTER_MEMBERS;
 import static io.aeron.cluster.ClusterTestConstants.INGRESS_ENDPOINTS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @ExtendWith(InterruptingTestCallback.class)
-public class ClusterNodeTest
+class ClusterNodeTest
 {
-    private static final long CATALOG_CAPACITY = 1024 * 1024;
-
     private ClusteredMediaDriver clusteredMediaDriver;
     private ClusteredServiceContainer container;
     private AeronCluster aeronCluster;
 
     @BeforeEach
-    public void before()
+    void before()
     {
         clusteredMediaDriver = ClusteredMediaDriver.launch(
             new MediaDriver.Context()
@@ -64,7 +65,7 @@ public class ClusterNodeTest
                 .errorHandler(ClusterTests.errorHandler(0))
                 .dirDeleteOnStart(true),
             TestContexts.localhostArchive()
-                .catalogCapacity(CATALOG_CAPACITY)
+                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
                 .threadingMode(ArchiveThreadingMode.SHARED)
                 .recordingEventsEnabled(false)
                 .deleteArchiveOnStart(true),
@@ -79,7 +80,7 @@ public class ClusterNodeTest
     }
 
     @AfterEach
-    public void after()
+    void after()
     {
         final ConsensusModule consensusModule = null == clusteredMediaDriver ?
             null : clusteredMediaDriver.consensusModule();
@@ -97,7 +98,7 @@ public class ClusterNodeTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldConnectAndSendKeepAlive()
+    void shouldConnectAndSendKeepAlive()
     {
         container = launchEchoService();
         aeronCluster = connectToCluster(null);
@@ -109,7 +110,7 @@ public class ClusterNodeTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldEchoMessageViaServiceUsingDirectOffer()
+    void shouldEchoMessageViaServiceUsingDirectOffer()
     {
         final ExpandableArrayBuffer msgBuffer = new ExpandableArrayBuffer();
         final String msg = "Hello World!";
@@ -135,7 +136,7 @@ public class ClusterNodeTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldEchoMessageViaServiceUsingTryClaim()
+    void shouldEchoMessageViaServiceUsingTryClaim()
     {
         final ExpandableArrayBuffer msgBuffer = new ExpandableArrayBuffer();
         final String msg = "Hello World!";
@@ -179,7 +180,7 @@ public class ClusterNodeTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldScheduleEventInService()
+    void shouldScheduleEventInService()
     {
         final ExpandableArrayBuffer msgBuffer = new ExpandableArrayBuffer();
         final String msg = "Hello World!";
@@ -206,7 +207,7 @@ public class ClusterNodeTest
 
     @Test
     @InterruptAfter(10)
-    public void shouldSendResponseAfterServiceMessage()
+    void shouldSendResponseAfterServiceMessage()
     {
         final ExpandableArrayBuffer msgBuffer = new ExpandableArrayBuffer();
         final String msg = "Hello World!";
@@ -228,6 +229,25 @@ public class ClusterNodeTest
         awaitResponse(messageCount);
 
         ClusterTests.failOnClusterError();
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldTerminateServiceWhenServiceClientTimesOut()
+    {
+        final AtomicLong clockOffsetMs = new AtomicLong();
+        final ClusteredServiceContainer.Context containerCtx = new ClusteredServiceContainer.Context()
+            .clusteredService(new StubClusteredService())
+            .epochClock(() -> System.currentTimeMillis() + clockOffsetMs.get());
+
+        container = ClusteredServiceContainer.launch(containerCtx);
+        aeronCluster = connectToCluster(null);
+
+        // step the service's clock past the driver timeout, as after a process stall
+        clockOffsetMs.set(containerCtx.aeron().context().driverTimeoutMs() + 1);
+
+        // the service marks itself terminated once it has closed
+        Tests.await(() -> NULL_VALUE == containerCtx.clusterMarkFile().activityTimestampVolatile());
     }
 
     private void offerMessage(final ExpandableArrayBuffer msgBuffer, final String msg)
@@ -261,11 +281,7 @@ public class ClusterNodeTest
                 final int length,
                 final Header header)
             {
-                idleStrategy.reset();
-                while (session.offer(buffer, offset, length) < 0)
-                {
-                    idleStrategy.idle();
-                }
+                echoMessage(session, buffer, offset, length);
             }
         };
 
@@ -309,11 +325,7 @@ public class ClusterNodeTest
                 buffer.putStringWithoutLengthAscii(0, responseMsg);
                 final ClientSession clientSession = cluster.getClientSession(clusterSessionId);
 
-                idleStrategy.reset();
-                while (clientSession.offer(buffer, 0, responseMsg.length()) < 0)
-                {
-                    idleStrategy.idle();
-                }
+                echoMessage(clientSession, buffer, 0, responseMsg.length());
             }
         };
 
@@ -346,15 +358,7 @@ public class ClusterNodeTest
                 }
                 else
                 {
-                    cluster.forEachClientSession(
-                        (clientSession) ->
-                        {
-                            idleStrategy.reset();
-                            while (clientSession.offer(buffer, offset, length) < 0)
-                            {
-                                idleStrategy.idle();
-                            }
-                        });
+                    cluster.forEachClientSession((clientSession) -> echoMessage(clientSession, buffer, offset, length));
                 }
             }
         };
@@ -372,6 +376,7 @@ public class ClusterNodeTest
             new AeronCluster.Context()
                 .egressListener(egressListener)
                 .ingressChannel("aeron:udp")
-                .ingressEndpoints(INGRESS_ENDPOINTS));
+                .ingressEndpoints(INGRESS_ENDPOINTS)
+                .egressChannel("aeron:udp?endpoint=localhost:0"));
     }
 }

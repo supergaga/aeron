@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,13 @@
 #include "aeron_context.h"
 #include "aeron_client_conductor.h"
 
+typedef struct aeron_image_key_stct
+{
+    int64_t correlation_id;
+    int64_t subscription_registration_id;
+}
+aeron_image_key_t;
+
 typedef struct aeron_image_stct
 {
     aeron_client_command_base_t command_base;
@@ -35,10 +42,11 @@ typedef struct aeron_image_stct
 
     volatile int64_t *subscriber_position;
 
-    int64_t correlation_id;
+    aeron_image_key_t key;
     int64_t removal_change_number;
     int64_t join_position;
     int64_t final_position;
+    int64_t eos_position;
     volatile int64_t refcnt;
 
     int32_t session_id;
@@ -49,7 +57,7 @@ typedef struct aeron_image_stct
     size_t position_bits_to_shift;
 
     volatile bool is_closed;
-    volatile bool is_eos;
+    bool is_eos;
     bool is_lingering;
 }
 aeron_image_t;
@@ -59,6 +67,8 @@ typedef struct aeron_header_stct
     aeron_data_header_t *frame;
     int32_t initial_term_id;
     size_t position_bits_to_shift;
+    int32_t fragmented_frame_length;
+    void *context;
 }
 aeron_header_t;
 
@@ -75,7 +85,7 @@ int aeron_image_create(
     size_t source_identity_length);
 
 int aeron_image_delete(aeron_image_t *image);
-void aeron_image_force_close(aeron_image_t *image);
+void aeron_image_close(aeron_image_t *image);
 
 inline int64_t aeron_image_removal_change_number(aeron_image_t *image)
 {
@@ -115,21 +125,21 @@ inline int aeron_image_validate_position(aeron_image_t *image, int64_t position)
 inline int64_t aeron_image_incr_refcnt(aeron_image_t *image)
 {
     int64_t result;
-    AERON_GET_AND_ADD_INT64(result, image->refcnt, 1);
-    return result;
+    AERON_GET_AND_ADD_INT64(result, image->refcnt, INT64_C(1));
+    return result + 1;
 }
 
 inline int64_t aeron_image_decr_refcnt(aeron_image_t *image)
 {
     int64_t result;
-    AERON_GET_AND_ADD_INT64(result, image->refcnt, -1);
-    return result;
+    AERON_GET_AND_ADD_INT64(result, image->refcnt, INT64_C(-1));
+    return result - 1;
 }
 
-inline int64_t aeron_image_refcnt_volatile(aeron_image_t *image)
+inline int64_t aeron_image_refcnt_acquire(aeron_image_t *image)
 {
     int64_t value;
-    AERON_GET_VOLATILE(value, image->refcnt);
+    AERON_GET_ACQUIRE(value, image->refcnt);
     return value;
 }
 

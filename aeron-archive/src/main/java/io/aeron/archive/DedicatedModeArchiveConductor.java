@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -22,6 +22,10 @@ import org.agrona.concurrent.status.AtomicCounter;
 
 import java.util.concurrent.CountDownLatch;
 
+import static io.aeron.CommonContext.threadName;
+import static io.aeron.archive.Archive.AERON_ARCHIVE_CONDUCTOR_THREAD_NAME;
+import static io.aeron.archive.Archive.AERON_ARCHIVE_CONDUCTOR_THREAD_NAME_CLASSIC;
+
 final class DedicatedModeArchiveConductor extends ArchiveConductor
 {
     private static final int COMMAND_LIMIT = 10;
@@ -32,19 +36,30 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
 
     DedicatedModeArchiveConductor(final Archive.Context ctx)
     {
-        super(ctx);
+        super(ctx, threadName(AERON_ARCHIVE_CONDUCTOR_THREAD_NAME, AERON_ARCHIVE_CONDUCTOR_THREAD_NAME_CLASSIC));
         closeQueue = new ManyToOneConcurrentLinkedQueue<>();
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onStart()
     {
         super.onStart();
 
-        recorderAgentRunner = new AgentRunner(ctx.recorderIdleStrategy(), errorHandler, ctx.errorCounter(), recorder);
-        replayerAgentRunner = new AgentRunner(ctx.replayerIdleStrategy(), errorHandler, ctx.errorCounter(), replayer);
+        recorderAgentRunner = new AgentRunner(
+            ctx.recorderIdleStrategy(),
+            errorHandler,
+            ctx.errorCounter(),
+            recorder,
+            ctx.affinityRegistry().mappedAffinityValue(Archive.Configuration.RECORDER_CPU_AFFINITY_PROP_NAME));
+        replayerAgentRunner = new AgentRunner(
+            ctx.replayerIdleStrategy(),
+            errorHandler,
+            ctx.errorCounter(),
+            replayer,
+            ctx.affinityRegistry().mappedAffinityValue(Archive.Configuration.REPLAYER_CPU_AFFINITY_PROP_NAME));
 
         AgentRunner.startOnThread(recorderAgentRunner, ctx.recorderThreadFactory());
         AgentRunner.startOnThread(replayerAgentRunner, ctx.replayerThreadFactory());
@@ -53,14 +68,17 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
-        return processCloseQueue() + super.doWork();
+        final int workCount = processCloseQueue();
+        return workCount + super.doWork();
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     protected void closeSessionWorkers()
     {
         CloseHelper.close(errorHandler, recorderAgentRunner);
@@ -76,7 +94,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         }
     }
 
-    SessionWorker<RecordingSession> newRecorder()
+    Recorder newRecorder()
     {
         return new DedicatedModeRecorder(
             errorHandler,
@@ -84,10 +102,10 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
             closeQueue,
             ctx.abortLatch(),
             ctx.recorderDutyCycleTracker(),
-            ctx.nanoClock());
+            ctx);
     }
 
-    SessionWorker<ReplaySession> newReplayer()
+    Replayer newReplayer()
     {
         return new DedicatedModeReplayer(
             errorHandler,
@@ -95,7 +113,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
             closeQueue,
             ctx.abortLatch(),
             ctx.replayerDutyCycleTracker(),
-            ctx.nanoClock());
+            ctx);
     }
 
     private int processCloseQueue()
@@ -121,7 +139,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         return i;
     }
 
-    static class DedicatedModeRecorder extends SessionWorker<RecordingSession>
+    static class DedicatedModeRecorder extends Recorder
     {
         private final ManyToOneConcurrentLinkedQueue<RecordingSession> sessionsQueue;
         private final ManyToOneConcurrentLinkedQueue<Session> closeQueue;
@@ -137,21 +155,22 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
             final ManyToOneConcurrentLinkedQueue<Session> closeQueue,
             final CountDownLatch abortLatch,
             final DutyCycleTracker dutyCycleTracker,
-            final NanoClock nanoClock)
+            final Archive.Context context)
         {
-            super("archive-recorder", errorHandler);
+            super(errorHandler, context);
 
             this.closeQueue = closeQueue;
             this.errorCounter = errorCounter;
             this.sessionsQueue = new ManyToOneConcurrentLinkedQueue<>();
             this.abortLatch = abortLatch;
             this.dutyCycleTracker = dutyCycleTracker;
-            this.nanoClock = nanoClock;
+            this.nanoClock = context.nanoClock();
         }
 
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void abort()
         {
             isAbort = true;
@@ -160,6 +179,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onStart()
         {
             super.onStart();
@@ -170,6 +190,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         public int doWork()
         {
             if (isAbort)
@@ -185,6 +206,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void preSessionsClose()
         {
             drainSessionsQueue();
@@ -193,6 +215,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void addSession(final RecordingSession session)
         {
             send(session);
@@ -201,6 +224,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void closeSession(final RecordingSession session)
         {
             while (!closeQueue.offer(session))
@@ -221,6 +245,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void postSessionsClose()
         {
             if (isAbort)
@@ -261,7 +286,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         }
     }
 
-    static class DedicatedModeReplayer extends SessionWorker<ReplaySession>
+    static class DedicatedModeReplayer extends Replayer
     {
         private final ManyToOneConcurrentLinkedQueue<ReplaySession> sessionsQueue;
         private final ManyToOneConcurrentLinkedQueue<Session> closeQueue;
@@ -277,21 +302,22 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
             final ManyToOneConcurrentLinkedQueue<Session> closeQueue,
             final CountDownLatch abortLatch,
             final DutyCycleTracker dutyCycleTracker,
-            final NanoClock nanoClock)
+            final Archive.Context context)
         {
-            super("archive-replayer", errorHandler);
+            super(errorHandler, context);
 
             this.closeQueue = closeQueue;
             this.errorCounter = errorCounter;
             this.sessionsQueue = new ManyToOneConcurrentLinkedQueue<>();
             this.abortLatch = abortLatch;
             this.dutyCycleTracker = dutyCycleTracker;
-            this.nanoClock = nanoClock;
+            this.nanoClock = context.nanoClock();
         }
 
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void abort()
         {
             isAbort = true;
@@ -300,6 +326,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void addSession(final ReplaySession session)
         {
             send(session);
@@ -308,6 +335,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onStart()
         {
             super.onStart();
@@ -317,6 +345,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         public int doWork()
         {
             if (isAbort)
@@ -332,6 +361,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void preSessionsClose()
         {
             drainSessionQueue();
@@ -340,6 +370,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void closeSession(final ReplaySession session)
         {
             while (!closeQueue.offer(session))
@@ -360,6 +391,7 @@ final class DedicatedModeArchiveConductor extends ArchiveConductor
         /**
          * {@inheritDoc}
          */
+        @Override
         protected void postSessionsClose()
         {
             if (isAbort)

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,22 +32,39 @@
 int32_t aeron_cnc_version_volatile(aeron_cnc_metadata_t *metadata)
 {
     int32_t cnc_version;
-    AERON_GET_VOLATILE(cnc_version, metadata->cnc_version);
+    AERON_GET_ACQUIRE(cnc_version, metadata->cnc_version);
     return cnc_version;
 }
 
-aeron_cnc_load_result_t aeron_cnc_map_file_and_load_metadata(
-    const char *dir, aeron_mapped_file_t *cnc_mmap, aeron_cnc_metadata_t **metadata)
+static bool aeron_cnc_map_file_is_retry_err(int err)
+{
+#if defined(AERON_COMPILER_MSVC)
+    return
+        ERROR_FILE_NOT_FOUND == err ||
+        ERROR_PATH_NOT_FOUND == err ||
+        ERROR_ACCESS_DENIED == err ||
+        ERROR_SHARING_VIOLATION == err;
+#else
+    return
+        ENOENT == err ||
+        EACCES == err;
+#endif
+}
+
+static aeron_cnc_load_result_t aeron_cnc_map_file_and_load_metadata(
+    const char *dir, aeron_mapped_file_t *cnc_mmap, aeron_cnc_metadata_t **metadata, bool read_only)
 {
     if (NULL == metadata)
     {
         AERON_SET_ERR(EINVAL, "%s", "CnC metadata pointer must not be NULL");
+        return AERON_CNC_LOAD_FAILED;
     }
 
     char filename[AERON_MAX_PATH];
-    if (AERON_MAX_PATH <= aeron_cnc_resolve_filename(dir, filename, AERON_MAX_PATH))
+    if (aeron_cnc_resolve_filename(dir, filename, sizeof(filename)) < 0)
     {
-        AERON_SET_ERR(EINVAL, "CNC file path exceeds buffer sizes: %d, %s", AERON_MAX_PATH, filename);
+        AERON_APPEND_ERR("Failed to resolve CnC file path: dir=%s, filename=%s", dir, filename);
+        return AERON_CNC_LOAD_FAILED;
     }
 
     if (aeron_file_length(filename) <= (int64_t)AERON_CNC_VERSION_AND_META_DATA_LENGTH)
@@ -55,15 +72,16 @@ aeron_cnc_load_result_t aeron_cnc_map_file_and_load_metadata(
         return AERON_CNC_LOAD_AWAIT_FILE;
     }
 
-    if (aeron_map_existing_file(cnc_mmap, filename) < 0)
+    int rc = read_only ? aeron_map_readonly_file(cnc_mmap, filename) : aeron_map_existing_file(cnc_mmap, filename);
+    if (rc < 0)
     {
-        if (ENOENT == errno)
+        if (aeron_cnc_map_file_is_retry_err(aeron_errcode()))
         {
             aeron_err_clear();
             return AERON_CNC_LOAD_AWAIT_FILE;
         }
 
-        AERON_APPEND_ERR("CnC file could not be mmapped: %s", filename);
+        AERON_APPEND_ERR("CnC file could not be memory mapped: %s", filename);
         return AERON_CNC_LOAD_FAILED;
     }
 
@@ -107,6 +125,18 @@ aeron_cnc_load_result_t aeron_cnc_map_file_and_load_metadata(
     *metadata = _metadata;
 
     return AERON_CNC_LOAD_SUCCESS;
+}
+
+aeron_cnc_load_result_t aeron_cnc_map_existing_file_and_load_metadata(
+    const char *dir, aeron_mapped_file_t *mapped_file, aeron_cnc_metadata_t **metadata)
+{
+    return aeron_cnc_map_file_and_load_metadata(dir, mapped_file, metadata, false);
+}
+
+aeron_cnc_load_result_t aeron_cnc_map_readonly_file_and_load_metadata(
+    const char *dir, aeron_mapped_file_t *mapped_file, aeron_cnc_metadata_t **metadata)
+{
+    return aeron_cnc_map_file_and_load_metadata(dir, mapped_file, metadata, true);
 }
 
 int aeron_cnc_resolve_filename(const char *directory, char *filename_buffer, size_t filename_buffer_length)

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,8 @@
 #include "util/aeron_strutil.h"
 #include "util/aeron_symbol_table.h"
 #include "aeron_udp_channel_transport_loss.h"
+#include "aeron_udp_channel_transport_fixed_loss.h"
+#include "aeron_udp_channel_transport_multi_gap_loss.h"
 #include "aeron_udp_channel_transport_bindings.h"
 #include "aeron_udp_channel_transport.h"
 #include "aeron_udp_transport_poller.h"
@@ -72,11 +74,21 @@ static const aeron_symbol_table_func_t aeron_udp_channel_interceptor_table[] =
             "loss",
             "aeron_udp_channel_interceptor_loss_load",
             (aeron_fptr_t)aeron_udp_channel_interceptor_loss_load
+        },
+        {
+            "fixed-loss",
+            "aeron_udp_channel_interceptor_fixed_loss_load",
+            (aeron_fptr_t)aeron_udp_channel_interceptor_fixed_loss_load
+        },
+        {
+            "multi-gap-loss",
+            "aeron_udp_channel_interceptor_multi_gap_loss_load",
+            (aeron_fptr_t)aeron_udp_channel_interceptor_multi_gap_loss_load
         }
     };
 
 static const size_t aeron_udp_channel_interceptor_table_length =
-    sizeof(aeron_udp_channel_transport_bindings_table) / sizeof(aeron_symbol_table_func_t);
+    sizeof(aeron_udp_channel_interceptor_table) / sizeof(aeron_symbol_table_func_t);
 
 aeron_udp_channel_transport_bindings_t *aeron_udp_channel_transport_bindings_load_media(const char *bindings_name)
 {
@@ -114,8 +126,8 @@ aeron_udp_channel_interceptor_bindings_t *aeron_udp_channel_interceptor_bindings
     aeron_udp_channel_interceptor_bindings_t *existing_interceptor_bindings,
     const char *interceptors)
 {
-    char interceptors_dup[AERON_MAX_INTERCEPTORS_LEN];
-    char *interceptor_names[AERON_MAX_INTERCEPTOR_NAMES];
+    char interceptors_dup[AERON_MAX_INTERCEPTORS_LEN] = { 0 };
+    char *interceptor_names[AERON_MAX_INTERCEPTOR_NAMES] = { 0 };
     aeron_udp_channel_interceptor_bindings_t *current_bindings = NULL;
     const size_t interceptors_length = strlen(interceptors);
 
@@ -129,7 +141,7 @@ aeron_udp_channel_interceptor_bindings_t *aeron_udp_channel_interceptor_bindings
         return NULL;
     }
 
-    strcpy(interceptors_dup, interceptors);
+    strncpy(interceptors_dup, interceptors, AERON_MAX_INTERCEPTORS_LEN - 1);
 
     const int num_interceptors = aeron_tokenise(
         interceptors_dup, ',', AERON_MAX_INTERCEPTOR_NAMES, interceptor_names);

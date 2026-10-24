@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -226,4 +226,67 @@ TEST_F(Int64ToPtrHashMapTest, shouldRemoveIfNonEmptyMap)
             EXPECT_EQ(0, val & 1);
             called++;
         });
+}
+
+TEST_F(Int64ToPtrHashMapTest, removeIfWorksWhenChainCompactionBringsElementsToEndOfMap)
+{
+    ASSERT_EQ(aeron_int64_to_ptr_hash_map_init(&m_map, 16, AERON_MAP_DEFAULT_LOAD_FACTOR), 0);
+
+    int value = 1;
+
+    // Check our indices have the same hash, to ensure chained entries will wrap from 15->0
+    ASSERT_EQ(aeron_hash(-243406781, 15), 15);
+    ASSERT_EQ(aeron_hash(-333209241, 15), 15);
+
+    EXPECT_EQ(aeron_int64_to_ptr_hash_map_put(&m_map, -243406781, &value), 0);
+    EXPECT_EQ(aeron_int64_to_ptr_hash_map_put(&m_map, -333209241, &value), 0);
+
+    size_t called = 0;
+    remove_if(
+        [&](int64_t, void*)
+        {
+            called++;
+            return true;
+        });
+
+    ASSERT_EQ(called, 2u);
+    ASSERT_EQ(m_map.size, 0u);
+}
+
+TEST_F(Int64ToPtrHashMapTest, removeIfDoesNotSkipEntriesAfterCompaction)
+{
+    int value = 42;
+    int32_t num_entries = 1000;
+    ASSERT_EQ(aeron_int64_to_ptr_hash_map_init(&m_map, 16, AERON_MAP_DEFAULT_LOAD_FACTOR), 0);
+    for (int32_t i = 0; i < num_entries; ++i)
+    {
+        EXPECT_EQ(0, aeron_int64_to_ptr_hash_map_put(&m_map, i, &value));
+    }
+    EXPECT_EQ(num_entries, m_map.size);
+    EXPECT_EQ(2048, m_map.capacity);
+
+    size_t called = 0;
+    remove_if(
+        [&](int64_t key, void *value_ptr)
+        {
+            // std::cout << key << std::endl;
+            called++;
+            EXPECT_EQ(&value, value_ptr);
+            return 0 == (key & 1);
+        });
+
+    EXPECT_EQ(num_entries, called);
+    EXPECT_EQ(num_entries / 2, m_map.size);
+
+    for (int32_t i = 0; i < num_entries; ++i)
+    {
+        if (0 == (i & 1))
+        {
+            EXPECT_EQ(nullptr, aeron_int64_to_ptr_hash_map_get(&m_map, i));
+        }
+        else
+        {
+            EXPECT_EQ(&value, aeron_int64_to_ptr_hash_map_get(&m_map, i));
+        }
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,14 +17,58 @@ package io.aeron.archive.client;
 
 import io.aeron.Aeron;
 import io.aeron.ChannelUriStringBuilder;
+import io.aeron.ExclusivePublication;
 import io.aeron.Publication;
 import io.aeron.Subscription;
-import io.aeron.archive.codecs.*;
+import io.aeron.archive.codecs.ArchiveIdRequestEncoder;
+import io.aeron.archive.codecs.AttachSegmentsRequestEncoder;
+import io.aeron.archive.codecs.AuthConnectRequestEncoder;
+import io.aeron.archive.codecs.BooleanType;
+import io.aeron.archive.codecs.BoundedReplayRequestEncoder;
+import io.aeron.archive.codecs.ChallengeResponseEncoder;
+import io.aeron.archive.codecs.CloseSessionRequestEncoder;
+import io.aeron.archive.codecs.DeleteDetachedSegmentsRequestEncoder;
+import io.aeron.archive.codecs.DetachSegmentsRequestEncoder;
+import io.aeron.archive.codecs.ExtendRecordingRequest2Encoder;
+import io.aeron.archive.codecs.ExtendRecordingRequestEncoder;
+import io.aeron.archive.codecs.FindLastMatchingRecordingRequestEncoder;
+import io.aeron.archive.codecs.KeepAliveRequestEncoder;
+import io.aeron.archive.codecs.ListRecordingRequestEncoder;
+import io.aeron.archive.codecs.ListRecordingSubscriptionsRequestEncoder;
+import io.aeron.archive.codecs.ListRecordingsForUriRequestEncoder;
+import io.aeron.archive.codecs.ListRecordingsRequestEncoder;
+import io.aeron.archive.codecs.MaxRecordedPositionRequestEncoder;
+import io.aeron.archive.codecs.MessageHeaderEncoder;
+import io.aeron.archive.codecs.MigrateSegmentsRequestEncoder;
+import io.aeron.archive.codecs.PurgeRecordingRequestEncoder;
+import io.aeron.archive.codecs.PurgeSegmentsRequestEncoder;
+import io.aeron.archive.codecs.RecordingPositionRequestEncoder;
+import io.aeron.archive.codecs.ReplayRequestEncoder;
+import io.aeron.archive.codecs.ReplayTokenRequestEncoder;
+import io.aeron.archive.codecs.ReplicateRequest2Encoder;
+import io.aeron.archive.codecs.SourceLocation;
+import io.aeron.archive.codecs.StartPositionRequestEncoder;
+import io.aeron.archive.codecs.StartRecordingRequest2Encoder;
+import io.aeron.archive.codecs.StartRecordingRequestEncoder;
+import io.aeron.archive.codecs.StopAllReplaysRequestEncoder;
+import io.aeron.archive.codecs.StopPositionRequestEncoder;
+import io.aeron.archive.codecs.StopRecordingByIdentityRequestEncoder;
+import io.aeron.archive.codecs.StopRecordingRequestEncoder;
+import io.aeron.archive.codecs.StopRecordingSubscriptionRequestEncoder;
+import io.aeron.archive.codecs.StopReplayRequestEncoder;
+import io.aeron.archive.codecs.StopReplicationRequestEncoder;
+import io.aeron.archive.codecs.TruncateRecordingRequestEncoder;
+import io.aeron.archive.codecs.UpdateChannelRequestEncoder;
 import io.aeron.security.CredentialsSupplier;
 import io.aeron.security.NullCredentialsSupplier;
 import org.agrona.ExpandableArrayBuffer;
-import org.agrona.concurrent.*;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.SystemNanoClock;
+import org.agrona.concurrent.YieldingIdleStrategy;
 
+import static io.aeron.archive.client.AeronArchive.Configuration.MESSAGE_RETRY_ATTEMPTS_DEFAULT;
 import static io.aeron.archive.client.AeronArchive.Configuration.MESSAGE_TIMEOUT_DEFAULT_NS;
 
 /**
@@ -34,57 +78,93 @@ public final class ArchiveProxy
 {
     /**
      * Default number of retry attempts to be made when offering requests.
+     *
+     * @see AeronArchive.Configuration#MESSAGE_RETRY_ATTEMPTS_DEFAULT
      */
-    public static final int DEFAULT_RETRY_ATTEMPTS = 3;
+    public static final int DEFAULT_RETRY_ATTEMPTS = MESSAGE_RETRY_ATTEMPTS_DEFAULT;
 
     private final long connectTimeoutNs;
     private final int retryAttempts;
     private final IdleStrategy retryIdleStrategy;
     private final NanoClock nanoClock;
     private final CredentialsSupplier credentialsSupplier;
+    private final String clientInfo;
 
     private final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(256);
-    private final Publication publication;
+    private final ExclusivePublication publication;
     private final MessageHeaderEncoder messageHeader = new MessageHeaderEncoder();
-    private StartRecordingRequestEncoder startRecordingRequest;
-    private StartRecordingRequest2Encoder startRecordingRequest2;
-    private StopRecordingRequestEncoder stopRecordingRequest;
-    private StopRecordingSubscriptionRequestEncoder stopRecordingSubscriptionRequest;
-    private StopRecordingByIdentityRequestEncoder stopRecordingByIdentityRequest;
-    private ReplayRequestEncoder replayRequest;
-    private StopReplayRequestEncoder stopReplayRequest;
-    private ListRecordingsRequestEncoder listRecordingsRequest;
-    private ListRecordingsForUriRequestEncoder listRecordingsForUriRequest;
-    private ListRecordingRequestEncoder listRecordingRequest;
-    private ExtendRecordingRequestEncoder extendRecordingRequest;
-    private ExtendRecordingRequest2Encoder extendRecordingRequest2;
-    private RecordingPositionRequestEncoder recordingPositionRequest;
-    private TruncateRecordingRequestEncoder truncateRecordingRequest;
-    private PurgeRecordingRequestEncoder purgeRecordingRequest;
-    private StopPositionRequestEncoder stopPositionRequest;
-    private FindLastMatchingRecordingRequestEncoder findLastMatchingRecordingRequest;
-    private ListRecordingSubscriptionsRequestEncoder listRecordingSubscriptionsRequest;
-    private BoundedReplayRequestEncoder boundedReplayRequest;
-    private StopAllReplaysRequestEncoder stopAllReplaysRequest;
-    private ReplicateRequest2Encoder replicateRequest;
-    private StopReplicationRequestEncoder stopReplicationRequest;
-    private StartPositionRequestEncoder startPositionRequest;
-    private DetachSegmentsRequestEncoder detachSegmentsRequest;
-    private DeleteDetachedSegmentsRequestEncoder deleteDetachedSegmentsRequest;
-    private PurgeSegmentsRequestEncoder purgeSegmentsRequest;
-    private AttachSegmentsRequestEncoder attachSegmentsRequest;
-    private MigrateSegmentsRequestEncoder migrateSegmentsRequest;
+    private final AuthConnectRequestEncoder connectRequestEncoder = new AuthConnectRequestEncoder();
+    private final KeepAliveRequestEncoder keepAliveRequestEncoder = new KeepAliveRequestEncoder();
+    private final CloseSessionRequestEncoder closeSessionRequestEncoder = new CloseSessionRequestEncoder();
+    private final ChallengeResponseEncoder challengeResponseEncoder = new ChallengeResponseEncoder();
+    private final StartRecordingRequestEncoder startRecordingRequest = new StartRecordingRequestEncoder();
+    private final StartRecordingRequest2Encoder startRecordingRequest2 = new StartRecordingRequest2Encoder();
+    private final StopRecordingRequestEncoder stopRecordingRequest = new StopRecordingRequestEncoder();
+    private final StopRecordingSubscriptionRequestEncoder stopRecordingSubscriptionRequest =
+        new StopRecordingSubscriptionRequestEncoder();
+    private final StopRecordingByIdentityRequestEncoder stopRecordingByIdentityRequest =
+        new StopRecordingByIdentityRequestEncoder();
+    private final ReplayRequestEncoder replayRequest = new ReplayRequestEncoder();
+    private final StopReplayRequestEncoder stopReplayRequest = new StopReplayRequestEncoder();
+    private final ListRecordingsRequestEncoder listRecordingsRequest = new ListRecordingsRequestEncoder();
+    private final ListRecordingsForUriRequestEncoder listRecordingsForUriRequest =
+        new ListRecordingsForUriRequestEncoder();
+    private final ListRecordingRequestEncoder listRecordingRequest = new ListRecordingRequestEncoder();
+    private final ExtendRecordingRequestEncoder extendRecordingRequest = new ExtendRecordingRequestEncoder();
+    private final ExtendRecordingRequest2Encoder extendRecordingRequest2 = new ExtendRecordingRequest2Encoder();
+    private final RecordingPositionRequestEncoder recordingPositionRequest = new RecordingPositionRequestEncoder();
+    private final TruncateRecordingRequestEncoder truncateRecordingRequest = new TruncateRecordingRequestEncoder();
+    private final PurgeRecordingRequestEncoder purgeRecordingRequest = new PurgeRecordingRequestEncoder();
+    private final StopPositionRequestEncoder stopPositionRequest = new StopPositionRequestEncoder();
+    private final MaxRecordedPositionRequestEncoder maxRecordedPositionRequestEncoder =
+        new MaxRecordedPositionRequestEncoder();
+    private final FindLastMatchingRecordingRequestEncoder findLastMatchingRecordingRequest =
+        new FindLastMatchingRecordingRequestEncoder();
+    private final ListRecordingSubscriptionsRequestEncoder listRecordingSubscriptionsRequest =
+        new ListRecordingSubscriptionsRequestEncoder();
+    private final BoundedReplayRequestEncoder boundedReplayRequest = new BoundedReplayRequestEncoder();
+    private final StopAllReplaysRequestEncoder stopAllReplaysRequest = new StopAllReplaysRequestEncoder();
+    private final ReplicateRequest2Encoder replicateRequest = new ReplicateRequest2Encoder();
+    private final StopReplicationRequestEncoder stopReplicationRequest = new StopReplicationRequestEncoder();
+    private final StartPositionRequestEncoder startPositionRequest = new StartPositionRequestEncoder();
+    private final DetachSegmentsRequestEncoder detachSegmentsRequest = new DetachSegmentsRequestEncoder();
+    private final DeleteDetachedSegmentsRequestEncoder deleteDetachedSegmentsRequest =
+        new DeleteDetachedSegmentsRequestEncoder();
+    private final PurgeSegmentsRequestEncoder purgeSegmentsRequest = new PurgeSegmentsRequestEncoder();
+    private final AttachSegmentsRequestEncoder attachSegmentsRequest = new AttachSegmentsRequestEncoder();
+    private final MigrateSegmentsRequestEncoder migrateSegmentsRequest = new MigrateSegmentsRequestEncoder();
+    private final ArchiveIdRequestEncoder archiveIdRequestEncoder = new ArchiveIdRequestEncoder();
+    private final ReplayTokenRequestEncoder replayTokenRequestEncoder = new ReplayTokenRequestEncoder();
+    private final UpdateChannelRequestEncoder updateChannelRequestEncoder = new UpdateChannelRequestEncoder();
 
     /**
-     * Create a proxy with a {@link Publication} for sending control message requests.
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
+     * <p>
+     * This provides a default {@link IdleStrategy} of a {@link YieldingIdleStrategy} when offers are back pressured
+     * with a defaults of {@link AeronArchive.Configuration#MESSAGE_TIMEOUT_DEFAULT_NS} and
+     * {@link AeronArchive.Configuration#MESSAGE_RETRY_ATTEMPTS_DEFAULT}.
+     *
+     * @param publication publication for sending control messages to an archive.
+     * @throws ClassCastException if {@code publication} is not an instance of {@link ExclusivePublication}.
+     * @deprecated Use another constructor with an {@link ExclusivePublication}.
+     */
+    @Deprecated(forRemoval = true, since = "1.47.0")
+    public ArchiveProxy(final Publication publication)
+    {
+        this((ExclusivePublication)publication);
+    }
+
+    /**
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
      * <p>
      * This provides a default {@link IdleStrategy} of a {@link YieldingIdleStrategy} when offers are back pressured
      * with a defaults of {@link AeronArchive.Configuration#MESSAGE_TIMEOUT_DEFAULT_NS} and
      * {@link #DEFAULT_RETRY_ATTEMPTS}.
      *
      * @param publication publication for sending control messages to an archive.
+     * @throws ClassCastException if {@code publication} is not an instance of {@link ExclusivePublication}.
      */
-    public ArchiveProxy(final Publication publication)
+    public ArchiveProxy(final ExclusivePublication publication)
     {
         this(
             publication,
@@ -92,11 +172,12 @@ public final class ArchiveProxy
             SystemNanoClock.INSTANCE,
             MESSAGE_TIMEOUT_DEFAULT_NS,
             DEFAULT_RETRY_ATTEMPTS,
-            new NullCredentialsSupplier());
+            new NullCredentialsSupplier(),
+            null);
     }
 
     /**
-     * Create a proxy with a {@link Publication} for sending control message requests.
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests.
      *
      * @param publication         publication for sending control messages to an archive.
      * @param retryIdleStrategy   for what should happen between retry attempts at offering messages.
@@ -104,7 +185,10 @@ public final class ArchiveProxy
      * @param connectTimeoutNs    for connection requests.
      * @param retryAttempts       for offering control messages before giving up.
      * @param credentialsSupplier for the AuthConnectRequest
+     * @throws ClassCastException if {@code publication} is not an instance of {@link ExclusivePublication}.
+     * @deprecated Use another constructor with an {@link ExclusivePublication}.
      */
+    @Deprecated(forRemoval = true, since = "1.47.0")
     public ArchiveProxy(
         final Publication publication,
         final IdleStrategy retryIdleStrategy,
@@ -113,12 +197,67 @@ public final class ArchiveProxy
         final int retryAttempts,
         final CredentialsSupplier credentialsSupplier)
     {
+        this(
+            (ExclusivePublication)publication,
+            retryIdleStrategy,
+            nanoClock,
+            connectTimeoutNs,
+            retryAttempts,
+            credentialsSupplier);
+    }
+
+    /**
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests without specifying
+     * client details.
+     *
+     * @param publication         publication for sending control messages to an archive.
+     * @param retryIdleStrategy   for what should happen between retry attempts at offering messages.
+     * @param nanoClock           to be used for calculating checking deadlines.
+     * @param connectTimeoutNs    for connection requests.
+     * @param retryAttempts       for offering control messages before giving up.
+     * @param credentialsSupplier for the AuthConnectRequest
+     * @since 1.47.0
+     */
+    public ArchiveProxy(
+        final ExclusivePublication publication,
+        final IdleStrategy retryIdleStrategy,
+        final NanoClock nanoClock,
+        final long connectTimeoutNs,
+        final int retryAttempts,
+        final CredentialsSupplier credentialsSupplier)
+    {
+        this(publication, retryIdleStrategy, nanoClock, connectTimeoutNs, retryAttempts, credentialsSupplier, null);
+    }
+
+    /**
+     * Create a proxy with a {@link ExclusivePublication} for sending control message requests with specified
+     * client info.
+     *
+     * @param publication         publication for sending control messages to an archive.
+     * @param retryIdleStrategy   for what should happen between retry attempts at offering messages.
+     * @param nanoClock           to be used for calculating checking deadlines.
+     * @param connectTimeoutNs    for connection requests.
+     * @param retryAttempts       for offering control messages before giving up.
+     * @param credentialsSupplier for the {@code AuthConnectRequest}.
+     * @param clientInfo          for the {@code AuthConnectRequest}.
+     * @since 1.49.0
+     */
+    public ArchiveProxy(
+        final ExclusivePublication publication,
+        final IdleStrategy retryIdleStrategy,
+        final NanoClock nanoClock,
+        final long connectTimeoutNs,
+        final int retryAttempts,
+        final CredentialsSupplier credentialsSupplier,
+        final String clientInfo)
+    {
         this.publication = publication;
         this.retryIdleStrategy = retryIdleStrategy;
         this.nanoClock = nanoClock;
         this.connectTimeoutNs = connectTimeoutNs;
         this.retryAttempts = retryAttempts;
         this.credentialsSupplier = credentialsSupplier;
+        this.clientInfo = clientInfo;
     }
 
     /**
@@ -137,20 +276,20 @@ public final class ArchiveProxy
      * @param responseChannel  for the control message responses.
      * @param responseStreamId for the control message responses.
      * @param correlationId    for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean connect(final String responseChannel, final int responseStreamId, final long correlationId)
     {
         final byte[] encodedCredentials = credentialsSupplier.encodedCredentials();
 
-        final AuthConnectRequestEncoder connectRequestEncoder = new AuthConnectRequestEncoder();
         connectRequestEncoder
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .correlationId(correlationId)
             .responseStreamId(responseStreamId)
             .version(AeronArchive.Configuration.PROTOCOL_SEMANTIC_VERSION)
             .responseChannel(responseChannel)
-            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length);
+            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length)
+            .clientInfo(clientInfo);
 
         return offerWithTimeout(connectRequestEncoder.encodedLength(), null);
     }
@@ -162,20 +301,20 @@ public final class ArchiveProxy
      * @param responseChannel  for the control message responses.
      * @param responseStreamId for the control message responses.
      * @param correlationId    for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean tryConnect(final String responseChannel, final int responseStreamId, final long correlationId)
     {
         final byte[] encodedCredentials = credentialsSupplier.encodedCredentials();
 
-        final AuthConnectRequestEncoder connectRequestEncoder = new AuthConnectRequestEncoder();
         connectRequestEncoder
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .correlationId(correlationId)
             .responseStreamId(responseStreamId)
             .version(AeronArchive.Configuration.PROTOCOL_SEMANTIC_VERSION)
             .responseChannel(responseChannel)
-            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length);
+            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length)
+            .clientInfo(clientInfo);
 
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + connectRequestEncoder.encodedLength();
 
@@ -183,44 +322,14 @@ public final class ArchiveProxy
     }
 
     /**
-     * Connect to an archive on its control interface providing the response stream details.
-     *
-     * @param responseChannel    for the control message responses.
-     * @param responseStreamId   for the control message responses.
-     * @param correlationId      for this request.
-     * @param aeronClientInvoker for aeron client conductor thread.
-     * @return true if successfully offered otherwise false.
-     */
-    public boolean connect(
-        final String responseChannel,
-        final int responseStreamId,
-        final long correlationId,
-        final AgentInvoker aeronClientInvoker)
-    {
-        final byte[] encodedCredentials = credentialsSupplier.encodedCredentials();
-
-        final AuthConnectRequestEncoder connectRequestEncoder = new AuthConnectRequestEncoder();
-        connectRequestEncoder
-            .wrapAndApplyHeader(buffer, 0, messageHeader)
-            .correlationId(correlationId)
-            .responseStreamId(responseStreamId)
-            .version(AeronArchive.Configuration.PROTOCOL_SEMANTIC_VERSION)
-            .responseChannel(responseChannel)
-            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length);
-
-        return offerWithTimeout(connectRequestEncoder.encodedLength(), aeronClientInvoker);
-    }
-
-    /**
      * Keep this archive session alive by notifying the archive.
      *
      * @param controlSessionId with the archive.
      * @param correlationId    for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean keepAlive(final long controlSessionId, final long correlationId)
     {
-        final KeepAliveRequestEncoder keepAliveRequestEncoder = new KeepAliveRequestEncoder();
         keepAliveRequestEncoder
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -233,11 +342,10 @@ public final class ArchiveProxy
      * Close this control session with the archive.
      *
      * @param controlSessionId with the archive.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean closeSession(final long controlSessionId)
     {
-        final CloseSessionRequestEncoder closeSessionRequestEncoder = new CloseSessionRequestEncoder();
         closeSessionRequestEncoder
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId);
@@ -252,12 +360,11 @@ public final class ArchiveProxy
      * @param encodedCredentials to send.
      * @param correlationId      for this response.
      * @param controlSessionId   for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean tryChallengeResponse(
         final byte[] encodedCredentials, final long correlationId, final long controlSessionId)
     {
-        final ChallengeResponseEncoder challengeResponseEncoder = new ChallengeResponseEncoder();
         challengeResponseEncoder
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -277,7 +384,7 @@ public final class ArchiveProxy
      * @param sourceLocation   of the publication to be recorded.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean startRecording(
         final String channel,
@@ -286,11 +393,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == startRecordingRequest)
-        {
-            startRecordingRequest = new StartRecordingRequestEncoder();
-        }
-
         startRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -311,7 +413,7 @@ public final class ArchiveProxy
      * @param autoStop         if the recording should be automatically stopped when complete.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean startRecording(
         final String channel,
@@ -321,11 +423,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == startRecordingRequest2)
-        {
-            startRecordingRequest2 = new StartRecordingRequest2Encoder();
-        }
-
         startRecordingRequest2
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -345,16 +442,11 @@ public final class ArchiveProxy
      * @param streamId         to be stopped.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean stopRecording(
         final String channel, final int streamId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopRecordingRequest)
-        {
-            stopRecordingRequest = new StopRecordingRequestEncoder();
-        }
-
         stopRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -371,15 +463,10 @@ public final class ArchiveProxy
      * @param subscriptionId   that identifies the subscription in the archive doing the recording.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean stopRecording(final long subscriptionId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopRecordingSubscriptionRequest)
-        {
-            stopRecordingSubscriptionRequest = new StopRecordingSubscriptionRequestEncoder();
-        }
-
         stopRecordingSubscriptionRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -395,16 +482,11 @@ public final class ArchiveProxy
      * @param recordingId      that identifies a recording in the archive.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean stopRecordingByIdentity(
         final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopRecordingByIdentityRequest)
-        {
-            stopRecordingByIdentityRequest = new StopRecordingByIdentityRequestEncoder();
-        }
-
         stopRecordingByIdentityRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -425,7 +507,7 @@ public final class ArchiveProxy
      * @param replayParams     optional parameters change the behaviour of the replay.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      * @see ReplayParams
      */
     public boolean replay(
@@ -447,7 +529,8 @@ public final class ArchiveProxy
                 replayStreamId,
                 correlationId,
                 controlSessionId,
-                replayParams.fileIoMaxLength());
+                replayParams.fileIoMaxLength(),
+                replayParams.replayToken());
         }
         else
         {
@@ -459,7 +542,8 @@ public final class ArchiveProxy
                 replayStreamId,
                 correlationId,
                 controlSessionId,
-                replayParams.fileIoMaxLength());
+                replayParams.fileIoMaxLength(),
+                replayParams.replayToken());
         }
     }
 
@@ -473,7 +557,7 @@ public final class ArchiveProxy
      * @param replayStreamId   to which the replay should be sent.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean replay(
         final long recordingId,
@@ -492,6 +576,7 @@ public final class ArchiveProxy
             replayStreamId,
             correlationId,
             controlSessionId,
+            Aeron.NULL_VALUE,
             Aeron.NULL_VALUE);
     }
 
@@ -506,7 +591,7 @@ public final class ArchiveProxy
      * @param replayStreamId   to which the replay should be sent.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean boundedReplay(
         final long recordingId,
@@ -527,6 +612,7 @@ public final class ArchiveProxy
             replayStreamId,
             correlationId,
             controlSessionId,
+            Aeron.NULL_VALUE,
             Aeron.NULL_VALUE);
     }
 
@@ -536,15 +622,10 @@ public final class ArchiveProxy
      * @param replaySessionId  that should be stopped.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean stopReplay(final long replaySessionId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopReplayRequest)
-        {
-            stopReplayRequest = new StopReplayRequestEncoder();
-        }
-
         stopReplayRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -555,20 +636,15 @@ public final class ArchiveProxy
     }
 
     /**
-     * Stop any existing replay sessions for recording Id or all replay sessions regardless of recording Id.
+     * Stop any existing replay sessions for recording id or all replay sessions regardless of recording id.
      *
      * @param recordingId      that should be stopped.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean stopAllReplays(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopAllReplaysRequest)
-        {
-            stopAllReplaysRequest = new StopAllReplaysRequestEncoder();
-        }
-
         stopAllReplaysRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -585,16 +661,11 @@ public final class ArchiveProxy
      * @param recordCount      for the number of descriptors to be listed.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean listRecordings(
         final long fromRecordingId, final int recordCount, final long correlationId, final long controlSessionId)
     {
-        if (null == listRecordingsRequest)
-        {
-            listRecordingsRequest = new ListRecordingsRequestEncoder();
-        }
-
         listRecordingsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -614,7 +685,7 @@ public final class ArchiveProxy
      * @param streamId         to match recordings on.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean listRecordingsForUri(
         final long fromRecordingId,
@@ -624,11 +695,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == listRecordingsForUriRequest)
-        {
-            listRecordingsForUriRequest = new ListRecordingsForUriRequestEncoder();
-        }
-
         listRecordingsForUriRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -647,15 +713,10 @@ public final class ArchiveProxy
      * @param recordingId      at which to begin listing.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean listRecording(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == listRecordingRequest)
-        {
-            listRecordingRequest = new ListRecordingRequestEncoder();
-        }
-
         listRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -678,7 +739,7 @@ public final class ArchiveProxy
      * @param recordingId      to be extended.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean extendRecording(
         final String channel,
@@ -688,11 +749,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == extendRecordingRequest)
-        {
-            extendRecordingRequest = new ExtendRecordingRequestEncoder();
-        }
-
         extendRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -719,7 +775,7 @@ public final class ArchiveProxy
      * @param recordingId      to be extended.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean extendRecording(
         final String channel,
@@ -730,11 +786,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == extendRecordingRequest2)
-        {
-            extendRecordingRequest2 = new ExtendRecordingRequest2Encoder();
-        }
-
         extendRecordingRequest2
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -754,15 +805,10 @@ public final class ArchiveProxy
      * @param recordingId      of the active recording that the position is being requested for.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean getRecordingPosition(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == recordingPositionRequest)
-        {
-            recordingPositionRequest = new RecordingPositionRequestEncoder();
-        }
-
         recordingPositionRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -775,21 +821,18 @@ public final class ArchiveProxy
     /**
      * Truncate a stopped recording to a given position that is less than the stopped position. The provided position
      * must be on a fragment boundary. Truncating a recording to the start position effectively deletes the recording.
+     * <p>
+     * Truncating a recording will stop any concurrent replays of that recording.
      *
      * @param recordingId      of the stopped recording to be truncated.
      * @param position         to which the recording will be truncated.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean truncateRecording(
         final long recordingId, final long position, final long correlationId, final long controlSessionId)
     {
-        if (null == truncateRecordingRequest)
-        {
-            truncateRecordingRequest = new TruncateRecordingRequestEncoder();
-        }
-
         truncateRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -807,16 +850,11 @@ public final class ArchiveProxy
      * @param recordingId      of the stopped recording to be purged.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean purgeRecording(
         final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == purgeRecordingRequest)
-        {
-            purgeRecordingRequest = new PurgeRecordingRequestEncoder();
-        }
-
         purgeRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -832,15 +870,10 @@ public final class ArchiveProxy
      * @param recordingId      of the recording that the position is being requested for.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean getStartPosition(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == startPositionRequest)
-        {
-            startPositionRequest = new StartPositionRequestEncoder();
-        }
-
         startPositionRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -856,15 +889,10 @@ public final class ArchiveProxy
      * @param recordingId      of the recording that the stop position is being requested for.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean getStopPosition(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopPositionRequest)
-        {
-            stopPositionRequest = new StopPositionRequestEncoder();
-        }
-
         stopPositionRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -872,6 +900,43 @@ public final class ArchiveProxy
             .recordingId(recordingId);
 
         return offer(stopPositionRequest.encodedLength());
+    }
+
+    /**
+     * Get the stop or active recorded position of a recording.
+     *
+     * @param recordingId      of the recording that the stop of active recording position is being requested for.
+     * @param correlationId    for this request.
+     * @param controlSessionId for this request.
+     * @return {@code true} if successfully offered otherwise {@code false}.
+     */
+    public boolean getMaxRecordedPosition(
+        final long recordingId, final long correlationId, final long controlSessionId)
+    {
+        maxRecordedPositionRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(correlationId)
+            .recordingId(recordingId);
+
+        return offer(maxRecordedPositionRequestEncoder.encodedLength());
+    }
+
+    /**
+     * Get the id of the Archive.
+     *
+     * @param correlationId    for this request.
+     * @param controlSessionId for this request.
+     * @return {@code true} if successfully offered otherwise {@code false}.
+     */
+    public boolean archiveId(final long correlationId, final long controlSessionId)
+    {
+        archiveIdRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(correlationId);
+
+        return offer(archiveIdRequestEncoder.encodedLength());
     }
 
     /**
@@ -883,7 +948,7 @@ public final class ArchiveProxy
      * @param sessionId        of the recording to match.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean findLastMatchingRecording(
         final long minRecordingId,
@@ -893,11 +958,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == findLastMatchingRecordingRequest)
-        {
-            findLastMatchingRecordingRequest = new FindLastMatchingRecordingRequestEncoder();
-        }
-
         findLastMatchingRecordingRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -920,7 +980,7 @@ public final class ArchiveProxy
      * @param applyStreamId     when matching.
      * @param correlationId     for this request.
      * @param controlSessionId  for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean listRecordingSubscriptions(
         final int pseudoIndex,
@@ -931,11 +991,6 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
-        if (null == listRecordingSubscriptionsRequest)
-        {
-            listRecordingSubscriptionsRequest = new ListRecordingSubscriptionsRequestEncoder();
-        }
-
         listRecordingSubscriptionsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -969,7 +1024,7 @@ public final class ArchiveProxy
      * @param liveDestination    destination for the live stream if merge is required. Empty or null for no merge.
      * @param correlationId      for this request.
      * @param controlSessionId   for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean replicate(
         final long srcRecordingId,
@@ -992,7 +1047,10 @@ public final class ArchiveProxy
             null,
             correlationId,
             controlSessionId,
-            Aeron.NULL_VALUE);
+            Aeron.NULL_VALUE,
+            Aeron.NULL_VALUE,
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1018,7 +1076,7 @@ public final class ArchiveProxy
      * @param replicationChannel channel over which the replication will occur. Empty or null for default channel.
      * @param correlationId      for this request.
      * @param controlSessionId   for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean replicate(
         final long srcRecordingId,
@@ -1043,7 +1101,10 @@ public final class ArchiveProxy
             replicationChannel,
             correlationId,
             controlSessionId,
-            Aeron.NULL_VALUE);
+            Aeron.NULL_VALUE,
+            Aeron.NULL_VALUE,
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1068,7 +1129,7 @@ public final class ArchiveProxy
      * @param liveDestination    destination for the live stream if merge is required. Empty or null for no merge.
      * @param correlationId      for this request.
      * @param controlSessionId   for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean taggedReplicate(
         final long srcRecordingId,
@@ -1093,7 +1154,10 @@ public final class ArchiveProxy
             null,
             correlationId,
             controlSessionId,
-            Aeron.NULL_VALUE);
+            Aeron.NULL_VALUE,
+            Aeron.NULL_VALUE,
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1121,7 +1185,7 @@ public final class ArchiveProxy
      * @param replicationChannel channel over which the replication will occur. Empty or null for default channel.
      * @param correlationId      for this request.
      * @param controlSessionId   for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean taggedReplicate(
         final long srcRecordingId,
@@ -1148,7 +1212,10 @@ public final class ArchiveProxy
             replicationChannel,
             correlationId,
             controlSessionId,
-            Aeron.NULL_VALUE);
+            Aeron.NULL_VALUE,
+            Aeron.NULL_VALUE,
+            NullCredentialsSupplier.NULL_CREDENTIAL,
+            null);
     }
 
     /**
@@ -1169,7 +1236,7 @@ public final class ArchiveProxy
      * @param replicationParams  optional parameters to control the behaviour of the replication.
      * @param correlationId      for this request.
      * @param controlSessionId   for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      * @see ReplicationParams
      */
     public boolean replicate(
@@ -1180,6 +1247,12 @@ public final class ArchiveProxy
         final long correlationId,
         final long controlSessionId)
     {
+        if (null != replicationParams.liveDestination() && Aeron.NULL_VALUE != replicationParams.replicationSessionId())
+        {
+            throw new IllegalArgumentException(
+                "ReplicationParams.liveDestination and ReplicationParams.sessionId can not be specified together");
+        }
+
         return replicate(
             srcRecordingId,
             replicationParams.dstRecordingId(),
@@ -1192,7 +1265,10 @@ public final class ArchiveProxy
             replicationParams.replicationChannel(),
             correlationId,
             controlSessionId,
-            replicationParams.fileIoMaxLength());
+            replicationParams.fileIoMaxLength(),
+            replicationParams.replicationSessionId(),
+            replicationParams.encodedCredentials(),
+            replicationParams.srcResponseChannel());
     }
 
     /**
@@ -1201,15 +1277,10 @@ public final class ArchiveProxy
      * @param replicationId    that identifies the session in the archive doing the replication.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean stopReplication(final long replicationId, final long correlationId, final long controlSessionId)
     {
-        if (null == stopReplicationRequest)
-        {
-            stopReplicationRequest = new StopReplicationRequestEncoder();
-        }
-
         stopReplicationRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1230,17 +1301,12 @@ public final class ArchiveProxy
      * @param newStartPosition for the recording after the segments are detached.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      * @see AeronArchive#segmentFileBasePosition(long, long, int, int)
      */
     public boolean detachSegments(
         final long recordingId, final long newStartPosition, final long correlationId, final long controlSessionId)
     {
-        if (null == detachSegmentsRequest)
-        {
-            detachSegmentsRequest = new DetachSegmentsRequestEncoder();
-        }
-
         detachSegmentsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1257,16 +1323,11 @@ public final class ArchiveProxy
      * @param recordingId      to which the operation applies.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      * @see #detachSegments(long, long, long, long)
      */
     public boolean deleteDetachedSegments(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == deleteDetachedSegmentsRequest)
-        {
-            deleteDetachedSegmentsRequest = new DeleteDetachedSegmentsRequestEncoder();
-        }
-
         deleteDetachedSegmentsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1287,7 +1348,7 @@ public final class ArchiveProxy
      * @param newStartPosition for the recording after the segments are detached.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      * @see #detachSegments(long, long, long, long)
      * @see #deleteDetachedSegments(long, long, long)
      * @see AeronArchive#segmentFileBasePosition(long, long, int, int)
@@ -1295,11 +1356,6 @@ public final class ArchiveProxy
     public boolean purgeSegments(
         final long recordingId, final long newStartPosition, final long correlationId, final long controlSessionId)
     {
-        if (null == purgeSegmentsRequest)
-        {
-            purgeSegmentsRequest = new PurgeSegmentsRequestEncoder();
-        }
-
         purgeSegmentsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1319,16 +1375,11 @@ public final class ArchiveProxy
      * @param recordingId      to which the operation applies.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      * @see #detachSegments(long, long, long, long)
      */
     public boolean attachSegments(final long recordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == attachSegmentsRequest)
-        {
-            attachSegmentsRequest = new AttachSegmentsRequestEncoder();
-        }
-
         attachSegmentsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1339,11 +1390,14 @@ public final class ArchiveProxy
     }
 
     /**
-     * Migrate segments from a source recording and attach them to the beginning of a destination recording.
+     * Migrate segments from a source recording and attach them to the beginning or end of a destination recording.
      * <p>
-     * The source recording must match the destination recording for segment length, term length, mtu length,
-     * stream id, plus the stop position and term id of the source must join with the start position of the destination
-     * and be on a segment boundary.
+     * The source recording must match the destination recording for segment length, term length, mtu length, and
+     * stream id. The source recording must join to the destination recording on a segment boundary and without gaps,
+     * i.e., the stop position and term id of one must match the start position and term id of the other.
+     * <p>
+     * The source recording must be stopped. The destination recording must be stopped if migrating segments
+     * to the end of the destination recording.
      * <p>
      * The source recording will be effectively truncated back to its start position after the migration.
      *
@@ -1351,16 +1405,11 @@ public final class ArchiveProxy
      * @param dstRecordingId   destination recording to which the segments will be attached.
      * @param correlationId    for this request.
      * @param controlSessionId for this request.
-     * @return true if successfully offered otherwise false.
+     * @return {@code true} if successfully offered otherwise {@code false}.
      */
     public boolean migrateSegments(
         final long srcRecordingId, final long dstRecordingId, final long correlationId, final long controlSessionId)
     {
-        if (null == migrateSegmentsRequest)
-        {
-            migrateSegmentsRequest = new MigrateSegmentsRequestEncoder();
-        }
-
         migrateSegmentsRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1371,6 +1420,51 @@ public final class ArchiveProxy
         return offer(migrateSegmentsRequest.encodedLength());
     }
 
+    /**
+     * Request a token for this session that will allow a replay to be initiated from another image without
+     * re-authentication.
+     *
+     * @param lastCorrelationId for the request
+     * @param controlSessionId  for the request
+     * @param recordingId       that will be replayed.
+     * @return true if successfully offered
+     */
+    public boolean requestReplayToken(final long lastCorrelationId, final long controlSessionId, final long recordingId)
+    {
+        replayTokenRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(lastCorrelationId)
+            .recordingId(recordingId);
+
+        return offer(replayTokenRequestEncoder.encodedLength());
+    }
+
+    /**
+     * Update the channel for a recording.
+     *
+     * @param recordingId      the recording id to update.
+     * @param channel          the new channel to include in the catalogue.
+     * @param correlationId    for the request.
+     * @param controlSessionId for the request.
+     * @return true if successfully offered.
+     */
+    public boolean updateChannel(
+        final long recordingId,
+        final String channel,
+        final long correlationId,
+        final long controlSessionId)
+    {
+        updateChannelRequestEncoder
+            .wrapAndApplyHeader(buffer, 0, messageHeader)
+            .controlSessionId(controlSessionId)
+            .correlationId(correlationId)
+            .recordingId(recordingId)
+            .channel(channel);
+
+        return offer(updateChannelRequestEncoder.encodedLength());
+    }
+
     private boolean offer(final int length)
     {
         retryIdleStrategy.reset();
@@ -1378,25 +1472,26 @@ public final class ArchiveProxy
         int attempts = retryAttempts;
         while (true)
         {
-            final long result = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
-            if (result > 0)
+            final long position = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
+            if (position > 0)
             {
                 return true;
             }
 
-            if (result == Publication.CLOSED)
+            if (position == Publication.CLOSED)
             {
                 throw new ArchiveException("connection to the archive has been closed");
             }
 
-            if (result == Publication.NOT_CONNECTED)
+            if (position == Publication.NOT_CONNECTED)
             {
                 throw new ArchiveException("connection to the archive is no longer available");
             }
 
-            if (result == Publication.MAX_POSITION_EXCEEDED)
+            if (position == Publication.MAX_POSITION_EXCEEDED)
             {
-                throw new ArchiveException("offer failed due to max position being reached");
+                throw new ArchiveException(
+                    "offer failed due to max position being reached: term-length=" + publication.termBufferLength());
             }
 
             if (--attempts <= 0)
@@ -1415,20 +1510,21 @@ public final class ArchiveProxy
         final long deadlineNs = nanoClock.nanoTime() + connectTimeoutNs;
         while (true)
         {
-            final long result = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
-            if (result > 0)
+            final long position = publication.offer(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + length);
+            if (position > 0)
             {
                 return true;
             }
 
-            if (result == Publication.CLOSED)
+            if (position == Publication.CLOSED)
             {
                 throw new ArchiveException("connection to the archive has been closed");
             }
 
-            if (result == Publication.MAX_POSITION_EXCEEDED)
+            if (position == Publication.MAX_POSITION_EXCEEDED)
             {
-                throw new ArchiveException("offer failed due to max position being reached");
+                throw new ArchiveException(
+                    "offer failed due to max position being reached: term-length=" + publication.termBufferLength());
             }
 
             if (deadlineNs - nanoClock.nanoTime() < 0)
@@ -1453,13 +1549,9 @@ public final class ArchiveProxy
         final int replayStreamId,
         final long correlationId,
         final long controlSessionId,
-        final int fileIoMaxLength)
+        final int fileIoMaxLength,
+        final long replayToken)
     {
-        if (null == replayRequest)
-        {
-            replayRequest = new ReplayRequestEncoder();
-        }
-
         replayRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1469,6 +1561,7 @@ public final class ArchiveProxy
             .length(length)
             .replayStreamId(replayStreamId)
             .fileIoMaxLength(fileIoMaxLength)
+            .replayToken(replayToken)
             .replayChannel(replayChannel);
 
         return offer(replayRequest.encodedLength());
@@ -1483,13 +1576,9 @@ public final class ArchiveProxy
         final int replayStreamId,
         final long correlationId,
         final long controlSessionId,
-        final int fileIoMaxLength)
+        final int fileIoMaxLength,
+        final long replayToken)
     {
-        if (null == boundedReplayRequest)
-        {
-            boundedReplayRequest = new BoundedReplayRequestEncoder();
-        }
-
         boundedReplayRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1500,6 +1589,7 @@ public final class ArchiveProxy
             .limitCounterId(limitCounterId)
             .replayStreamId(replayStreamId)
             .fileIoMaxLength(fileIoMaxLength)
+            .replayToken(replayToken)
             .replayChannel(replayChannel);
 
         return offer(boundedReplayRequest.encodedLength());
@@ -1517,13 +1607,11 @@ public final class ArchiveProxy
         final String replicationChannel,
         final long correlationId,
         final long controlSessionId,
-        final int fileIoMaxLength)
+        final int fileIoMaxLength,
+        final int replicationSessionId,
+        final byte[] encodedCredentials,
+        final String srcResponseChannel)
     {
-        if (null == replicateRequest)
-        {
-            replicateRequest = new ReplicateRequest2Encoder();
-        }
-
         replicateRequest
             .wrapAndApplyHeader(buffer, 0, messageHeader)
             .controlSessionId(controlSessionId)
@@ -1537,7 +1625,10 @@ public final class ArchiveProxy
             .fileIoMaxLength(fileIoMaxLength)
             .srcControlChannel(srcControlChannel)
             .liveDestination(liveDestination)
-            .replicationChannel(replicationChannel);
+            .replicationChannel(replicationChannel)
+            .replicationSessionId(replicationSessionId)
+            .putEncodedCredentials(encodedCredentials, 0, encodedCredentials.length)
+            .srcResponseChannel(srcResponseChannel);
 
         return offer(replicateRequest.encodedLength());
     }

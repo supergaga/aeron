@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,6 +75,7 @@ public class IndexedReplicatedRecording implements AutoCloseable
     private static final int LIVE_STREAM_ID = 1033;
     private static final String LIVE_CHANNEL = new ChannelUriStringBuilder()
         .media("udp")
+        .controlMode(CommonContext.MDC_CONTROL_MODE_DYNAMIC)
         .controlEndpoint("localhost:8100")
         .termLength(TERM_LENGTH)
         .build();
@@ -167,6 +168,7 @@ public class IndexedReplicatedRecording implements AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         CloseHelper.closeAll(
@@ -205,7 +207,8 @@ public class IndexedReplicatedRecording implements AutoCloseable
             final long srcRecordingSubscriptionId = test.srcAeronArchive.startRecording(
                 sessionSpecificLiveChannel, LIVE_STREAM_ID, SourceLocation.LOCAL, true);
             final CountersReader srcCounters = test.srcAeron.countersReader();
-            final int srcCounterId = awaitRecordingCounterId(srcCounters, publication.sessionId());
+            final int srcCounterId =
+                awaitRecordingCounterId(srcCounters, publication.sessionId(), test.srcAeronArchive.archiveId());
             final long srcRecordingId = RecordingPos.getRecordingId(srcCounters, srcCounterId);
 
             sequencer.sendBurst();
@@ -239,7 +242,8 @@ public class IndexedReplicatedRecording implements AutoCloseable
             primaryIndexer.awaitPosition(position);
 
             final CountersReader dstCounters = test.dstAeron.countersReader();
-            final int dstCounterId = awaitRecordingCounterId(dstCounters, publication.sessionId());
+            final int dstCounterId =
+                awaitRecordingCounterId(dstCounters, publication.sessionId(), test.srcAeronArchive.archiveId());
             awaitPosition(dstCounters, dstCounterId, position);
             secondaryIndexer.awaitPosition(position);
 
@@ -264,11 +268,11 @@ public class IndexedReplicatedRecording implements AutoCloseable
         }
     }
 
-    static int awaitRecordingCounterId(final CountersReader counters, final int sessionId)
+    static int awaitRecordingCounterId(final CountersReader counters, final int sessionId, final long archiveId)
         throws InterruptedException
     {
         int counterId;
-        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId)))
+        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId)))
         {
             Thread.yield();
             if (Thread.interrupted())

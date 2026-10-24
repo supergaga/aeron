@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,31 +17,49 @@ package io.aeron;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.driver.status.ReceiveLocalSocketAddress;
+import io.aeron.driver.status.SystemCounterDescriptor;
+import io.aeron.exceptions.RegistrationException;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
-import io.aeron.test.*;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SlowTest;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
-import org.agrona.IoUtil;
+import org.agrona.SystemUtil;
+import org.agrona.collections.MutableInteger;
 import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.status.CountersReader;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-import java.io.File;
+import java.nio.file.Path;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 
+import static io.aeron.AeronCounters.DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID;
 import static io.aeron.ChannelUri.SPY_QUALIFIER;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID;
+import static org.hamcrest.CoreMatchers.anyOf;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(InterruptingTestCallback.class)
@@ -64,8 +82,9 @@ class MultiDestinationSubscriptionTest
     private static final int NUM_MESSAGES_PER_TERM = 64;
     private static final int MESSAGE_LENGTH =
         (TERM_BUFFER_LENGTH / NUM_MESSAGES_PER_TERM) - DataHeaderFlyweight.HEADER_LENGTH;
-    private static final String ROOT_DIR = CommonContext.getAeronDirectoryName() + File.separator;
 
+    @TempDir
+    private Path tempDir;
     private final MediaDriver.Context driverContextA = new MediaDriver.Context();
     private final MediaDriver.Context driverContextB = new MediaDriver.Context();
 
@@ -86,7 +105,7 @@ class MultiDestinationSubscriptionTest
 
     private void launch(final ErrorHandler errorHandler)
     {
-        final String baseDirA = ROOT_DIR + "A";
+        final String baseDirA = tempDir.resolve("A").toString();
 
         buffer.putInt(0, 1);
 
@@ -97,12 +116,13 @@ class MultiDestinationSubscriptionTest
             .threadingMode(ThreadingMode.SHARED);
 
         driverA = TestMediaDriver.launch(driverContextA, testWatcher);
+        testWatcher.dataCollector().add(driverA.context().aeronDirectory());
         clientA = Aeron.connect(new Aeron.Context().aeronDirectoryName(driverContextA.aeronDirectoryName()));
     }
 
     private void launchSecond()
     {
-        final String baseDirB = ROOT_DIR + "B";
+        final String baseDirB = tempDir.resolve("B").toString();
 
         driverContextB
             .errorHandler(Tests::onError)
@@ -111,6 +131,7 @@ class MultiDestinationSubscriptionTest
             .threadingMode(ThreadingMode.SHARED);
 
         driverB = TestMediaDriver.launch(driverContextB, testWatcher);
+        testWatcher.dataCollector().add(driverB.context().aeronDirectory());
         clientB = Aeron.connect(new Aeron.Context().aeronDirectoryName(driverContextB.aeronDirectoryName()));
     }
 
@@ -118,7 +139,6 @@ class MultiDestinationSubscriptionTest
     void closeEverything()
     {
         CloseHelper.closeAll(clientA, clientB, driverA, driverB);
-        IoUtil.delete(new File(ROOT_DIR), true);
     }
 
     @Test
@@ -756,6 +776,112 @@ class MultiDestinationSubscriptionTest
         assertEquals(1, subscription.imageCount());
         assertEquals(2, subscription.imageAtIndex(0).activeTransportCount());
         verifyFragments(fragmentHandler, numMessagesToSend);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "aeron:udp?endpoint=localhost:8889" })
+    void shouldNotReuseEndpointAcrossMultipleSubscriptionsIfAtLeastOneIsMds(final String channel)
+    {
+        final Matcher<String> errorMatcher = SystemUtil.isWindows() && TestMediaDriver.shouldRunCMediaDriver() ?
+            containsString("failed to bind to address") :
+            anyOf(containsString("Address already in use"), containsString("Address in use"));
+        testWatcher.ignoreErrorsMatching((err) -> errorMatcher.matches(err));
+        launch(mock(ErrorHandler.class));
+
+        try (Subscription sub1 = clientA.addSubscription(channel, STREAM_ID);
+            Subscription mdsSubscription = clientA.addSubscription("aeron:udp?control-mode=manual", STREAM_ID))
+        {
+            final RegistrationException exception =
+                assertThrowsExactly(RegistrationException.class, () -> mdsSubscription.addDestination(sub1.channel()));
+            assertThat(exception.getMessage(), errorMatcher);
+
+            Tests.await(() -> 1 == clientA.countersReader().getCounterValue(SystemCounterDescriptor.ERRORS.id()));
+        }
+
+        try (Subscription mdsSubscription = clientA.addSubscription("aeron:udp?control-mode=manual", STREAM_ID))
+        {
+            mdsSubscription.addDestination(channel);
+
+            final RegistrationException exception =
+                assertThrowsExactly(RegistrationException.class, () -> clientA.addSubscription(channel, STREAM_ID));
+            assertThat(exception.getMessage(), errorMatcher);
+
+            Tests.await(() -> 2 == clientA.countersReader().getCounterValue(SystemCounterDescriptor.ERRORS.id()));
+        }
+
+        try (Subscription mdsSubscription1 = clientA.addSubscription("aeron:udp?control-mode=manual", STREAM_ID);
+            Subscription mdsSubscription2 = clientA.addSubscription("aeron:udp?control-mode=manual", STREAM_ID))
+        {
+            mdsSubscription1.addDestination(channel);
+            final RegistrationException exception =
+                assertThrowsExactly(RegistrationException.class, () -> mdsSubscription2.addDestination(channel));
+            assertThat(exception.getMessage(), errorMatcher);
+
+            Tests.await(() -> 3 == clientA.countersReader().getCounterValue(SystemCounterDescriptor.ERRORS.id()));
+        }
+    }
+
+    @Test
+    void shouldCleanupMdcDestinationWhenSubscriptionIsClosed()
+    {
+        launch(mock(ErrorHandler.class));
+
+        final CountersReader countersReader = clientA.countersReader();
+        final MutableInteger receiveSocketCount = new MutableInteger();
+        final CountersReader.MetaData socketAddressCapture = (counterId, typeId, keyBuffer, label) ->
+        {
+            if (AeronCounters.DRIVER_LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID == typeId &&
+                label.startsWith(ReceiveLocalSocketAddress.NAME))
+            {
+                receiveSocketCount.increment();
+            }
+        };
+
+        try (Publication pub1 = clientA.addExclusivePublication("aeron:udp?endpoint=localhost:8889", STREAM_ID);
+            Publication pub2 = clientA.addExclusivePublication(
+                "aeron:udp?control=localhost:5555|control-mode=dynamic", STREAM_ID))
+        {
+            final long registrationId;
+            try (Subscription mdsSubscription = clientA.addSubscription("aeron:udp?control-mode=manual", STREAM_ID))
+            {
+                registrationId = mdsSubscription.registrationId();
+                mdsSubscription.addDestination("aeron:udp?endpoint=localhost:8889");
+                mdsSubscription.addDestination("aeron:udp?control=localhost:5555|endpoint=localhost:0");
+
+                Tests.awaitConnected(pub1);
+                Tests.awaitConnected(pub2);
+                Tests.awaitConnected(mdsSubscription);
+
+                final int length = ThreadLocalRandom.current().nextInt(1, buffer.capacity());
+                while (pub1.offer(buffer, 0, length) < 0)
+                {
+                    Tests.yield();
+                }
+
+                final int length2 = ThreadLocalRandom.current().nextInt(1, buffer.capacity());
+                while (pub2.offer(buffer, 0, length2) < 0)
+                {
+                    Tests.yield();
+                }
+
+                countersReader.forEach(socketAddressCapture);
+                assertEquals(2, receiveSocketCount.intValue());
+                assertNotEquals(NULL_COUNTER_ID, countersReader.findByTypeIdAndRegistrationId(
+                    DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID, registrationId));
+            }
+
+            Tests.await(() ->
+            {
+                Tests.sleep(10);
+                receiveSocketCount.set(0);
+                countersReader.forEach(socketAddressCapture);
+                return 0 == receiveSocketCount.intValue();
+            });
+
+            Tests.await(() -> NULL_COUNTER_ID == countersReader.findByTypeIdAndRegistrationId(
+                DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID, registrationId));
+        }
     }
 
     private void pollForFragment(final Subscription subscription, final FragmentHandler handler)

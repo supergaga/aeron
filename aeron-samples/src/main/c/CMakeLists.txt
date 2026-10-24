@@ -1,5 +1,5 @@
 #
-# Copyright 2014-2022 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
     add_definitions(-D_DEFAULT_SOURCE)
 endif ()
 
-if (LINK_SAMPLES_CLIENT_SHARED OR (MSVC AND "${CMAKE_SYSTEM_NAME}" MATCHES "Windows"))
+if (LINK_SAMPLES_CLIENT_SHARED OR MSVC)
     set(CLIENT_LINK_LIB "aeron")
     add_definitions(-DCLIENT_SHARED)
 else()
@@ -45,6 +45,8 @@ add_executable(streaming_publisher streaming_publisher.c ${HEADERS} ${SOURCES})
 add_executable(streaming_exclusive_publisher streaming_exclusive_publisher.c ${HEADERS} ${SOURCES})
 add_executable(cpong cpong.c ${HEADERS} ${SOURCES})
 add_executable(cping cping.c ${HEADERS} ${SOURCES})
+add_executable(response_client response/response_client.c ${HEADERS} ${SOURCES})
+add_executable(response_server response/response_server.c ${HEADERS} ${SOURCES})
 
 if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
     add_executable(ping_pong_raw raw/ping_pong_raw.c)
@@ -77,6 +79,12 @@ target_link_libraries(cping
     ${CLIENT_LINK_LIB}
     hdr_histogram_static)
 
+target_link_libraries(response_client
+    ${CLIENT_LINK_LIB})
+
+target_link_libraries(response_server
+    ${CLIENT_LINK_LIB})
+
 add_dependencies(cping hdr_histogram)
 
 add_executable(AeronStat aeron_stat.c ${HEADERS})
@@ -101,6 +109,8 @@ if (AERON_INSTALL_TARGETS)
         streaming_exclusive_publisher
         cpong
         cping
+        response_client
+        response_server
         AeronStat
         DriverTool
         ErrorStat

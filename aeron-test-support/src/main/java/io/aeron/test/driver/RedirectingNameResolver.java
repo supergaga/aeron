@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,13 @@
  */
 package io.aeron.test.driver;
 
+import io.aeron.CounterProvider;
 import io.aeron.driver.DefaultNameResolver;
-import io.aeron.driver.MediaDriver;
-import io.aeron.driver.NameResolver;
+import io.aeron.driver.NameResolverAgent;
+import org.agrona.ExpandableArrayBuffer;
 import org.agrona.collections.MutableInteger;
 import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.concurrent.status.AtomicCounter;
-import org.agrona.concurrent.status.CountersManager;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.net.InetAddress;
@@ -29,8 +29,9 @@ import java.util.Map;
 import java.util.Objects;
 
 import static io.aeron.Aeron.NULL_VALUE;
+import static org.agrona.BitUtil.SIZE_OF_INT;
 
-public class RedirectingNameResolver implements NameResolver
+public class RedirectingNameResolver implements NameResolverAgent
 {
     public static final int DISABLE_RESOLUTION = -1;
     public static final int USE_INITIAL_RESOLUTION_HOST = 0;
@@ -59,20 +60,59 @@ public class RedirectingNameResolver implements NameResolver
         }
     }
 
-    public void init(final MediaDriver.Context context)
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void init(final CountersReader countersReader, final CounterProvider counterProvider)
     {
-        final CountersManager countersManager = context.countersManager();
+        countersReader.forEach((counterId, typeId, keyBuffer, label) ->
+        {
+            if (typeId == NAME_ENTRY_COUNTER_TYPE_ID && keyBuffer.capacity() > SIZE_OF_INT)
+            {
+                final String entryName = keyBuffer.getStringAscii(0);
+                final NameEntry entry = nameToEntryMap.get(entryName);
+                if (null != entry)
+                {
+                    entry.counter(new AtomicCounter(countersReader.valuesBuffer(), counterId));
+                }
+            }
+        });
 
+        final ExpandableArrayBuffer tmpBuffer = new ExpandableArrayBuffer();
         for (final NameEntry nameEntry : nameToEntryMap.values())
         {
-            final AtomicCounter atomicCounter = countersManager.newCounter(
-                nameEntry.toString(),
-                NAME_ENTRY_COUNTER_TYPE_ID,
-                (mutableDirectBuffer) -> mutableDirectBuffer.putStringAscii(0, nameEntry.name));
-            nameEntry.counter(atomicCounter);
+            if (null == nameEntry.counter)
+            {
+                final int keyLength = tmpBuffer.putStringAscii(0, nameEntry.name);
+                final int labelLength = tmpBuffer.putStringWithoutLengthAscii(keyLength, nameEntry.toString());
+
+                final AtomicCounter atomicCounter = counterProvider.newCounter(
+                    NAME_ENTRY_COUNTER_TYPE_ID,
+                    tmpBuffer,
+                    0,
+                    keyLength,
+                    tmpBuffer,
+                    keyLength,
+                    labelLength);
+                nameEntry.counter(atomicCounter);
+            }
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String lookup(final String name, final String uriParamName, final boolean isReLookup)
+    {
+        return name.endsWith(":X") ? name.substring(0, name.length() - 2) : name;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public InetAddress resolve(final String name, final String uriParamName, final boolean isReResolution)
     {
         final NameEntry nameEntry = nameToEntryMap.get(name);
@@ -83,8 +123,6 @@ public class RedirectingNameResolver implements NameResolver
         {
             resolvedAddress = DefaultNameResolver.INSTANCE.resolve(hostname, uriParamName, isReResolution);
         }
-
-        DefaultNameResolver.INSTANCE.resolveHook(this.getClass().getSimpleName(), hostname, resolvedAddress);
 
         return resolvedAddress;
     }
@@ -140,7 +178,7 @@ public class RedirectingNameResolver implements NameResolver
 
         String redirectHost(final String name)
         {
-            final long operation = counter.get();
+            final long operation = null != counter ? counter.get() : USE_INITIAL_RESOLUTION_HOST;
             if (DISABLE_RESOLUTION == operation)
             {
                 return INVALID_HOSTNAME_SENTINEL;

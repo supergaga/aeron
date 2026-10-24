@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package io.aeron.driver.media;
 import io.aeron.CommonContext;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.NameResolver;
+import io.aeron.logbuffer.FrameDescriptor;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -26,6 +27,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+
+import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_RES;
 
 /**
  * {@link UdpChannelTransport} specialised for name resolution between {@link MediaDriver}s.
@@ -45,7 +48,7 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
          * @param length       of the frame in the buffer.
          * @param srcAddress   the frame came from.
          * @param nowMs        current time.
-         * @return the number of bytes received.
+         * @return work count.
          */
         int onFrame(UnsafeBuffer unsafeBuffer, int length, InetSocketAddress srcAddress, long nowMs);
     }
@@ -67,7 +70,7 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
         final UnsafeBuffer unsafeBuffer,
         final MediaDriver.Context context)
     {
-        super(udpChannel, null, resolverAddress, null, context);
+        super(udpChannel, null, resolverAddress, null, context.receiverPortManager(), context);
 
         this.unsafeBuffer = unsafeBuffer;
         this.byteBuffer = unsafeBuffer.byteBuffer();
@@ -78,25 +81,23 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
      *
      * @param handler for processing the frames.
      * @param nowMs   current time.
-     * @return number of bytes received.
+     * @return work count.
      */
     public int poll(final UdpFrameHandler handler, final long nowMs)
     {
-        int bytesReceived = 0;
         final InetSocketAddress srcAddress = receive(byteBuffer);
-
         if (null != srcAddress)
         {
             final int length = byteBuffer.position();
-
-            if (isValidFrame(unsafeBuffer, length))
+            if (isValidFrame(unsafeBuffer, length) &&
+                HDR_TYPE_RES == FrameDescriptor.frameType(unsafeBuffer, 0))
             {
                 receiveHook(unsafeBuffer, length, srcAddress);
-                bytesReceived = handler.onFrame(unsafeBuffer, length, srcAddress, nowMs);
+                return handler.onFrame(unsafeBuffer, length, srcAddress, nowMs);
             }
         }
 
-        return bytesReceived;
+        return 0;
     }
 
     /**
@@ -108,7 +109,6 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
      */
     public int sendTo(final ByteBuffer buffer, final InetSocketAddress remoteAddress)
     {
-        final int remaining = buffer.remaining();
         int bytesSent = 0;
         try
         {
@@ -123,7 +123,7 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
         }
         catch (final IOException ex)
         {
-            sendError(remaining, ex, remoteAddress);
+            onSendError(ex, remoteAddress, errorHandler);
         }
 
         return bytesSent;
@@ -156,7 +156,7 @@ public final class UdpNameResolutionTransport extends UdpChannelTransport
     {
         try
         {
-            return InterfaceSearchAddress.parse(addressAndPort).getAddress();
+            return InterfaceSearchAddress.parse(addressAndPort).address();
         }
         catch (final UnknownHostException ex)
         {

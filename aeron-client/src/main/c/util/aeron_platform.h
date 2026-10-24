@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,34 +22,48 @@
  */
 
 #if defined(_MSC_VER)
-    #define AERON_COMPILER_MSVC 1
+#define AERON_COMPILER_MSVC 1
 
-    #if defined(_M_X64)
-        #define AERON_CPU_X64 1
-    #else
-        #error Unsupported CPU!
-    #endif
+#if defined(_M_X64)
+#define AERON_CPU_X64 1
+#elif defined(_M_ARM64)
+#define AERON_CPU_ARM 1
+#else
+#error Unsupported CPU!
+#endif
 
+#define _Static_assert static_assert
 #elif defined(__GNUC__)
-    #define AERON_COMPILER_GCC 1
+#define AERON_COMPILER_GCC 1
 
-    #if defined(__llvm__)
-        #define AERON_COMPILER_LLVM 1
-    #endif
+#if defined(__llvm__)
+#define AERON_COMPILER_LLVM 1
+#endif
 
-    #if defined(__x86_64__)
-        #define AERON_CPU_X64 1
-    #endif
+#if defined(__x86_64__)
+#define AERON_CPU_X64 1
+#endif
 
-    #if defined(__aarch64__)
-        #define AERON_CPU_ARM 1
-        #if defined(__STDC_NO_ATOMICS__)
-            #error C11 atomics are required to compile for aarch64!
-        #endif
-    #endif
+#if defined(__aarch64__)
+#define AERON_CPU_ARM 1
+#if defined(__STDC_NO_ATOMICS__)
+#error C11 atomics are required to compile for aarch64!
+#endif
+#endif
+
+#if defined(__powerpc64__)
+#define AERON_CPU_PPC64 1
+#if defined(__STDC_NO_ATOMICS__)
+#error C11 atomics are required to compile for powerpc64!
+#endif
+#endif
+
+#if defined(__cplusplus)
+#define _Static_assert static_assert
+#endif
 
 #else
-    #error Unsupported compiler!
+#error Unsupported compiler!
 #endif
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,18 +21,18 @@ package io.aeron.samples.echo;
 public class ProvisioningMessage
 {
     private final Object mutex = new Object();
-    private volatile Object result = null;
+    private Object result = null;
 
     /**
      * Wait for provision message to be processed.
      *
-     * @throws InterruptedException if the thread is interrupted while waiting for the response
+     * @throws InterruptedException if the thread is interrupted while waiting for the response.
      */
     public void await() throws InterruptedException
     {
-        while (null == result)
+        synchronized (mutex)
         {
-            synchronized (mutex)
+            while (null == result)
             {
                 mutex.wait();
             }
@@ -54,7 +54,7 @@ public class ProvisioningMessage
         synchronized (mutex)
         {
             result = value;
-            mutex.notify();
+            mutex.notifyAll();
         }
     }
 }

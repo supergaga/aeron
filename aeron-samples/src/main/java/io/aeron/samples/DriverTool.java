@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,7 +61,9 @@ public class DriverTool
         }
 
         final File cncFile = CommonContext.newDefaultCncFile();
-        final MappedByteBuffer cncByteBuffer = IoUtil.mapExistingFile(cncFile, "cnc");
+        final MappedByteBuffer cncByteBuffer = (printPidOnly || !terminateDriver) ?
+            SamplesUtil.mapExistingFileReadOnly(cncFile) :
+            IoUtil.mapExistingFile(cncFile, "cnc");
         final DirectBuffer cncMetaData = createMetaDataBuffer(cncByteBuffer);
         final int cncVersion = cncMetaData.getInt(cncVersionOffset(0));
 

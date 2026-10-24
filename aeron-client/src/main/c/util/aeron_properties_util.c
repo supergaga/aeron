@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,7 +59,8 @@ int aeron_properties_parse_line(
 
     if (length >= (sizeof(state->property_str) - state->value_end))
     {
-        AERON_SET_ERR(EINVAL, "line length " PRIu64 " too long for parser state", (uint64_t)(length + state->value_end));
+        AERON_SET_ERR(
+            EINVAL, "line length of %" PRIu64 " too long for parser state", (uint64_t)(length + state->value_end));
         return -1;
     }
 
@@ -194,13 +195,18 @@ int aeron_properties_file_load(const char *filename)
 
 int aeron_properties_parse_file(const char *filename, aeron_properties_file_handler_func_t handler, void *clientd)
 {
-    FILE *fpin;
     int result = -1, lineno = 1;
     char line[AERON_PROPERTIES_MAX_LENGTH];
     aeron_properties_parser_state_t state;
 
-    if ((fpin = fopen(filename, "r")) == NULL)
+    FILE *fpin = fopen(filename, "r");
+    if (NULL == fpin)
     {
+        if (ENOENT == errno)
+        {
+            return 0;
+        }
+
         AERON_SET_ERR(errno, "could not open properties file: %s", filename);
         return -1;
     }
@@ -362,10 +368,10 @@ int aeron_properties_http_load(const char *url)
 
     result = aeron_properties_buffer_load(response->buffer + response->body_offset);
 
-    cleanup:
-        aeron_http_response_delete(response);
+cleanup:
+    aeron_http_response_delete(response);
 
-        return result;
+    return result;
 }
 
 int aeron_properties_load(const char *url_or_filename)
@@ -376,6 +382,7 @@ int aeron_properties_load(const char *url_or_filename)
     {
         result = aeron_properties_file_load(url_or_filename + strlen("file://"));
     }
+    // codeql[cpp/user-controlled-bypass]
     else if (strncmp("http://", url_or_filename, strlen("http://")) == 0)
     {
         result = aeron_properties_http_load(url_or_filename);

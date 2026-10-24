@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,8 +48,12 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
  * The (B)egin and (E)nd flags are used for message fragmentation. R is for reserved bit.
  * Both (B)egin and (E)nd flags are set for a message that does not span frames.
  */
-public class FrameDescriptor
+public final class FrameDescriptor
 {
+    private FrameDescriptor()
+    {
+    }
+
     /**
      * Set a pragmatic maximum message length regardless of term length to encourage better design.
      * Messages larger than half the cache size should be broken up into chunks and streamed.
@@ -72,37 +76,37 @@ public class FrameDescriptor
     public static final byte END_FRAG_FLAG = (byte)0b0100_0000;
 
     /**
-     * End fragment of a frame.
+     * Unfragmented frame.
      */
     public static final byte UNFRAGMENTED = BEGIN_FRAG_FLAG | END_FRAG_FLAG;
 
     /**
-     * Offset within a frame at which the version field begins
+     * Offset within a frame at which the version field begins.
      */
     public static final int VERSION_OFFSET = DataHeaderFlyweight.VERSION_FIELD_OFFSET;
 
     /**
-     * Offset within a frame at which the flags field begins
+     * Offset within a frame at which the flags field begins.
      */
     public static final int FLAGS_OFFSET = DataHeaderFlyweight.FLAGS_FIELD_OFFSET;
 
     /**
-     * Offset within a frame at which the type field begins
+     * Offset within a frame at which the type field begins.
      */
     public static final int TYPE_OFFSET = DataHeaderFlyweight.TYPE_FIELD_OFFSET;
 
     /**
-     * Offset within a frame at which the term offset field begins
+     * Offset within a frame at which the term offset field begins.
      */
     public static final int TERM_OFFSET = DataHeaderFlyweight.TERM_OFFSET_FIELD_OFFSET;
 
     /**
-     * Offset within a frame at which the term id field begins
+     * Offset within a frame at which the term id field begins.
      */
     public static final int TERM_ID_OFFSET = DataHeaderFlyweight.TERM_ID_FIELD_OFFSET;
 
     /**
-     * Offset within a frame at which the session id field begins
+     * Offset within a frame at which the session id field begins.
      */
     public static final int SESSION_ID_OFFSET = DataHeaderFlyweight.SESSION_ID_FIELD_OFFSET;
 
@@ -208,7 +212,7 @@ public class FrameDescriptor
      */
     public static int frameVersion(final UnsafeBuffer buffer, final int termOffset)
     {
-        return buffer.getByte(versionOffset(termOffset));
+        return buffer.getByte(termOffset + VERSION_OFFSET);
     }
 
     /**
@@ -220,7 +224,7 @@ public class FrameDescriptor
      */
     public static byte frameFlags(final UnsafeBuffer buffer, final int termOffset)
     {
-        return buffer.getByte(flagsOffset(termOffset));
+        return buffer.getByte(termOffset + FLAGS_OFFSET);
     }
 
     /**
@@ -232,7 +236,7 @@ public class FrameDescriptor
      */
     public static int frameType(final UnsafeBuffer buffer, final int termOffset)
     {
-        return buffer.getShort(typeOffset(termOffset), LITTLE_ENDIAN) & 0xFFFF;
+        return buffer.getShort(termOffset + TYPE_OFFSET, LITTLE_ENDIAN) & 0xFFFF;
     }
 
     /**
@@ -244,7 +248,7 @@ public class FrameDescriptor
      */
     public static boolean isPaddingFrame(final UnsafeBuffer buffer, final int termOffset)
     {
-        return buffer.getShort(typeOffset(termOffset)) == PADDING_FRAME_TYPE;
+        return buffer.getShort(termOffset + TYPE_OFFSET) == PADDING_FRAME_TYPE;
     }
 
     /**
@@ -268,7 +272,7 @@ public class FrameDescriptor
      */
     public static int frameTermId(final UnsafeBuffer buffer, final int termOffset)
     {
-        return buffer.getInt(termIdOffset(termOffset), LITTLE_ENDIAN);
+        return buffer.getInt(termOffset + TERM_ID_OFFSET, LITTLE_ENDIAN);
     }
 
     /**
@@ -280,7 +284,7 @@ public class FrameDescriptor
      */
     public static int frameSessionId(final UnsafeBuffer buffer, final int termOffset)
     {
-        return buffer.getInt(sessionIdOffset(termOffset), LITTLE_ENDIAN);
+        return buffer.getInt(termOffset + SESSION_ID_OFFSET, LITTLE_ENDIAN);
     }
 
     /**
@@ -317,7 +321,7 @@ public class FrameDescriptor
             length = Integer.reverseBytes(frameLength);
         }
 
-        buffer.putIntOrdered(termOffset, length);
+        buffer.putIntRelease(termOffset, length);
     }
 
     /**
@@ -329,7 +333,7 @@ public class FrameDescriptor
      */
     public static void frameType(final UnsafeBuffer buffer, final int termOffset, final int type)
     {
-        buffer.putShort(typeOffset(termOffset), (short)type, LITTLE_ENDIAN);
+        buffer.putShort(termOffset + TYPE_OFFSET, (short)type, LITTLE_ENDIAN);
     }
 
     /**
@@ -341,7 +345,7 @@ public class FrameDescriptor
      */
     public static void frameFlags(final UnsafeBuffer buffer, final int termOffset, final byte flags)
     {
-        buffer.putByte(flagsOffset(termOffset), flags);
+        buffer.putByte(termOffset + FLAGS_OFFSET, flags);
     }
 
     /**
@@ -352,7 +356,7 @@ public class FrameDescriptor
      */
     public static void frameTermOffset(final UnsafeBuffer buffer, final int termOffset)
     {
-        buffer.putInt(termOffsetOffset(termOffset), termOffset, LITTLE_ENDIAN);
+        buffer.putInt(termOffset + TERM_OFFSET, termOffset, LITTLE_ENDIAN);
     }
 
     /**
@@ -364,7 +368,7 @@ public class FrameDescriptor
      */
     public static void frameTermId(final UnsafeBuffer buffer, final int termOffset, final int termId)
     {
-        buffer.putInt(termIdOffset(termOffset), termId, LITTLE_ENDIAN);
+        buffer.putInt(termOffset + TERM_ID_OFFSET, termId, LITTLE_ENDIAN);
     }
 
     /**
@@ -372,10 +376,21 @@ public class FrameDescriptor
      *
      * @param buffer     containing the frame.
      * @param termOffset at which a frame begins.
-     * @param sessionId     value for the frame.
+     * @param sessionId  value for the frame.
      */
     public static void frameSessionId(final UnsafeBuffer buffer, final int termOffset, final int sessionId)
     {
-        buffer.putInt(sessionIdOffset(termOffset), sessionId, LITTLE_ENDIAN);
+        buffer.putInt(termOffset + SESSION_ID_OFFSET, sessionId, LITTLE_ENDIAN);
+    }
+
+    /**
+     * Check if specified {@code length} is frame-aligned.
+     *
+     * @param length to check.
+     * @return {@code true} if properly aligned.
+     */
+    public static boolean isFrameAligned(final int length)
+    {
+        return 0 == (length & (FRAME_ALIGNMENT - 1));
     }
 }

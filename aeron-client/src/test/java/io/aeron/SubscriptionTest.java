@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,13 @@
  */
 package io.aeron;
 
+import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.status.LocalSocketAddressStatus;
+import io.aeron.test.Tests;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
@@ -27,14 +29,27 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
 
 import java.nio.ByteBuffer;
 
 import static io.aeron.Aeron.NULL_VALUE;
-import static io.aeron.status.ChannelEndpointStatus.*;
-import static java.nio.charset.StandardCharsets.US_ASCII;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static io.aeron.status.ChannelEndpointStatus.ACTIVE;
+import static io.aeron.status.ChannelEndpointStatus.CLOSING;
+import static io.aeron.status.ChannelEndpointStatus.ERRORED;
+import static io.aeron.status.ChannelEndpointStatus.INITIALIZING;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SubscriptionTest
 {
@@ -57,10 +72,8 @@ class SubscriptionTest
     private final AvailableImageHandler availableImageHandlerMock = mock(AvailableImageHandler.class);
     private final UnavailableImageHandler unavailableImageHandlerMock = mock(UnavailableImageHandler.class);
 
-    private final UnsafeBuffer valuesBuffer = new UnsafeBuffer(ByteBuffer.allocate(16 * 1024));
-    private final UnsafeBuffer metaDataBuffer = new UnsafeBuffer(ByteBuffer.allocate(64 * 1024));
     private final UnsafeBuffer tempBuffer = new UnsafeBuffer(ByteBuffer.allocate(1024));
-    private final CountersManager countersManager = new CountersManager(metaDataBuffer, valuesBuffer, US_ASCII);
+    private final CountersManager countersManager = Tests.newCountersManager(16 * 1024);
 
     private Subscription subscription;
 
@@ -160,22 +173,70 @@ class SubscriptionTest
         assertEquals(2, subscription.poll(fragmentHandler, FRAGMENT_COUNT_LIMIT));
     }
 
+    @Test
+    void shouldRoundRobinStartingImageWhenPollingWithExhaustedFragmentLimit()
+    {
+        subscription.addImage(imageOneMock);
+        subscription.addImage(imageTwoMock);
+
+        when(imageOneMock.poll(any(), anyInt())).then((invocation) -> 1);
+        when(imageTwoMock.poll(any(), anyInt())).then((invocation) -> 1);
+
+        final InOrder inOrder = inOrder(imageOneMock, imageTwoMock);
+
+        for (int i = 0; i < 6; i++)
+        {
+            assertEquals(1, subscription.poll(fragmentHandler, 1));
+        }
+
+        inOrder.verify(imageOneMock).poll(any(), anyInt());
+        inOrder.verify(imageTwoMock).poll(any(), anyInt());
+        inOrder.verify(imageOneMock).poll(any(), anyInt());
+        inOrder.verify(imageTwoMock).poll(any(), anyInt());
+        inOrder.verify(imageOneMock).poll(any(), anyInt());
+        inOrder.verify(imageTwoMock).poll(any(), anyInt());
+    }
+
+    @Test
+    void shouldRoundRobinStartingImageWhenControlledPollingWithExhaustedFragmentLimit()
+    {
+        final ControlledFragmentHandler controlledFragmentHandler = mock(ControlledFragmentHandler.class);
+        subscription.addImage(imageOneMock);
+        subscription.addImage(imageTwoMock);
+
+        when(imageOneMock.controlledPoll(any(), anyInt())).then((invocation) -> 1);
+        when(imageTwoMock.controlledPoll(any(), anyInt())).then((invocation) -> 1);
+
+        final InOrder inOrder = inOrder(imageOneMock, imageTwoMock);
+
+        for (int i = 0; i < 6; i++)
+        {
+            assertEquals(1, subscription.controlledPoll(controlledFragmentHandler, 1));
+        }
+
+        inOrder.verify(imageOneMock).controlledPoll(any(), anyInt());
+        inOrder.verify(imageTwoMock).controlledPoll(any(), anyInt());
+        inOrder.verify(imageOneMock).controlledPoll(any(), anyInt());
+        inOrder.verify(imageTwoMock).controlledPoll(any(), anyInt());
+        inOrder.verify(imageOneMock).controlledPoll(any(), anyInt());
+        inOrder.verify(imageTwoMock).controlledPoll(any(), anyInt());
+    }
+
     @ValueSource(longs = { INITIALIZING, ERRORED, CLOSING })
     @ParameterizedTest
     void tryResolveChannelEndpointPortReturnsNullIfChannelStatusIsNotActive(final long channelStatus)
     {
         final int channelStatusId = 555;
+        final String channel = "aeron:udp?endpoint=localhost:0|interface=192.168.5.0/24|reliable=false";
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
         subscription.channelStatusId(channelStatusId);
         when(conductor.channelStatus(channelStatusId)).thenReturn(channelStatus);
-
-        assertNull(subscription.tryResolveChannelEndpointPort());
-    }
-
-    @Test
-    void tryResolveChannelEndpointPortReturnsNullIfSubscriptionIsClosed()
-    {
-        subscription.close();
-        assertTrue(subscription.isClosed());
 
         assertNull(subscription.tryResolveChannelEndpointPort());
     }
@@ -188,40 +249,6 @@ class SubscriptionTest
         when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
 
         assertSame(CHANNEL, subscription.tryResolveChannelEndpointPort());
-    }
-
-    @Test
-    void tryResolveChannelEndpointPortReturnsOriginalChannelIfMoreThanOneAddressFound()
-    {
-        final int channelStatusId = 123;
-        subscription.channelStatusId(channelStatusId);
-        when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
-
-        allocateAddressCounter("localhost:5555", channelStatusId, ACTIVE);
-        allocateAddressCounter("localhost:7777", channelStatusId, ACTIVE);
-
-        assertSame(CHANNEL, subscription.tryResolveChannelEndpointPort());
-    }
-
-    @Test
-    void tryResolveChannelEndpointPortReturnsOriginalChannelIfNonZeroPortWasSpecified()
-    {
-        final int channelStatusId = 444;
-        final String channel = "aeron:udp?endpoint=localhost:40124|interface=192.168.5.0/24|reliable=false";
-        subscription = new Subscription(
-            conductor,
-            channel,
-            STREAM_ID_1,
-            SUBSCRIPTION_CORRELATION_ID,
-            availableImageHandlerMock,
-            unavailableImageHandlerMock);
-        subscription.channelStatusId(channelStatusId);
-        when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
-
-        allocateAddressCounter("127.0.0.1:19091", channelStatusId, ACTIVE);
-        allocateAddressCounter("localhost:21212", channelStatusId, ERRORED);
-
-        assertSame(channel, subscription.tryResolveChannelEndpointPort());
     }
 
     @Test
@@ -239,14 +266,144 @@ class SubscriptionTest
         subscription.channelStatusId(channelStatusId);
         when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
 
-        allocateAddressCounter("127.0.0.1:19091", channelStatusId, ACTIVE);
         allocateAddressCounter("localhost:21212", channelStatusId, ERRORED);
+        allocateAddressCounter("127.0.0.1:19091", channelStatusId, ACTIVE);
 
         final String channelWithResolvedEndpoint = subscription.tryResolveChannelEndpointPort();
 
         assertEquals(
             ChannelUri.parse("aeron:udp?endpoint=localhost:19091|interface=192.168.5.0/24|reliable=false"),
             ChannelUri.parse(channelWithResolvedEndpoint));
+
+        assertSame(channelWithResolvedEndpoint, subscription.tryResolveChannelEndpointPort());
+    }
+
+    @Test
+    void tryResolveChannelEndpointPortReturnsNullIfChannelStatusIsActiveButThereAreNoActiveBindAddresses()
+    {
+        final int channelStatusId = 444;
+        final String channel = "aeron:udp?endpoint=localhost:0|interface=192.168.5.0/24|reliable=false";
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
+        subscription.channelStatusId(channelStatusId);
+        when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
+
+        allocateAddressCounter("localhost:21212", channelStatusId, ERRORED);
+
+        assertNull(subscription.tryResolveChannelEndpointPort());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "aeron:ipc",
+        "aeron:udp?control-mode=response|control=localhost:5555",
+        "aeron:udp?endpoint=localhost:8888",
+        "aeron:udp?control-mode=manual|endpoint=localhost:0",
+        "aeron:udp?control-mode=dynamic|control=localhost:7777"
+    })
+    void tryResolveChannelEndpointPortReturnsOriginalUriIfEndpointDoesNotNeedResolving(final String channel)
+    {
+        final int channelStatusId = 777;
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
+        subscription.channelStatusId(channelStatusId);
+        when(conductor.channelStatus(channelStatusId)).thenReturn(ERRORED);
+
+        assertSame(channel, subscription.tryResolveChannelEndpointPort());
+
+        // subsequent calls return the same result
+        assertSame(channel, subscription.tryResolveChannelEndpointPort());
+    }
+
+    @ValueSource(longs = { INITIALIZING, ERRORED, CLOSING })
+    @ParameterizedTest
+    void resolvedEndpointReturnsNullIfChannelStatusIsNotActive(final long channelStatus)
+    {
+        final int channelStatusId = 555;
+        final String channel = "aeron:udp?endpoint=localhost:0|interface=192.168.5.0/24|reliable=false";
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
+        subscription.channelStatusId(channelStatusId);
+        when(conductor.channelStatus(channelStatusId)).thenReturn(channelStatus);
+
+        allocateAddressCounter("127.0.0.1:19091", channelStatusId, ACTIVE);
+
+        assertNull(subscription.resolvedEndpoint());
+    }
+
+    @Test
+    void resolvedEndpointReturnsNullIfChannelStatusIsActiveButThereIsNoActiveBindAddress()
+    {
+        final int channelStatusId = 555;
+        final String channel = "aeron:udp?endpoint=localhost:0|interface=192.168.5.0/24|reliable=false";
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
+        subscription.channelStatusId(channelStatusId);
+        when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
+
+        allocateAddressCounter("127.0.0.1:19091", channelStatusId, CLOSING);
+
+        assertNull(subscription.resolvedEndpoint());
+    }
+
+    @Test
+    void resolvedEndpointReturnsFirstFoundActiveAddress()
+    {
+        final int channelStatusId = 555;
+        final String channel = "aeron:udp?endpoint=localhost:0|interface=192.168.5.0/24|reliable=false";
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
+        subscription.channelStatusId(channelStatusId);
+        when(conductor.channelStatus(channelStatusId)).thenReturn(ACTIVE);
+
+        allocateAddressCounter("127.0.0.1:5555", channelStatusId, ACTIVE);
+        allocateAddressCounter("127.0.0.1:19091", channelStatusId, CLOSING);
+        allocateAddressCounter("localhost:12122", channelStatusId, ACTIVE);
+
+        final String resolvedEndpoint = subscription.resolvedEndpoint();
+        assertEquals("127.0.0.1:5555", resolvedEndpoint);
+
+        assertSame(resolvedEndpoint, subscription.resolvedEndpoint());
+    }
+
+    @Test
+    void shouldAcceptBrokenChannelUriAtCreationTime()
+    {
+        final String channel = "broken uri";
+        subscription = new Subscription(
+            conductor,
+            channel,
+            STREAM_ID_1,
+            SUBSCRIPTION_CORRELATION_ID,
+            availableImageHandlerMock,
+            unavailableImageHandlerMock);
+
+        assertEquals(channel, subscription.channel());
     }
 
     private void allocateAddressCounter(final String address, final int channelStatusId, final long status)
@@ -260,6 +417,6 @@ class SubscriptionTest
             LocalSocketAddressStatus.LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID);
 
         LocalSocketAddressStatus.updateBindAddress(counter, address, (UnsafeBuffer)countersManager.metaDataBuffer());
-        counter.setOrdered(status);
+        counter.setRelease(status);
     }
 }

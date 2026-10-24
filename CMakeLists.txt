@@ -1,5 +1,5 @@
 #
-# Copyright 2014-2022 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
-cmake_policy(VERSION 3.14)
+cmake_minimum_required(VERSION 3.30 FATAL_ERROR)
+cmake_policy(VERSION 3.30)
+cmake_policy(SET CMP0003 NEW)
+cmake_policy(SET CMP0135 NEW)
+
+if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
+    message(FATAL_ERROR "In-source builds not allowed. Please make a new directory (called a build directory)"
+        "and run CMake from there. You may need to remove CMakeCache.txt.")
+endif ()
+
+string(TIMESTAMP DSTAMP "%Y%m%d")
 
 include(FetchContent)
 
@@ -37,20 +46,17 @@ option(C_WARNINGS_AS_ERRORS "Enable warnings as errors for C" OFF)
 option(CXX_WARNINGS_AS_ERRORS "Enable warnings as errors for C++" OFF)
 option(SANITISE_BUILD "Enable sanitise options" OFF)
 option(COVERAGE_BUILD "Enable code coverage" OFF)
+option(AERON_HIDE_DEPRECATION_MESSAGE "Hide C++ deprecation message" OFF)
 option(AERON_TESTS "Enable tests" ${STANDALONE_BUILD})
+option(AERON_UNIT_TESTS "Enable unit tests" ${STANDALONE_BUILD})
 option(AERON_SYSTEM_TESTS "Enable system tests" ${STANDALONE_BUILD})
 option(AERON_SLOW_SYSTEM_TESTS "Enable slow system tests" OFF)
 option(AERON_BUILD_SAMPLES "Enable building the sample projects" ${STANDALONE_BUILD})
 option(LINK_SAMPLES_CLIENT_SHARED "Enable shared linking for sample projects" OFF)
 option(AERON_BUILD_DOCUMENTATION "Build Aeron documentation" ${STANDALONE_BUILD})
 option(AERON_INSTALL_TARGETS "Enable installation step" ${STANDALONE_BUILD})
-if (UNIX)
-    option(AERON_ENABLE_NONSTANDARD_OPTIMIZATIONS "Enable Ofast for release builds" ${STANDALONE_BUILD})
-endif ()
 
 unset(STANDALONE_BUILD)
-
-include(ExternalProject)
 
 # CMAKE_OSX_ARCHITECTURES can be set to arm64 or x86_64 (or both) to make a specific architecture version. Requires
 # CMake 3.21. Must be set before project(), etc.
@@ -96,17 +102,42 @@ if (NOT DEFINED CMAKE_C_EXTENSIONS)
     set(CMAKE_C_EXTENSIONS OFF)
 endif ()
 
+execute_process(
+    COMMAND git log -1 --format=%h --abbrev=10
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+    OUTPUT_VARIABLE AERON_VERSION_GITSHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+execute_process(
+    COMMAND git diff-index --quiet HEAD --
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+    RESULT_VARIABLE AERON_GIT_DIFF_INDEX_RESULT
+)
+
+if (NOT AERON_GIT_DIFF_INDEX_RESULT EQUAL 0)
+    set(AERON_VERSION_GITSHA "${AERON_VERSION_GITSHA}+guilty")
+endif ()
+
 add_definitions(-DAERON_VERSION_TXT="${AERON_VERSION_TXT}")
 add_definitions(-DAERON_VERSION_MAJOR=${aeron_VERSION_MAJOR})
 add_definitions(-DAERON_VERSION_MINOR=${aeron_VERSION_MINOR})
 add_definitions(-DAERON_VERSION_PATCH=${aeron_VERSION_PATCH})
+add_definitions(-DAERON_VERSION_GITSHA="${AERON_VERSION_GITSHA}")
+
+if (AERON_HIDE_DEPRECATION_MESSAGE)
+    add_compile_definitions("AERON_HIDE_DEPRECATION_MESSAGE")
+endif (AERON_HIDE_DEPRECATION_MESSAGE)
 
 # all UNIX-based platform compiler flags
 if (UNIX)
-    add_compile_options(-Wall -Wpedantic -Wextra -Wno-unused-parameter)
+    add_compile_options(-fstrict-aliasing -Wall -Wpedantic -Wextra -Wno-unused-parameter -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
 
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11.0")
+    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER "11.0")
         add_compile_options(-Wno-error=maybe-uninitialized)
+    elseif (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER "21.0")
+        # See gtest: https://github.com/google/googletest/issues/4762
+        add_compile_options(-Wno-error=character-conversion)
     endif ()
 
     if (C_WARNINGS_AS_ERRORS)
@@ -118,34 +149,29 @@ if (UNIX)
     endif (CXX_WARNINGS_AS_ERRORS)
 
     if (SANITISE_BUILD)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=leak -fsanitize=undefined -fno-omit-frame-pointer -DAERON_SANITIZE_ENABLED")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize=leak -fsanitize=undefined -fno-omit-frame-pointer -DAERON_SANITIZE_ENABLED")
+        string(APPEND AERON_SANITISE_OPTIONS "-DAERON_SANITIZE_ENABLED -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined")
+        if (NOT CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+            string(APPEND AERON_SANITISE_OPTIONS " -fsanitize=leak")
+        endif ()
+
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${AERON_SANITISE_OPTIONS}")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${AERON_SANITISE_OPTIONS}")
     endif (SANITISE_BUILD)
 
     if (COVERAGE_BUILD)
         add_compile_options(-fno-inline --coverage)
         SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
     endif (COVERAGE_BUILD)
-
-    if (AERON_ENABLE_NONSTANDARD_OPTIMIZATIONS AND
-        NOT (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" AND
-            ${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER_EQUAL "9" AND
-            ${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS "10"))
-        message("Set -Ofast for ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-        add_compile_options($<$<CONFIG:Release>:-Ofast>)
-    endif ()
 endif ()
 
 # platform specific flags
 if (APPLE)
-    add_compile_options(-Wsign-compare)
-    add_definitions(-DDarwin)
-    add_compile_options(-Wno-deprecated-register)
+    add_compile_options(-Wsign-compare -Wno-deprecated-register)
 elseif (CYGWIN)
     add_definitions(-DWIN32)
     if (AERON_TESTS)
         add_definitions(-DGTEST_HAS_PTHREAD)
-    endif ()
+    endif (AERON_TESTS)
     set(CMAKE_CXX_EXTENSIONS ON)
 elseif (MSVC)
     add_definitions(-DWIN32)
@@ -158,12 +184,15 @@ elseif (MSVC)
         add_definitions(-D_ENABLE_EXTENDED_ALIGNED_STORAGE)
     endif ()
 
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd /Od /Zi /MP /wd4251")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT /MP /wd4251")
-    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd")
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
-
-    unset(CMAKE_C_STANDARD) # To avoid `/std:c11` in the compiler options
+    add_compile_options(/Oy-)
+    add_compile_options($<$<AND:$<COMPILE_LANGUAGE:C>,$<CONFIG:RELEASE>>:/MD>)
+    add_compile_options($<$<AND:$<COMPILE_LANGUAGE:C>,$<CONFIG:DEBUG>>:/MDd>)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/MP>)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/wd4251>)
+    add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:RELEASE>>:/MD>)
+    add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:DEBUG>>:/MDd>)
+    add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:DEBUG>>:/Od>)
+    add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:DEBUG>>:/Zi>)
 
     if (C_WARNINGS_AS_ERRORS)
         add_compile_options($<$<COMPILE_LANGUAGE:C>:/WX>)
@@ -174,12 +203,49 @@ elseif (MSVC)
     endif (CXX_WARNINGS_AS_ERRORS)
 
     if (SANITISE_BUILD)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fsanitize=address /Zi /D AERON_SANITIZE_ENABLED")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fsanitize=address /Zi /D AERON_SANITIZE_ENABLED")
+        string(APPEND AERON_SANITISE_OPTIONS "/fsanitize=address /Zi /D AERON_SANITIZE_ENABLED")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${AERON_SANITISE_OPTIONS}")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${AERON_SANITISE_OPTIONS}")
+
+        # /RTC runtime checks and /Gm minimal-rebuild are incompatible with /fsanitize=address on MSVC.
+        # Edit-and-continue (/ZI) is also unsupported; prefer /Zi, which is already added above.
+        # https://learn.microsoft.com/en-us/cpp/sanitizers/asan-known-issues
+        foreach (flag_var
+                CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG
+                CMAKE_C_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+            string(REGEX REPLACE "/RTC[1csu]+" "" ${flag_var} "${${flag_var}}")
+            string(REGEX REPLACE "/Gm[-]?" "" ${flag_var} "${${flag_var}}")
+            string(REGEX REPLACE "/ZI" "/Zi" ${flag_var} "${${flag_var}}")
+        endforeach ()
+
+        # Incremental linking is unsupported with /fsanitize=address — leaving it
+        # produces noisy LNK4300 warnings on every link. Convert any bare /INCREMENTAL
+        # to /INCREMENTAL:NO (and append it if neither form is present) for Debug /
+        # RelWithDebInfo across all link variants. The explicit :NO is required for
+        # the VS generator's <LinkIncremental> property — without it MSBuild defaults
+        # the property to true for Debug regardless of the linker-flags string and
+        # passes /INCREMENTAL to the linker itself.
+        foreach (flag_var
+                CMAKE_EXE_LINKER_FLAGS_DEBUG CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO
+                CMAKE_SHARED_LINKER_FLAGS_DEBUG CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO
+                CMAKE_MODULE_LINKER_FLAGS_DEBUG CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO)
+            string(REGEX REPLACE "(^|[ \t])/INCREMENTAL($|[ \t])" "\\1/INCREMENTAL:NO\\2"
+                ${flag_var} "${${flag_var}}")
+            if (NOT "${${flag_var}}" MATCHES "/INCREMENTAL:NO")
+                string(APPEND ${flag_var} " /INCREMENTAL:NO")
+            endif ()
+        endforeach ()
     endif (SANITISE_BUILD)
 
 endif ()
 
+if (DEFINED AERON_COMPILER_OPTIMIZATION_LEVEL)
+    if (MSVC)
+        add_compile_options(/O${AERON_COMPILER_OPTIMIZATION_LEVEL})
+    else ()
+        add_compile_options(-O${AERON_COMPILER_OPTIMIZATION_LEVEL})
+    endif ()
+endif()
 
 ##########################################################
 # Project variables, etc.
@@ -201,22 +267,29 @@ if (AERON_BUILD_SAMPLES)
     set(AERON_C_SAMPLES_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-samples/src/main/c")
 endif ()
 
-set(AERON_CLIENT_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/main/cpp")
-
+# client source
 set(AERON_CLIENT_WRAPPER_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/main/cpp_wrapper")
-
 set(AERON_C_CLIENT_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/main/c")
 
+# driver source
 set(AERON_DRIVER_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-driver/src/main/c")
 
-set(AERON_ARCHIVE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/main/cpp")
+# archive source
+set(AERON_ARCHIVE_WRAPPER_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/main/cpp_wrapper")
+set(AERON_C_ARCHIVE_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/main/c")
 
 if (AERON_TESTS)
-    set(AERON_CLIENT_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/test/cpp")
-    set(AERON_DRIVER_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-driver/src/test/c")
-    set(AERON_C_CLIENT_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/test/c")
+    # client tests
     set(AERON_CLIENT_WRAPPER_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/test/cpp_wrapper")
-    set(AERON_ARCHIVE_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/test/cpp")
+    set(AERON_C_CLIENT_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-client/src/test/c")
+
+    # driver tests
+    set(AERON_DRIVER_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-driver/src/test/c")
+
+    # archive tests
+    set(AERON_ARCHIVE_WRAPPER_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/test/cpp_wrapper")
+    set(AERON_C_ARCHIVE_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/test/c")
+
     set(AERON_SYSTEM_TEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/aeron-system-tests")
 endif ()
 
@@ -238,8 +311,8 @@ if (AERON_TESTS)
 
     FetchContent_Declare(
         gmock
-        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/googletest-release-1.12.1.zip
-        URL_MD5 2648d4138129812611cf6b6b4b497a3b)
+        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/googletest-1.14.0.zip
+        URL_MD5 b4911e882c51cba34bebfb5df500a650)
 
     FetchContent_MakeAvailable(gmock)
 endif ()
@@ -252,29 +325,18 @@ if (AERON_BUILD_SAMPLES)
     set(HDR_HISTOGRAM_BUILD_PROGRAMS "OFF" CACHE INTERNAL "Set build programs option")
     FetchContent_Declare(
         hdr_histogram
-        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/HdrHistogram_c-0.11.6.zip
-        URL_MD5 5477a84c26109d057cb2a3169bd70610
-    )
+        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/HdrHistogram_c-0.11.10.zip
+        URL_MD5 4a06c4f73b42c366cfe4a5277fc5dadf)
 
-
-    FetchContent_GetProperties(hdr_histogram)
-    if(NOT hdr_histogram_POPULATED)
-        FetchContent_Populate(hdr_histogram)
-        add_subdirectory(${hdr_histogram_SOURCE_DIR} ${hdr_histogram_BINARY_DIR} EXCLUDE_FROM_ALL)
-    endif()
-#    FetchContent_MakeAvailable(hdr_histogram)
+    FetchContent_MakeAvailable(hdr_histogram)
 endif ()
 
-
+add_subdirectory(${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 add_subdirectory(${AERON_C_CLIENT_SOURCE_PATH})
 
-add_subdirectory(${AERON_CLIENT_SOURCE_PATH})
-add_subdirectory(${AERON_CLIENT_WRAPPER_SOURCE_PATH})
-
 if (AERON_TESTS)
-    add_subdirectory(${AERON_CLIENT_TEST_PATH})
-    add_subdirectory(${AERON_C_CLIENT_TEST_PATH})
     add_subdirectory(${AERON_CLIENT_WRAPPER_TEST_PATH})
+    add_subdirectory(${AERON_C_CLIENT_TEST_PATH})
 endif ()
 if (AERON_BUILD_SAMPLES)
     add_subdirectory(${AERON_SAMPLES_PATH})
@@ -289,28 +351,57 @@ if (BUILD_AERON_DRIVER)
     endif ()
 endif (BUILD_AERON_DRIVER)
 
+if (NOT DEFINED JAVA_HOME)
+    set(CACHE{JAVA_HOME} TYPE PATH FORCE VALUE $ENV{JAVA_HOME})
+endif ()
+
+if (NOT DEFINED BUILD_JAVA_HOME)
+    set(CACHE{BUILD_JAVA_HOME} TYPE PATH FORCE VALUE $ENV{BUILD_JAVA_HOME})
+endif ()
+
+if (NOT DEFINED BUILD_JAVA_VERSION)
+    set(CACHE{BUILD_JAVA_VERSION} TYPE STRING FORCE VALUE $ENV{BUILD_JAVA_VERSION})
+endif ()
+
 if (BUILD_AERON_ARCHIVE_API)
     set(ARCHIVE_CODEC_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    set(ARCHIVE_C_CODEC_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/c")
     set(ARCHIVE_CODEC_SCHEMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/aeron-archive/src/main/resources/archive")
     set(ARCHIVE_CODEC_WORKING_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
-    add_subdirectory(${AERON_ARCHIVE_SOURCE_PATH})
+    add_subdirectory(${AERON_ARCHIVE_WRAPPER_SOURCE_PATH})
+    add_subdirectory(${AERON_C_ARCHIVE_SOURCE_PATH})
     set(AERON_ALL_JAR "${CMAKE_CURRENT_SOURCE_DIR}/aeron-all/build/libs/aeron-all-${AERON_VERSION_TXT}.jar")
 
     file(GLOB_RECURSE AERON_ALL_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}}/aeron-archive/src/main/java/*.java")
 
     add_custom_command(OUTPUT ${AERON_ALL_JAR}
-        COMMAND ${CMAKE_COMMAND} -E env JAVA_HOME=$ENV{JAVA_HOME} BUILD_JAVA_HOME=$ENV{BUILD_JAVA_HOME} BUILD_JAVA_VERSION=$ENV{BUILD_JAVA_VERSION} ${GRADLE_WRAPPER} :aeron-all:clean :aeron-all:assemble --no-daemon -x javadoc --console=plain -q
+        COMMAND ${CMAKE_COMMAND}
+                -E env
+                JAVA_HOME=${JAVA_HOME}
+                BUILD_JAVA_HOME=${BUILD_JAVA_HOME}
+                BUILD_JAVA_VERSION=${BUILD_JAVA_VERSION}
+                ${GRADLE_WRAPPER}
+                :aeron-all:clean
+                :aeron-all:assemble
+                --exclude-task  javadoc
+                --exclude-task  check
+                --no-daemon
+                --console=plain
+                --quiet
         DEPENDS ${AERON_ALL_SOURCES}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Generating aeron-all jar")
+        COMMENT "Generating aeron-all jar"
+        VERBATIM)
 
     add_custom_target(aeron-all-jar
         DEPENDS ${AERON_ALL_JAR})
 
     if (AERON_TESTS)
-        add_subdirectory(${AERON_ARCHIVE_TEST_PATH})
+        add_subdirectory(${AERON_C_ARCHIVE_TEST_PATH})
+        add_subdirectory(${AERON_ARCHIVE_WRAPPER_TEST_PATH})
+        add_subdirectory(${AERON_SYSTEM_TEST_PATH}/src/test/cpp_wrapper ${CMAKE_CURRENT_BINARY_DIR}/aeron-system-tests-cpp)
     endif ()
 endif (BUILD_AERON_ARCHIVE_API)
 ##########################################################
@@ -332,6 +423,38 @@ if (AERON_BUILD_DOCUMENTATION AND DOXYGEN_FOUND)
 endif ()
 
 ##########################################################
+# export targets
+
+if (AERON_INSTALL_TARGETS)
+    include(CMakePackageConfigHelpers)
+
+    install(
+        EXPORT aeron-targets
+        FILE aeron-targets.cmake
+        NAMESPACE aeron::
+        DESTINATION lib/cmake/aeron)
+
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/aeron-config-version.cmake"
+        VERSION "${AERON_VERSION_FROM_FILE}"
+        COMPATIBILITY AnyNewerVersion)
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/aeron-config.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/aeron-config.cmake"
+        INSTALL_DESTINATION lib/cmake/aeron)
+
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/aeron-config.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/aeron-config-version.cmake"
+        DESTINATION lib/cmake/aeron)
+
+    export(EXPORT aeron-targets
+        FILE "${CMAKE_CURRENT_BINARY_DIR}/aeron-targets.cmake"
+        NAMESPACE aeron::)
+endif ()
+
+##########################################################
 # package target
 
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
@@ -341,3 +464,4 @@ set(CPACK_PACKAGE_VERSION_PATCH "${aeron_VERSION_PATCH}")
 
 set(CPACK_GENERATOR "TGZ;STGZ")
 include(CPack)
+

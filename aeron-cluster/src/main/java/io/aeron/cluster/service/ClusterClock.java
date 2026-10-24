@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,6 +76,17 @@ public interface ClusterClock
     }
 
     /**
+     * Convert given Cluster time to {@link TimeUnit#NANOSECONDS}.
+     *
+     * @param time to convert to nanoseconds.
+     * @return time in {@link TimeUnit#NANOSECONDS}.
+     */
+    default long convertToNanos(final long time)
+    {
+        return timeUnit().toNanos(time);
+    }
+
+    /**
      * Map {@link TimeUnit} to a corresponding {@link ClusterTimeUnit}.
      *
      * @param timeUnit to map to a corresponding {@link ClusterTimeUnit}.
@@ -93,9 +104,10 @@ public interface ClusterClock
 
             case NANOSECONDS:
                 return ClusterTimeUnit.NANOS;
-        }
 
-        throw new IllegalArgumentException("unsupported time unit: " + timeUnit);
+            default:
+                throw new IllegalArgumentException("unsupported time unit: " + timeUnit);
+        }
     }
 
     /**

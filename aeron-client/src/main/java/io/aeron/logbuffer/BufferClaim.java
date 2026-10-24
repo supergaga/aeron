@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,6 +38,13 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
 public final class BufferClaim
 {
     private final UnsafeBuffer buffer = new UnsafeBuffer(0, 0);
+
+    /**
+     * An empty buffer claim, ready to be used with {@link io.aeron.Publication#tryClaim(int, BufferClaim)}.
+     */
+    public BufferClaim()
+    {
+    }
 
     /**
      * Wrap a region of an underlying log buffer so can can represent a claimed space for use by a publisher.
@@ -183,7 +190,7 @@ public final class BufferClaim
             frameLength = Integer.reverseBytes(frameLength);
         }
 
-        buffer.putIntOrdered(FRAME_LENGTH_FIELD_OFFSET, frameLength);
+        buffer.putIntRelease(FRAME_LENGTH_FIELD_OFFSET, frameLength);
     }
 
     /**
@@ -198,7 +205,7 @@ public final class BufferClaim
         }
 
         buffer.putShort(TYPE_FIELD_OFFSET, (short)HDR_TYPE_PAD, LITTLE_ENDIAN);
-        buffer.putIntOrdered(FRAME_LENGTH_FIELD_OFFSET, frameLength);
+        buffer.putIntRelease(FRAME_LENGTH_FIELD_OFFSET, frameLength);
     }
 }
 

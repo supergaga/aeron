@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,10 +23,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.ReadablePosition;
 
 import static io.aeron.logbuffer.FrameDescriptor.*;
-import static io.aeron.logbuffer.FrameDescriptor.END_FRAG_FLAG;
-import static io.aeron.logbuffer.FrameDescriptor.frameFlags;
-import static io.aeron.logbuffer.LogBufferDescriptor.TERM_TAIL_COUNTERS_OFFSET;
-import static io.aeron.logbuffer.LogBufferDescriptor.packTail;
+import static io.aeron.logbuffer.LogBufferDescriptor.*;
 import static io.aeron.protocol.DataHeaderFlyweight.*;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
@@ -35,6 +32,11 @@ import static org.agrona.BitUtil.align;
 @SuppressWarnings("unused")
 abstract class ExclusivePublicationLhsPadding extends Publication
 {
+    byte p000, p001, p002, p003, p004, p005, p006, p007, p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023, p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039, p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055, p056, p057, p058, p059, p060, p061, p062, p063;
+
     ExclusivePublicationLhsPadding(
         final ClientConductor clientConductor,
         final String channel,
@@ -57,15 +59,15 @@ abstract class ExclusivePublicationLhsPadding extends Publication
             originalRegistrationId,
             registrationId);
     }
-
-    byte p000, p001, p002, p003, p004, p005, p006, p007, p008, p009, p010, p011, p012, p013, p014, p015;
-    byte p016, p017, p018, p019, p020, p021, p022, p023, p024, p025, p026, p027, p028, p029, p030, p031;
-    byte p032, p033, p034, p035, p036, p037, p038, p039, p040, p041, p042, p043, p044, p045, p046, p047;
-    byte p048, p049, p050, p051, p052, p053, p054, p055, p056, p057, p058, p059, p060, p061, p062, p063;
 }
 
 abstract class ExclusivePublicationValues extends ExclusivePublicationLhsPadding
 {
+    int termOffset;
+    int termId;
+    int activePartitionIndex;
+    long termBeginPosition;
+
     ExclusivePublicationValues(
         final ClientConductor clientConductor,
         final String channel,
@@ -88,11 +90,6 @@ abstract class ExclusivePublicationValues extends ExclusivePublicationLhsPadding
             originalRegistrationId,
             registrationId);
     }
-
-    int termOffset;
-    int termId;
-    int activePartitionIndex;
-    long termBeginPosition;
 }
 
 /**
@@ -142,19 +139,45 @@ public final class ExclusivePublication extends ExclusivePublicationValues
             registrationId);
 
         final UnsafeBuffer logMetaDataBuffer = logBuffers.metaDataBuffer();
-        final int termCount = LogBufferDescriptor.activeTermCount(logMetaDataBuffer);
-        final int index = LogBufferDescriptor.indexByTermCount(termCount);
+        final int termCount = activeTermCount(logMetaDataBuffer);
+        final int index = indexByTermCount(termCount);
         activePartitionIndex = index;
 
-        final long rawTail = LogBufferDescriptor.rawTail(logMetaDataBuffer, index);
+        final long rawTail = rawTail(logMetaDataBuffer, index);
         termId = LogBufferDescriptor.termId(rawTail);
         termOffset = LogBufferDescriptor.termOffset(rawTail);
-        termBeginPosition = LogBufferDescriptor.computeTermBeginPosition(termId, positionBitsToShift, initialTermId);
+        termBeginPosition = computeTermBeginPosition(termId, positionBitsToShift, initialTermId);
+    }
+
+    /**
+     * Mark the publication to be revoked when {@link #close()} is called.  See  {@link #revoke()}
+     */
+    public void revokeOnClose()
+    {
+        revokeOnClose = true;
+    }
+
+    /**
+     * Immediately revoke and {@link #close()} the publication.
+     *
+     * Revoking disposes of resources as soon as possible. On the publication side the log buffer won't linger,
+     * while on the subscription side the image will go unavailable without requiring all data to be drained.
+     * Hence, it should be used only when it's known that all subscribers have received all the data,
+     * or if it doesn't matter if they have.
+     */
+    public void revoke()
+    {
+        if (!isClosed)
+        {
+            revokeOnClose = true;
+            close();
+        }
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public long position()
     {
         if (isClosed)
@@ -168,6 +191,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
     /**
      * {@inheritDoc}
      */
+    @Override
     public long availableWindow()
     {
         if (isClosed)
@@ -428,18 +452,22 @@ public final class ExclusivePublication extends ExclusivePublicationValues
     }
 
     /**
-     * Append a padding record log of a given length to make up the log to a position.
+     * Append a padding record to log of a given length to make up the log to a position.
      *
      * @param length of the range to claim, in bytes.
      * @return The new stream position, otherwise a negative error value of {@link #NOT_CONNECTED},
      * {@link #BACK_PRESSURED}, {@link #ADMIN_ACTION}, {@link #CLOSED}, or {@link #MAX_POSITION_EXCEEDED}.
-     * @throws IllegalArgumentException if the length is greater than {@link #maxMessageLength()}.
+     * @throws IllegalArgumentException if the length is greater than {@link #maxMessageLength() framed}.
      */
     public long appendPadding(final int length)
     {
-        checkMaxMessageLength(length);
-        long newPosition = CLOSED;
+        if (length > maxFramedLength)
+        {
+            throw new IllegalArgumentException(
+                "padding exceeds maxFramedLength of " + maxFramedLength + ", length=" + length);
+        }
 
+        long newPosition = CLOSED;
         if (!isClosed)
         {
             final long limit = positionLimit.getVolatile();
@@ -564,7 +592,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
 
     private void rotateTerm()
     {
-        final int nextIndex = LogBufferDescriptor.nextPartitionIndex(activePartitionIndex);
+        final int nextIndex = nextPartitionIndex(activePartitionIndex);
         final int nextTermId = termId + 1;
 
         activePartitionIndex = nextIndex;
@@ -574,8 +602,8 @@ public final class ExclusivePublication extends ExclusivePublicationValues
 
         final int termCount = nextTermId - initialTermId;
 
-        LogBufferDescriptor.initialiseTailWithTermId(logMetaDataBuffer, nextIndex, nextTermId);
-        LogBufferDescriptor.activeTermCountOrdered(logMetaDataBuffer, termCount);
+        initialiseTailWithTermId(logMetaDataBuffer, nextIndex, nextTermId);
+        activeTermCountOrdered(logMetaDataBuffer, termCount);
     }
 
     private int handleEndOfLog(final UnsafeBuffer termBuffer, final int termLength)
@@ -605,7 +633,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -636,14 +664,11 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int length,
         final ReservedValueSupplier reservedValueSupplier)
     {
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-        final int requiredLength = (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
-        int resultingOffset = termOffset + requiredLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        int resultingOffset = termOffset + framedLength;
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -708,7 +733,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -745,14 +770,11 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final ReservedValueSupplier reservedValueSupplier)
     {
         final int length = lengthOne + lengthTwo;
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-        final int requiredLength = (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
-        int resultingOffset = termOffset + requiredLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        int resultingOffset = termOffset + framedLength;
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -837,7 +859,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -873,14 +895,11 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int length,
         final ReservedValueSupplier reservedValueSupplier)
     {
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-        final int requiredLength = (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
-        int resultingOffset = termOffset + requiredLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        int resultingOffset = termOffset + framedLength;
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -960,7 +979,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -985,7 +1004,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -1009,12 +1028,14 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int length)
     {
         final int resultingOffset = termOffset + length;
-        final int lengthOfFirstFrame = buffer.getInt(offset, LITTLE_ENDIAN);
 
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
-        buffer.putInt(offset, 0, LITTLE_ENDIAN);
-        termBuffer.putBytes(termOffset, buffer, offset, length);
-        frameLengthOrdered(termBuffer, termOffset, lengthOfFirstFrame);
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
+
+        termBuffer.putBytes(termOffset + HEADER_LENGTH, buffer, offset + HEADER_LENGTH, length - HEADER_LENGTH);
+        termBuffer.putLong(termOffset + 24, buffer.getLong(offset + 24));
+        termBuffer.putLong(termOffset + 16, buffer.getLong(offset + 16));
+        termBuffer.putLong(termOffset + 8, buffer.getLong(offset + 8));
+        termBuffer.putLongRelease(termOffset, buffer.getLong(offset));
 
         return resultingOffset;
     }

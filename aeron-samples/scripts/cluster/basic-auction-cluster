@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ##
-## Copyright 2014-2022 Real Logic Limited.
+## Copyright 2014-2025 Real Logic Limited.
 ##
 ## Licensed under the Apache License, Version 2.0 (the "License");
 ## you may not use this file except in compliance with the License.
@@ -23,15 +23,13 @@ mkdir -p logs
 function startNode() {
     ${JAVA_HOME}/bin/java \
         -cp ../../../aeron-all/build/libs/aeron-all-${VERSION}.jar \
-        -javaagent:../../../aeron-agent/build/libs/aeron-agent-${VERSION}.jar \
-        -XX:+UseBiasedLocking \
-        -XX:BiasedLockingStartupDelay=0 \
         -XX:+UnlockExperimentalVMOptions \
         -XX:+TrustFinalNonStaticFields \
         -XX:+UnlockDiagnosticVMOptions \
         -XX:GuaranteedSafepointInterval=300000 \
         -XX:+UseParallelGC \
         -Daeron.event.cluster.log=all \
+        -Daeron.event.cluster.log.disable=CANVASS_POSITION,APPEND_POSITION,COMMIT_POSITION \
         -Daeron.cluster.tutorial.nodeId=${1} \
         ${JVM_OPTS} ${ADD_OPENS} \
         io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode > logs/cluster-${1}.log &

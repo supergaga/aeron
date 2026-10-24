@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import org.agrona.concurrent.IdleStrategy;
 /**
  * Configuration used for samples with defaults which can be overridden by system properties.
  */
+@SuppressWarnings("JavadocVariable")
 public class SampleConfiguration
 {
     public static final String CHANNEL_PROP = "aeron.sample.channel";
@@ -43,8 +44,6 @@ public class SampleConfiguration
     public static final String EXCLUSIVE_PUBLICATIONS_PROP = "aeron.sample.exclusive.publications";
     public static final String IDLE_STRATEGY_PROP = "aeron.sample.idleStrategy";
 
-    public static final String INFO_FLAG_PROP = "aeron.sample.info";
-
     public static final String CHANNEL;
     public static final String PING_CHANNEL;
     public static final String PONG_CHANNEL;
@@ -52,7 +51,6 @@ public class SampleConfiguration
 
     public static final boolean EMBEDDED_MEDIA_DRIVER;
     public static final boolean RANDOM_MESSAGE_LENGTH;
-    public static final boolean INFO_FLAG;
     public static final int STREAM_ID;
     public static final int PING_STREAM_ID;
     public static final int PONG_STREAM_ID;
@@ -81,7 +79,6 @@ public class SampleConfiguration
         WARMUP_NUMBER_OF_MESSAGES = Long.getLong(WARMUP_NUMBER_OF_MESSAGES_PROP, 10_000);
         WARMUP_NUMBER_OF_ITERATIONS = Integer.getInteger(WARMUP_NUMBER_OF_ITERATIONS_PROP, 10);
         EMBEDDED_MEDIA_DRIVER = "true".equals(System.getProperty(EMBEDDED_MEDIA_DRIVER_PROP));
-        INFO_FLAG = "true".equals(System.getProperty(INFO_FLAG_PROP));
         EXCLUSIVE_PUBLICATIONS = "true".equals(System.getProperty(EXCLUSIVE_PUBLICATIONS_PROP));
     }
 

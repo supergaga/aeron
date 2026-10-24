@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,13 @@ import org.agrona.concurrent.status.AtomicCounter;
  */
 public class DebugSendChannelEndpointSupplier implements SendChannelEndpointSupplier
 {
+    /**
+     * Create a supplier for the DebugSendChannelEndpoint.
+     */
+    public DebugSendChannelEndpointSupplier()
+    {
+    }
+
     /**
      * Supply a new instance of a {@link DebugSendChannelEndpoint} for testing loss.
      *

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,8 @@ import org.agrona.concurrent.status.AtomicCounter;
 import java.util.ArrayList;
 import java.util.Arrays;
 
-final class DriverNameResolverCache implements AutoCloseable
+final class DriverNameResolverCache
 {
-    private static final int INVALID_INDEX = -1;
-
     private final ArrayList<CacheEntry> entries = new ArrayList<>();
     private final long timeoutMs;
 
@@ -34,18 +32,17 @@ final class DriverNameResolverCache implements AutoCloseable
         this.timeoutMs = timeoutMs;
     }
 
-    /**
-     * {@inheritDoc}
-     */
-    public void close()
-    {
-    }
-
     CacheEntry lookup(final String name, final byte type)
     {
-        final int index = findEntryIndexByNameAndType(name, type);
+        for (final CacheEntry entry : entries)
+        {
+            if (type == entry.type && fullLengthMatch(entry.name, name))
+            {
+                return entry;
+            }
+        }
 
-        return INVALID_INDEX == index ? null : entries.get(index);
+        return null;
     }
 
     void addOrUpdateEntry(
@@ -57,11 +54,10 @@ final class DriverNameResolverCache implements AutoCloseable
         final int port,
         final AtomicCounter cacheEntriesCounter)
     {
-        final int existingEntryIndex = findEntryIndexByNameAndType(name, nameLength, type);
+        CacheEntry entry = findEntryIndexByNameAndType(name, nameLength, type);
         final int addressLength = ResolutionEntryFlyweight.addressLength(type);
-        final CacheEntry entry;
 
-        if (INVALID_INDEX == existingEntryIndex)
+        if (null == entry)
         {
             entry = new CacheEntry(
                 Arrays.copyOf(name, nameLength),
@@ -71,15 +67,14 @@ final class DriverNameResolverCache implements AutoCloseable
                 Arrays.copyOf(address, addressLength),
                 port);
             entries.add(entry);
-            cacheEntriesCounter.setOrdered(entries.size());
+            cacheEntriesCounter.setRelease(entries.size());
         }
         else
         {
-            entry = entries.get(existingEntryIndex);
             entry.timeOfLastActivityMs = nowMs;
             entry.deadlineMs = nowMs + timeoutMs;
 
-            if (port != entry.port || !byteSubsetEquals(address, entry.address, addressLength))
+            if (port != entry.port || !fullLengthMatch(entry.address, address, addressLength))
             {
                 entry.address = Arrays.copyOf(address, addressLength);
                 entry.port = port;
@@ -96,10 +91,10 @@ final class DriverNameResolverCache implements AutoCloseable
         {
             final CacheEntry entry = listOfEntries.get(i);
 
-            if (nowMs > entry.deadlineMs)
+            if (entry.deadlineMs - nowMs < 0)
             {
                 ArrayListUtil.fastUnorderedRemove(listOfEntries, i, lastIndex--);
-                cacheEntriesCounter.setOrdered(listOfEntries.size());
+                cacheEntriesCounter.setRelease(listOfEntries.size());
                 workCount++;
             }
         }
@@ -138,16 +133,23 @@ final class DriverNameResolverCache implements AutoCloseable
 
     private final Iterator iterator = new Iterator();
 
-    static boolean byteSubsetEquals(final byte[] lhs, final byte[] rhs, final int length)
+    static boolean fullLengthMatch(final byte[] expected, final byte[] actual, final int actualLength)
     {
-        if (lhs.length < length || rhs.length < length)
+        return actualLength == expected.length &&
+            Arrays.equals(expected, 0, actualLength, actual, 0, actualLength);
+    }
+
+    static boolean fullLengthMatch(final byte[] expected, final String actual)
+    {
+        final int length = actual.length();
+        if (length != expected.length)
         {
             return false;
         }
 
         for (int i = 0; i < length; i++)
         {
-            if (lhs[i] != rhs[i])
+            if (expected[i] != actual.charAt(i))
             {
                 return false;
             }
@@ -156,54 +158,17 @@ final class DriverNameResolverCache implements AutoCloseable
         return true;
     }
 
-    static boolean byteSubsetEquals(final byte[] lhs, final String rhs)
+    private CacheEntry findEntryIndexByNameAndType(final byte[] name, final int nameLength, final byte type)
     {
-        final int length = rhs.length();
-
-        if (lhs.length < length)
+        for (final CacheEntry entry : entries)
         {
-            return false;
-        }
-
-        for (int i = 0; i < length; i++)
-        {
-            if (lhs[i] != rhs.charAt(i))
+            if (type == entry.type && fullLengthMatch(entry.name, name, nameLength))
             {
-                return false;
+                return entry;
             }
         }
 
-        return true;
-    }
-
-    private int findEntryIndexByNameAndType(final byte[] name, final int nameLength, final byte type)
-    {
-        for (int i = 0; i < entries.size(); i++)
-        {
-            final CacheEntry entry = entries.get(i);
-
-            if (type == entry.type && byteSubsetEquals(entry.name, name, nameLength))
-            {
-                return i;
-            }
-        }
-
-        return INVALID_INDEX;
-    }
-
-    private int findEntryIndexByNameAndType(final String name, final byte type)
-    {
-        for (int i = 0; i < entries.size(); i++)
-        {
-            final CacheEntry entry = entries.get(i);
-
-            if (type == entry.type && byteSubsetEquals(entry.name, name))
-            {
-                return i;
-            }
-        }
-
-        return INVALID_INDEX;
+        return null;
     }
 
     static final class CacheEntry

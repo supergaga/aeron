@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef AERON_INT32_TO_PTR_HASH_MAP_H
-#define AERON_INT32_TO_PTR_HASH_MAP_H
+#ifndef AERON_INT64_TO_PTR_HASH_MAP_H
+#define AERON_INT64_TO_PTR_HASH_MAP_H
 
 #include <errno.h>
 
@@ -48,7 +48,7 @@ inline int aeron_int64_to_ptr_hash_map_init(
     size_t capacity = (size_t)aeron_find_next_power_of_two((int32_t)initial_capacity);
 
     map->load_factor = load_factor;
-    map->resize_threshold = (size_t)(load_factor * capacity);
+    map->resize_threshold = (size_t)(load_factor * (float)capacity);
     map->keys = NULL;
     map->values = NULL;
     map->capacity = capacity;
@@ -56,11 +56,13 @@ inline int aeron_int64_to_ptr_hash_map_init(
 
     if (aeron_alloc((void **)&map->keys, (capacity * sizeof(int64_t))) < 0)
     {
+        AERON_APPEND_ERR("%s", "");
         return -1;
     }
 
     if (aeron_alloc((void **)&map->values, (capacity * sizeof(void *))) < 0)
     {
+        AERON_APPEND_ERR("%s", "");
         return -1;
     }
 
@@ -83,18 +85,21 @@ inline void aeron_int64_to_ptr_hash_map_delete(aeron_int64_to_ptr_hash_map_t *ma
 inline int aeron_int64_to_ptr_hash_map_rehash(aeron_int64_to_ptr_hash_map_t *map, size_t new_capacity)
 {
     size_t mask = new_capacity - 1;
-    map->resize_threshold = (size_t)(new_capacity * map->load_factor);
+    map->resize_threshold = (size_t)((float)new_capacity * map->load_factor);
 
     int64_t *tmp_keys;
     void **tmp_values;
 
-    if (aeron_alloc((void **)&tmp_keys, (new_capacity * sizeof(int64_t))) < 0)
+    if (aeron_alloc((void **)&tmp_keys, new_capacity * sizeof(int64_t)) < 0)
     {
+        AERON_APPEND_ERR("%s", "");
         return -1;
     }
 
-    if (aeron_alloc((void **)&tmp_values, (new_capacity * sizeof(void *))) < 0)
+    if (aeron_alloc((void **)&tmp_values, new_capacity * sizeof(void *)) < 0)
     {
+        AERON_APPEND_ERR("%s", "");
+        aeron_free(tmp_keys);
         return -1;
     }
 
@@ -248,7 +253,7 @@ inline void aeron_int64_to_ptr_hash_map_for_each(
 {
     for (size_t i = 0; i < map->capacity; i++)
     {
-        if (map->values[i] != NULL)
+        if (NULL != map->values[i])
         {
             func(clientd, map->keys[i], map->values[i]);
         }
@@ -258,22 +263,28 @@ inline void aeron_int64_to_ptr_hash_map_for_each(
 inline void aeron_int64_to_ptr_hash_map_remove_if(
     aeron_int64_to_ptr_hash_map_t *map, aeron_int64_to_ptr_hash_map_predicate_func_t func, void *clientd)
 {
+    size_t i = 0;
     size_t remaining = map->size;
-    size_t index = map->capacity - 1;
 
-    while (0 < remaining)
+    while (i < map->capacity && remaining > 0)
     {
-        if (map->values[index] != NULL)
+        bool is_removed = false;
+        if (NULL != map->values[i])
         {
-            if (func(clientd, map->keys[index], map->values[index]))
+            if (func(clientd, map->keys[i], map->values[i]))
             {
-                aeron_int64_to_ptr_hash_map_remove(map, map->keys[index]);
+                is_removed = NULL != aeron_int64_to_ptr_hash_map_remove(map, map->keys[i]);
             }
-
-            --remaining;
         }
 
-        --index;
+        if (is_removed)
+        {
+            --remaining;
+        }
+        else
+        {
+            ++i;
+        }
     }
 }
 

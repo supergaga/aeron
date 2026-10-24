@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ extern int aeron_bit_set_stack_init(
     aeron_bit_set_t *bit_set);
 
 extern void aeron_bit_set_heap_free(aeron_bit_set_t *bit_set);
+
+extern int aeron_bit_set_heap_alloc(size_t bit_set_length, aeron_bit_set_t **bit_set);
+
+extern int aeron_bit_set_heap_init(size_t bit_set_length, bool initial_value, aeron_bit_set_t **bit_set);
 
 extern void aeron_bit_set_stack_free(aeron_bit_set_t *bit_set);
 

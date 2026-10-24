@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,10 @@
 package io.aeron.driver;
 
 import io.aeron.CommonContext;
+import io.aeron.driver.logging.DriverTracing;
 import io.aeron.driver.media.UdpChannel;
 import io.aeron.driver.status.FlowControlReceivers;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.CloseHelper;
@@ -25,6 +27,7 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 
+import java.net.InetSocketAddress;
 import java.util.Arrays;
 
 import static io.aeron.logbuffer.LogBufferDescriptor.computePosition;
@@ -34,6 +37,29 @@ import static org.agrona.AsciiEncoding.parseLongAscii;
 import static org.agrona.SystemUtil.parseDuration;
 import static org.agrona.collections.ArrayUtil.add;
 
+abstract class AbstractMinMulticastFlowControlLhsPadding
+{
+    byte p000, p001, p002, p003, p004, p005, p006, p007, p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023, p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039, p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055, p056, p057, p058, p059, p060, p061, p062, p063;
+}
+
+abstract class AbstractMinMulticastFlowControlFields extends AbstractMinMulticastFlowControlLhsPadding
+{
+    long lastSetupSenderLimit;
+    long timeOfLastSetupNs;
+    boolean hasTaggedStatusMessageTriggeredSetup;
+}
+
+abstract class AbstractMinMulticastFlowControlRhsPadding extends AbstractMinMulticastFlowControlFields
+{
+    byte p064, p065, p066, p067, p068, p069, p070, p071, p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087, p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103, p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119, p120, p121, p122, p123, p124, p125, p126, p127;
+}
+
 /**
  * Abstract minimum multicast sender flow control strategy. It supports the concept of only tracking the minimum of a
  * group of receivers, not all possible receivers. However, it is agnostic of how that group is determined.
@@ -41,9 +67,11 @@ import static org.agrona.collections.ArrayUtil.add;
  * Tracking of receivers is done as long as they continue to send Status Messages. Once SMs stop, the receiver tracking
  * for that receiver will time out after a given number of nanoseconds.
  */
-public abstract class AbstractMinMulticastFlowControl implements FlowControl
+public abstract class AbstractMinMulticastFlowControl
+    extends AbstractMinMulticastFlowControlRhsPadding
+    implements FlowControl
 {
-    static final Receiver[] EMPTY_RECEIVERS = new Receiver[0];
+    private static final Receiver[] EMPTY_RECEIVERS = new Receiver[0];
 
     private final boolean isGroupTagAware;
     private volatile boolean hasRequiredReceivers;
@@ -52,10 +80,9 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
     private long receiverTimeoutNs;
     private Receiver[] receivers = EMPTY_RECEIVERS;
     private String channel;
-    private AtomicCounter numReceivers;
+    private AtomicCounter receiverCount;
     private ErrorHandler errorHandler;
-    private long timeOfLastSetupNs;
-    private long lastSetupSenderLimit;
+    private int retransmitReceiverWindowMultiple;
 
     /**
      * Base constructor for use by specialised implementations.
@@ -70,6 +97,7 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void initialize(
         final MediaDriver.Context context,
         final CountersManager countersManager,
@@ -87,24 +115,31 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
 
         parseUriParam(udpChannel.channelUri().get(CommonContext.FLOW_CONTROL_PARAM_NAME));
         hasRequiredReceivers = receivers.length >= groupMinSize;
-        errorHandler = context.errorHandler();
-        numReceivers = FlowControlReceivers.allocate(
+        errorHandler = context.countedErrorHandler();
+        receiverCount = FlowControlReceivers.allocate(
             context.tempBuffer(), countersManager, registrationId, sessionId, streamId, channel);
         timeOfLastSetupNs = 0;
         lastSetupSenderLimit = -1;
+        hasTaggedStatusMessageTriggeredSetup = false;
+        retransmitReceiverWindowMultiple = FlowControl.retransmitReceiverWindowMultiple(
+            udpChannel,
+            context.multicastFlowControlRetransmitReceiverWindowMultiple()
+        );
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
-        CloseHelper.close(errorHandler, numReceivers);
+        CloseHelper.close(errorHandler, receiverCount);
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onSetup(
         final SetupFlyweight flyweight,
         final long senderLimit,
@@ -112,11 +147,13 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
         final int positionBitsToShift,
         final long timeNs)
     {
-        if (0 < receivers.length)
+        if (hasTaggedStatusMessageTriggeredSetup && receivers.length > 0)
         {
             timeOfLastSetupNs = timeNs;
             lastSetupSenderLimit = senderLimit;
         }
+
+        hasTaggedStatusMessageTriggeredSetup = false;
 
         return senderLimit;
     }
@@ -124,6 +161,7 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onIdle(final long timeNs, final long senderLimit, final long senderPosition, final boolean isEos)
     {
         long minLimitPosition = lastSetupSenderLimit(timeNs);
@@ -135,10 +173,7 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
             final Receiver receiver = receivers[i];
             if ((receiver.timeOfLastStatusMessageNs + receiverTimeoutNs) - timeNs < 0 || receiver.eosFlagged)
             {
-                if (i != lastIndex)
-                {
-                    receivers[i] = receivers[lastIndex--];
-                }
+                receivers[i] = receivers[lastIndex--];
                 removed++;
                 receiverRemoved(
                     receiver.receiverId, receiver.sessionId, receiver.streamId, channel, receivers.length - removed);
@@ -154,7 +189,7 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
             receivers = truncateReceivers(receivers, removed);
             hasRequiredReceivers = receivers.length >= groupMinSize;
             this.receivers = receivers;
-            numReceivers.setOrdered(receivers.length);
+            receiverCount.setRelease(receivers.length);
         }
 
         return receivers.length < groupMinSize || receivers.length == 0 ? senderLimit : minLimitPosition;
@@ -168,6 +203,20 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
     public boolean hasRequiredReceivers()
     {
         return hasRequiredReceivers;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int maxRetransmissionLength(
+        final int termOffset,
+        final int resendLength,
+        final int termBufferLength,
+        final int mtuLength)
+    {
+        return FlowControl.calculateRetransmissionLength(
+            resendLength, termBufferLength, termOffset, retransmitReceiverWindowMultiple);
     }
 
     /**
@@ -230,7 +279,7 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
             this.receivers = receivers;
             minPosition = Math.min(minPosition, lastPositionPlusWindow);
             receiverAdded(receiver.receiverId, receiver.sessionId, receiver.streamId, channel, receivers.length);
-            numReceivers.setOrdered(receivers.length);
+            receiverCount.setRelease(receivers.length);
             lastSetupSenderLimit = -1;
         }
 
@@ -245,6 +294,54 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
         else
         {
             return Math.max(senderLimit, minPosition);
+        }
+    }
+
+    /**
+     *  Process a status message triggering a setup to be sent.
+     *
+     * @param flyweight       over the status message receiver.
+     * @param receiverAddress of the receiver.
+     * @param timeNs          current time (in nanoseconds).
+     * @param hasMatchingTag  if the status messages comes from a receiver with a tag matching the group.
+     */
+    protected void processSendSetupTrigger(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs,
+        final boolean hasMatchingTag)
+    {
+        if (!hasTaggedStatusMessageTriggeredSetup)
+        {
+            hasTaggedStatusMessageTriggeredSetup = hasMatchingTag;
+        }
+    }
+
+    /**
+     * Process an error frame from a downstream receiver.
+     *
+     * @param error             flyweight over the error frame.
+     * @param receiverAddress   of the receiver.
+     * @param timeNs            current time in nanoseconds.
+     * @param hasMatchingTag    if the error message comes from a receiver with a tag matching the group.
+     */
+    protected void processError(
+        final ErrorFlyweight error,
+        final InetSocketAddress receiverAddress,
+        final long timeNs,
+        final boolean hasMatchingTag)
+    {
+        if (hasMatchingTag)
+        {
+            final long receiverId = error.receiverId();
+            for (final Receiver receiver : receivers)
+            {
+                if (receiverId == receiver.receiverId)
+                {
+                    receiver.eosFlagged = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -336,17 +433,13 @@ public abstract class AbstractMinMulticastFlowControl implements FlowControl
     private void receiverAdded(
         final long receiverId, final int sessionId, final int streamId, final String channel, final int receiverCount)
     {
-//        System.out.println("Receiver added: receiverCount=" + receiverCount +
-//            ", receiverId=" + receiverId + ", sessionId=" + sessionId + ", streamId=" + streamId +
-//            ", channel=" + channel);
+        DriverTracing.traceFlowControlReceiverAdded(receiverId, sessionId, streamId, channel, receiverCount);
     }
 
     private void receiverRemoved(
         final long receiverId, final int sessionId, final int streamId, final String channel, final int receiverCount)
     {
-//        System.out.println("Receiver removed: receiverCount=" + receiverCount +
-//            ", receiverId=" + receiverId + ", sessionId=" + sessionId + ", streamId=" + streamId +
-//            ", channel=" + channel);
+        DriverTracing.traceFlowControlReceiverRemoved(receiverId, sessionId, streamId, channel, receiverCount);
     }
 
     private long lastSetupSenderLimit(final long nowNs)

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,6 +43,19 @@ public:
     TimestampsTest() : CSystemTestBase(std::vector<std::pair<std::string, std::string>>{
             { "AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS", "loss" },
             { "AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_LOSS_ARGS", "rate=0" }
+        })
+    {}
+};
+
+class TimestampsSingleIoVecTest : public CSystemTestBase, public testing::Test
+{
+public:
+    TimestampsSingleIoVecTest() : CSystemTestBase(std::vector<std::pair<std::string, std::string>>{
+            { "AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS", "loss" },
+            { "AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_LOSS_ARGS", "rate=0" },
+            { AERON_RECEIVER_IO_VECTOR_CAPACITY_ENV_VAR, "1" },
+            { AERON_SENDER_IO_VECTOR_CAPACITY_ENV_VAR, "1" },
+            { AERON_NETWORK_PUBLICATION_MAX_MESSAGES_PER_SEND_ENV_VAR, "1" },
         })
     {}
 };
@@ -119,11 +132,14 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesAtOffset)
 #endif
 
     aeron_async_add_publication_t *async_pub = nullptr;
+    aeron_async_add_publication_t *async_pub2 = nullptr;
     aeron_async_add_subscription_t *async_sub = nullptr;
-    std::stringstream uriStream;
-    uriStream << URI << "|media-rcv-ts-offset=" << offsetof(message_t, timestamp_2) << '\0';
-    std::string uri = uriStream.str();
+    aeron_async_add_subscription_t *async_sub2 = nullptr;
+    std::string uri = std::string(URI)
+        .append("|media-rcv-ts-offset=")
+        .append(std::to_string(offsetof(message_t, timestamp_2)));
     const char *uri_s = uri.c_str();
+    std::string uri2 = std::string("aeron:udp?endpoint=localhost:10001");
 
     struct message_t message = {};
     message.timestamp_1 = AERON_NULL_VALUE;
@@ -132,16 +148,27 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesAtOffset)
 
     ASSERT_TRUE(connect());
     ASSERT_EQ(aeron_async_add_publication(&async_pub, m_aeron, uri_s, STREAM_ID), 0);
+    ASSERT_EQ(aeron_async_add_publication(&async_pub2, m_aeron, uri2.c_str(), STREAM_ID), 0);
 
     aeron_publication_t *publication = awaitPublicationOrError(async_pub);
     ASSERT_TRUE(publication) << aeron_errmsg();
 
+    aeron_publication_t *publication2 = awaitPublicationOrError(async_pub2);
+    ASSERT_TRUE(publication2) << aeron_errmsg();
+
     ASSERT_EQ(aeron_async_add_subscription(
         &async_sub, m_aeron, uri_s, STREAM_ID, nullptr, nullptr, nullptr, nullptr), 0);
+
+    ASSERT_EQ(aeron_async_add_subscription(
+        &async_sub2, m_aeron, uri2.c_str(), STREAM_ID, nullptr, nullptr, nullptr, nullptr), 0);
 
     aeron_subscription_t *subscription = awaitSubscriptionOrError(async_sub);
     ASSERT_TRUE(subscription) << aeron_errmsg();
     awaitConnected(subscription);
+
+    aeron_subscription_t *subscription2 = awaitSubscriptionOrError(async_sub2);
+    ASSERT_TRUE(subscription2) << aeron_errmsg();
+    awaitConnected(subscription2);
 
     while (aeron_publication_offer(
         publication, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
@@ -149,7 +176,14 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesAtOffset)
         std::this_thread::yield();
     }
 
+    while (aeron_publication_offer(
+        publication2, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
+    {
+        std::this_thread::yield();
+    }
+
     int poll_result;
+
     bool called = false;
     poll_handler_t handler = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
     {
@@ -163,6 +197,19 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesAtOffset)
         called = true;
     };
 
+    bool called2 = false;
+    poll_handler_t handler2 = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
+    {
+        aeron_header_values_t header_values;
+        aeron_header_values(header, &header_values);
+        auto *incoming = (message_t *)buffer;
+        EXPECT_EQ(AERON_NULL_VALUE, header_values.frame.reserved_value);
+        EXPECT_EQ(AERON_NULL_VALUE, incoming->timestamp_1);
+        EXPECT_EQ(AERON_NULL_VALUE, incoming->timestamp_2);
+        EXPECT_STREQ(incoming->text, message.text);
+        called2 = true;
+    };
+
     while ((poll_result = poll(subscription, handler, 1)) == 0)
     {
         std::this_thread::yield();
@@ -170,8 +217,124 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesAtOffset)
     EXPECT_EQ(poll_result, 1) << aeron_errmsg();
     EXPECT_TRUE(called);
 
+    while ((poll_result = poll(subscription2, handler2, 1)) == 0)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(poll_result, 1) << aeron_errmsg();
+    EXPECT_TRUE(called2);
+
     EXPECT_EQ(aeron_publication_close(publication, nullptr, nullptr), 0);
     EXPECT_EQ(aeron_subscription_close(subscription, nullptr, nullptr), 0);
+
+    EXPECT_EQ(aeron_publication_close(publication2, nullptr, nullptr), 0);
+    EXPECT_EQ(aeron_subscription_close(subscription2, nullptr, nullptr), 0);
+}
+
+TEST_F(TimestampsSingleIoVecTest, shouldPutTimestampInMessagesAtOffsetSingleIoVec)
+{
+#if !defined(__linux__)
+    GTEST_SKIP();
+#endif
+
+    aeron_async_add_publication_t *async_pub = nullptr;
+    aeron_async_add_publication_t *async_pub2 = nullptr;
+    aeron_async_add_subscription_t *async_sub = nullptr;
+    aeron_async_add_subscription_t *async_sub2 = nullptr;
+    std::string uri = std::string(URI)
+        .append("|media-rcv-ts-offset=")
+        .append(std::to_string(offsetof(message_t, timestamp_2)));
+    const char *uri_s = uri.c_str();
+    std::string uri2 = std::string("aeron:udp?endpoint=localhost:10001");
+
+    struct message_t message = {};
+    message.timestamp_1 = AERON_NULL_VALUE;
+    message.timestamp_2 = AERON_NULL_VALUE;
+    strcpy(message.text, "hello");
+
+    ASSERT_TRUE(connect());
+    ASSERT_EQ(aeron_async_add_publication(&async_pub, m_aeron, uri_s, STREAM_ID), 0);
+    ASSERT_EQ(aeron_async_add_publication(&async_pub2, m_aeron, uri2.c_str(), STREAM_ID), 0);
+
+    aeron_publication_t *publication = awaitPublicationOrError(async_pub);
+    ASSERT_TRUE(publication) << aeron_errmsg();
+
+    aeron_publication_t *publication2 = awaitPublicationOrError(async_pub2);
+    ASSERT_TRUE(publication2) << aeron_errmsg();
+
+    ASSERT_EQ(aeron_async_add_subscription(
+        &async_sub, m_aeron, uri_s, STREAM_ID, nullptr, nullptr, nullptr, nullptr), 0);
+
+    ASSERT_EQ(aeron_async_add_subscription(
+        &async_sub2, m_aeron, uri2.c_str(), STREAM_ID, nullptr, nullptr, nullptr, nullptr), 0);
+
+    aeron_subscription_t *subscription = awaitSubscriptionOrError(async_sub);
+    ASSERT_TRUE(subscription) << aeron_errmsg();
+    awaitConnected(subscription);
+
+    aeron_subscription_t *subscription2 = awaitSubscriptionOrError(async_sub2);
+    ASSERT_TRUE(subscription2) << aeron_errmsg();
+    awaitConnected(subscription2);
+
+    while (aeron_publication_offer(
+        publication, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
+    {
+        std::this_thread::yield();
+    }
+
+    while (aeron_publication_offer(
+        publication2, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
+    {
+        std::this_thread::yield();
+    }
+
+    int poll_result;
+
+    bool called = false;
+    poll_handler_t handler = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
+    {
+        aeron_header_values_t header_values;
+        aeron_header_values(header, &header_values);
+        auto *incoming = (message_t *)buffer;
+        EXPECT_EQ(AERON_NULL_VALUE, header_values.frame.reserved_value);
+        EXPECT_EQ(AERON_NULL_VALUE, incoming->timestamp_1);
+        EXPECT_NE(AERON_NULL_VALUE, incoming->timestamp_2);
+        EXPECT_STREQ(incoming->text, message.text);
+        called = true;
+    };
+
+    bool called2 = false;
+    poll_handler_t handler2 = [&](const uint8_t *buffer, size_t length, aeron_header_t *header)
+    {
+        aeron_header_values_t header_values;
+        aeron_header_values(header, &header_values);
+        auto *incoming = (message_t *)buffer;
+        EXPECT_EQ(AERON_NULL_VALUE, header_values.frame.reserved_value);
+        EXPECT_EQ(AERON_NULL_VALUE, incoming->timestamp_1);
+        EXPECT_EQ(AERON_NULL_VALUE, incoming->timestamp_2);
+        EXPECT_STREQ(incoming->text, message.text);
+        called2 = true;
+    };
+
+    while ((poll_result = poll(subscription, handler, 1)) == 0)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(poll_result, 1) << aeron_errmsg();
+    EXPECT_TRUE(called);
+
+    while ((poll_result = poll(subscription2, handler2, 1)) == 0)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(poll_result, 1) << aeron_errmsg();
+    EXPECT_TRUE(called2);
+
+    EXPECT_EQ(aeron_publication_close(publication, nullptr, nullptr), 0);
+    EXPECT_EQ(aeron_subscription_close(subscription, nullptr, nullptr), 0);
+
+    EXPECT_EQ(aeron_publication_close(publication2, nullptr, nullptr), 0);
+    EXPECT_EQ(aeron_subscription_close(subscription2, nullptr, nullptr), 0);
 }
 
 TEST_F(TimestampsTest, shouldNotPutTimestampInMessagesAtIfOffsetExceedsMessage)
@@ -182,9 +345,9 @@ TEST_F(TimestampsTest, shouldNotPutTimestampInMessagesAtIfOffsetExceedsMessage)
 
     aeron_async_add_publication_t *async_pub = nullptr;
     aeron_async_add_subscription_t *async_sub = nullptr;
-    std::stringstream uriStream;
-    uriStream << URI << "|media-rcv-ts-offset=" << sizeof(message_t) - 4 << '\0';
-    std::string uri = uriStream.str();
+    std::string uri = std::string(URI)
+        .append("|media-rcv-ts-offset=")
+        .append(std::to_string(sizeof(message_t) - 4));
     const char *uri_s = uri.c_str();
 
     struct message_t message = {};
@@ -345,18 +508,18 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
     ASSERT_TRUE(awaitDestinationOrError(asyncDestB));
 
     ASSERT_EQ(aeron_async_add_exclusive_publication(&asyncPubA, m_aeron, destinationA.c_str(), STREAM_ID), 0);
-    aeron_publication_t *publicationA = awaitPublicationOrError(asyncPubA);
+    aeron_exclusive_publication_t *publicationA = awaitExclusivePublicationOrError(asyncPubA);
     ASSERT_TRUE(publicationA) << aeron_errmsg();
 
     aeron_publication_constants_t pubAConstants;
-    aeron_publication_constants(publicationA, &pubAConstants);
-    int64_t pubAPosition = aeron_publication_position(publicationA);
+    aeron_exclusive_publication_constants(publicationA, &pubAConstants);
+    int64_t pubAPosition = aeron_exclusive_publication_position(publicationA);
 
     int32_t termId = aeron_logbuffer_compute_term_id_from_position(
         pubAPosition,
         pubAConstants.position_bits_to_shift,
         pubAConstants.initial_term_id);
-    int32_t termOffset = (int32_t)(pubAPosition & (pubAConstants.term_buffer_length - 1));
+    auto termOffset = (int32_t)(pubAPosition & (pubAConstants.term_buffer_length - 1));
 
     std::stringstream publicationBStream;
     publicationBStream << destinationB;
@@ -367,7 +530,7 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
     std::string destB = publicationBStream.str();
 
     ASSERT_EQ(aeron_async_add_exclusive_publication(&asyncPubB, m_aeron, destB.c_str(), STREAM_ID), 0);
-    aeron_publication_t *publicationB = awaitPublicationOrError(asyncPubB);
+    aeron_exclusive_publication_t *publicationB = awaitExclusivePublicationOrError(asyncPubB);
     ASSERT_TRUE(publicationB) << aeron_errmsg();
 
     awaitConnected(subscription);
@@ -386,7 +549,7 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
         called++;
     };
 
-    while (aeron_publication_offer(
+    while (aeron_exclusive_publication_offer(
         publicationA, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
     {
         std::this_thread::yield();
@@ -399,7 +562,7 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
     EXPECT_EQ(poll_result, 1) << aeron_errmsg();
     EXPECT_EQ(1, called);
 
-    while (aeron_publication_offer(
+    while (aeron_exclusive_publication_offer(
         publicationB, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
     {
         std::this_thread::yield();
@@ -412,7 +575,7 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
         ASSERT_EQ(0, poll(subscription, handler, 1));
     }
 
-    while (aeron_publication_offer(
+    while (aeron_exclusive_publication_offer(
         publicationB, (const uint8_t *)&message, sizeof(message), null_reserved_value, nullptr) < 0)
     {
         std::this_thread::yield();
@@ -425,7 +588,8 @@ TEST_F(TimestampsTest, shouldPutTimestampInMessagesReservedValueWithMergedMds)
     EXPECT_EQ(poll_result, 1) << aeron_errmsg();
     EXPECT_EQ(2, called);
 
-    EXPECT_EQ(aeron_publication_close(publicationA, nullptr, nullptr), 0);
+    EXPECT_EQ(aeron_exclusive_publication_close(publicationA, nullptr, nullptr), 0);
+    EXPECT_EQ(aeron_exclusive_publication_close(publicationB, nullptr, nullptr), 0);
     EXPECT_EQ(aeron_subscription_close(subscription, nullptr, nullptr), 0);
 }
 

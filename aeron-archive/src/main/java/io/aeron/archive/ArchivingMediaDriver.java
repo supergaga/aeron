@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,11 +48,10 @@ public class ArchivingMediaDriver implements AutoCloseable
     {
         loadPropertiesFiles(args);
 
-        final ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
-        final MediaDriver.Context ctx = new MediaDriver.Context()
-            .terminationHook(barrier::signalAll);
-
-        try (ArchivingMediaDriver ignore = launch(ctx, new Archive.Context()))
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ArchivingMediaDriver ignore = launch(
+                new MediaDriver.Context().terminationHook(barrier::signalAll),
+                new Archive.Context()))
         {
             barrier.await();
             System.out.println("Shutdown Archive...");
@@ -129,6 +128,7 @@ public class ArchivingMediaDriver implements AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         CloseHelper.closeAll(archive, driver);

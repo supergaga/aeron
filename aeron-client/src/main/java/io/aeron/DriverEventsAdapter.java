@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import static io.aeron.command.ControlProtocolEvents.*;
 class DriverEventsAdapter implements MessageHandler
 {
     private final ErrorResponseFlyweight errorResponse = new ErrorResponseFlyweight();
+    private final PublicationErrorFrameFlyweight publicationErrorFrame = new PublicationErrorFrameFlyweight();
     private final PublicationBuffersReadyFlyweight publicationReady = new PublicationBuffersReadyFlyweight();
     private final SubscriptionReadyFlyweight subscriptionReady = new SubscriptionReadyFlyweight();
     private final ImageBuffersReadyFlyweight imageReady = new ImageBuffersReadyFlyweight();
@@ -37,6 +38,8 @@ class DriverEventsAdapter implements MessageHandler
     private final ImageMessageFlyweight imageMessage = new ImageMessageFlyweight();
     private final CounterUpdateFlyweight counterUpdate = new CounterUpdateFlyweight();
     private final ClientTimeoutFlyweight clientTimeout = new ClientTimeoutFlyweight();
+    private final StaticCounterFlyweight staticCounter = new StaticCounterFlyweight();
+    private final NextAvailableSessionIdFlyweight nextSessionId = new NextAvailableSessionIdFlyweight();
     private final CopyBroadcastReceiver receiver;
     private final ClientConductor conductor;
     private final LongHashSet asyncCommandIdSet;
@@ -105,6 +108,7 @@ class DriverEventsAdapter implements MessageHandler
 
                 if (CHANNEL_ENDPOINT_ERROR == errorCode)
                 {
+                    // This code is left for backwards compatibility with older media driver versions
                     notProcessed = false;
                     conductor.onChannelEndpointError(correlationId, errorResponse.errorMessage());
                 }
@@ -161,7 +165,7 @@ class DriverEventsAdapter implements MessageHandler
                 subscriptionReady.wrap(buffer, index);
 
                 final long correlationId = subscriptionReady.correlationId();
-                if (correlationId == activeCorrelationId)
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
                 {
                     receivedCorrelationId = correlationId;
                     conductor.onNewSubscription(correlationId, subscriptionReady.channelStatusCounterId());
@@ -218,7 +222,7 @@ class DriverEventsAdapter implements MessageHandler
 
                 final int counterId = counterUpdate.counterId();
                 final long correlationId = counterUpdate.correlationId();
-                if (correlationId == activeCorrelationId)
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
                 {
                     receivedCorrelationId = correlationId;
                     conductor.onNewCounter(correlationId, counterId);
@@ -245,6 +249,41 @@ class DriverEventsAdapter implements MessageHandler
                 if (clientTimeout.clientId() == clientId)
                 {
                     conductor.onClientTimeout();
+                }
+                break;
+            }
+
+            case ON_STATIC_COUNTER:
+            {
+                staticCounter.wrap(buffer, index);
+
+                final long correlationId = staticCounter.correlationId();
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
+                {
+                    final int counterId = staticCounter.counterId();
+                    receivedCorrelationId = correlationId;
+                    conductor.onStaticCounter(correlationId, counterId);
+                }
+                break;
+            }
+
+            case ON_PUBLICATION_ERROR:
+            {
+                publicationErrorFrame.wrap(buffer, index);
+
+                conductor.onPublicationError(publicationErrorFrame);
+                break;
+            }
+
+            case ON_NEXT_AVAILABLE_SESSION_ID:
+            {
+                nextSessionId.wrap(buffer, index);
+
+                final long correlationId = nextSessionId.correlationId();
+                if (correlationId == activeCorrelationId)
+                {
+                    receivedCorrelationId = correlationId;
+                    conductor.onNextAvailableSessionId(nextSessionId.nextSessionId());
                 }
                 break;
             }

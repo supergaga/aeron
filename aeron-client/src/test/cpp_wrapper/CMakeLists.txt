@@ -1,5 +1,5 @@
 #
-# Copyright 2014-2022 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,47 +18,39 @@ set(TEST_HEADERS
     EmbeddedMediaDriver.h
     TestUtil.h)
 
-if (MSVC AND ${CMAKE_VERSION} VERSION_LESS "3.13.0")
-    target_compile_definitions(aeron_client_test PUBLIC "MSVC_FILE_IS_LOWER_CASE")
-endif ()
+include_directories(${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 
-function(aeron_client_native_test name file)
+function(aeron_client_cpp_test name file)
     add_executable(${name} ${file} ${TEST_HEADERS})
     add_dependencies(${name} gmock)
-    target_link_libraries(${name} aeron_client aeron_driver gmock_main ${CMAKE_THREAD_LIBS_INIT})
+    target_link_libraries(${name} aeron_client_wrapper aeron_driver gmock_main ${CMAKE_THREAD_LIBS_INIT})
     target_compile_definitions(${name} PUBLIC "_SILENCE_TR1_NAMESPACE_DEPRECATION_WARNING")
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-function(aeron_client_wrapper_test name file)
-    set(wrapper_name "${name}W")
-    add_executable(${wrapper_name} ${file} ${TEST_HEADERS})
-    add_dependencies(${wrapper_name} gmock)
-    target_link_libraries(${wrapper_name} aeron_client_wrapper aeron_driver gmock_main ${CMAKE_THREAD_LIBS_INIT})
-    target_compile_definitions(${wrapper_name} PUBLIC "_SILENCE_TR1_NAMESPACE_DEPRECATION_WARNING")
-    add_test(NAME ${wrapper_name} COMMAND ${wrapper_name})
-endfunction()
+if (AERON_UNIT_TESTS)
+    aeron_client_cpp_test(systemTest SystemTest.cpp)
+    aeron_client_cpp_test(wrapperSystemTest WrapperSystemTest.cpp)
+    aeron_client_cpp_test(pubSubTest PubSubTest.cpp)
+    aeron_client_cpp_test(countersTest CountersTest.cpp)
+    aeron_client_cpp_test(atomicCounterTest AtomicCounterTest.cpp)
+    aeron_client_cpp_test(atomicBufferTest AtomicBufferTest.cpp)
+    aeron_client_cpp_test(heartbeatTimestampTest HeartbeatTimestampTest.cpp)
+    aeron_client_cpp_test(imagePollTest ImageTest.cpp)
+    aeron_client_cpp_test(localAddresses LocalAddressesTest.cpp)
+    aeron_client_cpp_test(multiDestinationCast MultiDestinationTest.cpp)
+    aeron_client_cpp_test(multiDestinationByIdTest MultiDestinationByIdTest.cpp)
+    aeron_client_cpp_test(livenessTimeoutTest LivenessTimeoutTest.cpp)
+    aeron_client_cpp_test(responseChannelsTest ResponseChannelsTest.cpp)
+    aeron_client_cpp_test(exceptionsTest ExceptionsTest.cpp)
+    aeron_client_cpp_test(headerTest HeaderTest.cpp)
+    aeron_client_cpp_test(channelUriStringBuilderTest ChannelUriStringBuilderTest.cpp)
+    aeron_client_cpp_test(fragmentAssemblerTest FragmentAssemblerTest.cpp)
+    aeron_client_cpp_test(imageFragmentAssemblerTest ImageFragmentAssemblerTest.cpp)
+    aeron_client_cpp_test(controlledFragmentAssemblerTest ControlledFragmentAssemblerTest.cpp)
+    aeron_client_cpp_test(imageControlledFragmentAssemblerTest ImageControlledFragmentAssemblerTest.cpp)
+    aeron_client_cpp_test(rejectImageTest RejectImageTest.cpp)
+    aeron_client_cpp_test(publicationRevokeTest PublicationRevokeTest.cpp)
+    aeron_client_cpp_test(agentRunnerTest AgentRunnerTest.cpp)
 
-aeron_client_wrapper_test(systemTest SystemTest.cpp)
-aeron_client_native_test(systemTest SystemTest.cpp)
-
-aeron_client_wrapper_test(pubSubTest PubSubTest.cpp)
-aeron_client_native_test(pubSubTest PubSubTest.cpp)
-
-aeron_client_wrapper_test(countersTest CountersTest.cpp)
-aeron_client_native_test(countersTest CountersTest.cpp)
-
-aeron_client_wrapper_test(imagePollTest ImageTest.cpp)
-aeron_client_native_test(imagePollTest ImageTest.cpp)
-
-aeron_client_wrapper_test(localAddresses LocalAddressesTest.cpp)
-aeron_client_native_test(localAddresses LocalAddressesTest.cpp)
-
-aeron_client_wrapper_test(multiDestinationCast MultiDestinationTest.cpp)
-aeron_client_native_test(multiDestinationCast MultiDestinationTest.cpp)
-
-aeron_client_wrapper_test(livenessTimeoutTest LivenessTimeoutTest.cpp)
-aeron_client_native_test(livenessTimeoutTest LivenessTimeoutTest.cpp)
-
-aeron_client_wrapper_test(exceptionsTest ExceptionsTest.cpp)
-aeron_client_wrapper_test(channelUriStringBuilderTest ChannelUriStringBuilderTest.cpp)
+endif ()

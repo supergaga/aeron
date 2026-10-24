@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,37 +16,23 @@
 package io.aeron.driver;
 
 import io.aeron.ChannelUri;
+import io.aeron.driver.logging.DriverTracing;
 import io.aeron.driver.media.SendChannelEndpoint;
-import org.agrona.concurrent.AgentTerminationException;
-import org.agrona.concurrent.QueuedPipe;
+import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
 
-import static io.aeron.driver.ThreadingMode.INVOKER;
-import static io.aeron.driver.ThreadingMode.SHARED;
-
 /**
  * Proxy for offering into the Sender Thread's command queue.
  */
-final class SenderProxy
+final class SenderProxy extends CommandProxy
 {
-    private final ThreadingMode threadingMode;
-    private final QueuedPipe<Runnable> commandQueue;
-    private final AtomicCounter failCount;
     private Sender sender;
 
-    SenderProxy(
-        final ThreadingMode threadingMode, final QueuedPipe<Runnable> commandQueue, final AtomicCounter failCount)
+    SenderProxy(final OneToOneConcurrentArrayQueue<Runnable> commandQueue, final AtomicCounter failCount)
     {
-        this.threadingMode = threadingMode;
-        this.commandQueue = commandQueue;
-        this.failCount = failCount;
-    }
-
-    boolean isApplyingBackpressure()
-    {
-        return commandQueue.remainingCapacity() < 1;
+        super(commandQueue, failCount);
     }
 
     void sender(final Sender sender)
@@ -56,110 +42,50 @@ final class SenderProxy
 
     void registerSendChannelEndpoint(final SendChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            sender.onRegisterSendChannelEndpoint(channelEndpoint);
-        }
-        else
-        {
-            offer(() -> sender.onRegisterSendChannelEndpoint(channelEndpoint));
-        }
+        DriverTracing.traceSendChannelCreation(channelEndpoint.udpChannel().description());
+        offer(() -> sender.onRegisterSendChannelEndpoint(channelEndpoint));
     }
 
     void closeSendChannelEndpoint(final SendChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            sender.onCloseSendChannelEndpoint(channelEndpoint);
-        }
-        else
-        {
-            offer(() -> sender.onCloseSendChannelEndpoint(channelEndpoint));
-        }
+        DriverTracing.traceSendChannelClose(channelEndpoint.udpChannel().description());
+        offer(() -> sender.onCloseSendChannelEndpoint(channelEndpoint));
     }
 
     void removeNetworkPublication(final NetworkPublication publication)
     {
-        if (notConcurrent())
-        {
-            sender.onRemoveNetworkPublication(publication);
-        }
-        else
-        {
-            offer(() -> sender.onRemoveNetworkPublication(publication));
-        }
+        offer(() -> sender.onRemoveNetworkPublication(publication));
     }
 
     void newNetworkPublication(final NetworkPublication publication)
     {
-        if (notConcurrent())
-        {
-            sender.onNewNetworkPublication(publication);
-        }
-        else
-        {
-            offer(() -> sender.onNewNetworkPublication(publication));
-        }
+        offer(() -> sender.onNewNetworkPublication(publication));
     }
 
     void addDestination(
-        final SendChannelEndpoint channelEndpoint, final ChannelUri channelUri, final InetSocketAddress address)
+        final SendChannelEndpoint channelEndpoint,
+        final ChannelUri channelUri,
+        final InetSocketAddress address,
+        final long registrationId)
     {
-        if (notConcurrent())
-        {
-            sender.onAddDestination(channelEndpoint, channelUri, address);
-        }
-        else
-        {
-            offer(() -> sender.onAddDestination(channelEndpoint, channelUri, address));
-        }
+        offer(() -> sender.onAddDestination(channelEndpoint, channelUri, address, registrationId));
     }
 
     void removeDestination(
         final SendChannelEndpoint channelEndpoint, final ChannelUri channelUri, final InetSocketAddress address)
     {
-        if (notConcurrent())
-        {
-            sender.onRemoveDestination(channelEndpoint, channelUri, address);
-        }
-        else
-        {
-            offer(() -> sender.onRemoveDestination(channelEndpoint, channelUri, address));
-        }
+        offer(() -> sender.onRemoveDestination(channelEndpoint, channelUri, address));
+    }
+
+    void removeDestination(
+        final SendChannelEndpoint channelEndpoint, final long destinationRegistrationId)
+    {
+        offer(() -> sender.onRemoveDestination(channelEndpoint, destinationRegistrationId));
     }
 
     void onResolutionChange(
         final SendChannelEndpoint channelEndpoint, final String endpoint, final InetSocketAddress newAddress)
     {
-        if (notConcurrent())
-        {
-            sender.onResolutionChange(channelEndpoint, endpoint, newAddress);
-        }
-        else
-        {
-            offer(() -> sender.onResolutionChange(channelEndpoint, endpoint, newAddress));
-        }
-    }
-
-    private boolean notConcurrent()
-    {
-        return threadingMode == SHARED || threadingMode == INVOKER;
-    }
-
-    private void offer(final Runnable cmd)
-    {
-        while (!commandQueue.offer(cmd))
-        {
-            if (!failCount.isClosed())
-            {
-                failCount.increment();
-            }
-
-            Thread.yield();
-            if (Thread.currentThread().isInterrupted())
-            {
-                throw new AgentTerminationException("interrupted");
-            }
-        }
+        offer(() -> sender.onResolutionChange(channelEndpoint, endpoint, newAddress));
     }
 }

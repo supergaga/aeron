@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -85,8 +85,15 @@ public:
         return aeron_udp_channel_parse(strlen(uri), uri, &m_resolver, &m_channel, false);
     }
 
+    static void assert_error_message_contains(const char* text)
+    {
+        auto error = std::string(aeron_errmsg());
+        EXPECT_NE(0, error.length());
+        EXPECT_NE(std::string::npos, error.find(text));
+    }
+
 protected:
-    char m_buffer[AERON_MAX_PATH] = {};
+    char m_buffer[AERON_NETUTIL_FORMATTED_MAX_LENGTH] = {};
     aeron_udp_channel_t *m_channel = nullptr;
     aeron_name_resolver_t m_resolver = {};
 };
@@ -113,6 +120,149 @@ class UdpChannelEqualityParameterisedTest :
 {
 };
 
+TEST_F(UdpChannelTest, shouldComputeMaxMessageLength)
+{
+    EXPECT_EQ(0, aeron_compute_max_message_length(0));
+    EXPECT_EQ(4, aeron_compute_max_message_length(32));
+    EXPECT_EQ(8192, aeron_compute_max_message_length(64 * 1024));
+    EXPECT_EQ(8 * 1024 * 1024, aeron_compute_max_message_length(64 * 1024 * 1024));
+    EXPECT_EQ(AERON_FRAME_MAX_MESSAGE_LENGTH, aeron_compute_max_message_length(1024 * 1024 * 1024));
+    EXPECT_EQ(16 * 1024 * 1024, aeron_compute_max_message_length(512 * 1024 * 1024));
+}
+
+TEST_F(UdpChannelTest, shouldRejectFrameWithInsufficientLength)
+{
+    aeron_frame_header_t header = {};
+    header.frame_length = 0;
+    header.version = AERON_FRAME_HEADER_VERSION;
+
+    EXPECT_FALSE(aeron_is_frame_valid(&header, 1));
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_VERSION - 1));
+}
+
+TEST_F(UdpChannelTest, shouldRejectFrameWithNegativeFrameLength)
+{
+    aeron_frame_header_t header = {};
+    header.version = AERON_FRAME_HEADER_VERSION;
+
+    header.frame_length = -1;
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_VERSION));
+
+    header.frame_length = INT32_MIN;
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_VERSION));
+}
+
+TEST_F(UdpChannelTest, shouldRejectFrameWithInvalidVersion)
+{
+    aeron_frame_header_t header = {};
+    header.frame_length = 32;
+
+    header.version = -1;
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_VERSION));
+
+    header.version = 120;
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_VERSION));
+}
+
+class DataFrameValidationTest :
+    public testing::TestWithParam<int16_t>,
+    public UdpChannelTestBase
+{
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    DataFrameValidationTests,
+    DataFrameValidationTest,
+    testing::Values(AERON_HDR_TYPE_PAD, AERON_HDR_TYPE_DATA));
+
+TEST_P(DataFrameValidationTest, shouldValidateDataFrame)
+{
+    aeron_frame_header_t header = {};
+    header.frame_length = 0;
+    header.type = GetParam();
+    header.version = AERON_FRAME_HEADER_VERSION;
+
+    // length is below AERON_DATA_HEADER_LENGTH
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_LENGTH));
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_DATA_HEADER_LENGTH - 1));
+
+    // length is not aligned
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_DATA_HEADER_LENGTH + 1));
+
+    EXPECT_TRUE(aeron_is_frame_valid(&header, AERON_DATA_HEADER_LENGTH));
+    EXPECT_TRUE(aeron_is_frame_valid(&header, 1024));
+}
+
+class NonDataFrameValidationTest :
+    public testing::TestWithParam<std::tuple<int16_t, size_t>>,
+    public UdpChannelTestBase
+{
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    NonDataFrameValidationTests,
+    NonDataFrameValidationTest,
+    testing::Values(
+        std::make_tuple(AERON_HDR_TYPE_NAK, sizeof(aeron_nak_header_t)),
+        std::make_tuple(AERON_HDR_TYPE_SM, sizeof(aeron_status_message_header_t)),
+        std::make_tuple(AERON_HDR_TYPE_ATS_SM, sizeof(aeron_status_message_header_t)),
+        std::make_tuple(AERON_HDR_TYPE_ERR, sizeof(aeron_error_header_t)),
+        std::make_tuple(AERON_HDR_TYPE_SETUP, sizeof(aeron_setup_header_t)),
+        std::make_tuple(AERON_HDR_TYPE_RTTM, sizeof(aeron_rttm_header_t)),
+        std::make_tuple(AERON_HDR_TYPE_RES, AERON_FRAME_HEADER_LENGTH + sizeof(aeron_resolution_header_ipv4_t)),
+        std::make_tuple(AERON_HDR_TYPE_RSP_SETUP, sizeof(aeron_response_setup_header_t))));
+
+TEST_P(NonDataFrameValidationTest, shouldValidateNonDataFrames)
+{
+    aeron_frame_header_t header = {};
+    header.frame_length = 0;
+    header.type = std::get<0>(GetParam());
+    header.version = AERON_FRAME_HEADER_VERSION;
+
+    size_t min_size = std::get<1>(GetParam());
+
+    // length is below min size
+    EXPECT_FALSE(aeron_is_frame_valid(&header, AERON_FRAME_HEADER_LENGTH));
+    EXPECT_FALSE(aeron_is_frame_valid(&header, min_size - 1));
+
+    // frame_length is outside of the packet boundaries
+    header.frame_length = min_size + 1;
+    if (header.type == AERON_HDR_TYPE_SETUP)
+    {
+        // ATS copies original `frame_length` to a new frame which exceeds `packet_length`
+        EXPECT_TRUE(aeron_is_frame_valid(&header, min_size));
+    }
+    else
+    {
+        EXPECT_FALSE(aeron_is_frame_valid(&header, min_size));
+    }
+
+    header.frame_length = min_size;
+    EXPECT_TRUE(aeron_is_frame_valid(&header, min_size));
+    header.frame_length = 100;
+    EXPECT_TRUE(aeron_is_frame_valid(&header, 200));
+}
+
+class UnsupportedFrameTypeValidationTest :
+    public testing::TestWithParam<int16_t>,
+    public UdpChannelTestBase
+{
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    UnsupportedFrameTypeValidationTests,
+    UnsupportedFrameTypeValidationTest,
+    testing::Values(AERON_HDR_TYPE_ATS_DATA, AERON_HDR_TYPE_ATS_SETUP, AERON_HDR_TYPE_EXT));
+
+TEST_P(UnsupportedFrameTypeValidationTest, shouldRejectFramesWithUnsupportedType)
+{
+    aeron_frame_header_t header = {};
+    header.frame_length = 0;
+    header.type = GetParam();
+    header.version = AERON_FRAME_HEADER_VERSION;
+
+    EXPECT_FALSE(aeron_is_frame_valid(&header, 128));
+}
 
 TEST_F(UdpChannelTest, shouldParseExplicitLocalAddressAndPortFormat)
 {
@@ -257,31 +407,31 @@ TEST_F(UdpChannelTest, shouldParseIpv6AnyAddressAsInterfaceAddressForUnicast)
 
 TEST_F(UdpChannelTest, shouldCanonicalizeIpv4ForUnicast)
 {
-    ASSERT_EQ(parse_udp_channel("aeron:udp?endpoint=192.168.0.1:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-0.0.0.0:0-192.168.0.1:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?endpoint=192.168.0.1:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-0.0.0.0:0-192.168.0.1:20000");
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1|endpoint=192.168.0.1:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:0-192.168.0.1:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1|endpoint=192.168.0.1:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:0-192.168.0.1:20000");
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=192.168.0.1:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:40455-192.168.0.1:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=192.168.0.1:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:40455-192.168.0.1:20000");
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=localhost|endpoint=localhost:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:0-localhost:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=localhost|endpoint=localhost:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:0-localhost:20000");
 }
 
 TEST_F(UdpChannelTest, shouldCanonicalizeIpv6ForUnicastWithMixedAddressTypes)
 {
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=[fe80::5246:5dff:fe73:df06]:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:40455-[fe80::5246:5dff:fe73:df06]:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=[fe80::5246:5dff:fe73:df06]:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-127.0.0.1:40455-[fe80::5246:5dff:fe73:df06]:20000");
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?endpoint=192.168.0.1:40456|interface=[::1]"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-[::1]:0-192.168.0.1:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?endpoint=192.168.0.1:20000|interface=[::1]"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-[::1]:0-192.168.0.1:20000");
 }
 
 TEST_F(UdpChannelTest, shouldNotDoubleFreeParsedUdpChannel)
 {
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
     ASSERT_NE(m_channel, nullptr);
 
     ASSERT_EQ(parse_udp_channel("this should fail"), -1) << aeron_errmsg();
@@ -296,32 +446,32 @@ MATCHER_P(ReMatch, pattern, std::string("ReMatch(").append(pattern).append(")"))
 
 TEST_F(UdpChannelTest, shouldCanonicalizeForIpv4Multicast)
 {
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ("UDP-127.0.0.1:40455-224.0.1.1:40456", m_channel->canonical_form);
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1:40455|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ("UDP-127.0.0.1:40455-224.0.1.1:20000", m_channel->canonical_form);
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=localhost|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ("UDP-127.0.0.1:0-224.0.1.1:40456", m_channel->canonical_form);
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=localhost|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ("UDP-127.0.0.1:0-224.0.1.1:20000", m_channel->canonical_form);
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ("UDP-127.0.0.1:0-224.0.1.1:40456", m_channel->canonical_form);
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.1|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ("UDP-127.0.0.1:0-224.0.1.1:20000", m_channel->canonical_form);
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.0:40455/29|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
-    EXPECT_THAT((char *)m_channel->canonical_form, ReMatch("UDP-127\\.0\\.0\\.[1-7]:40455-224\\.0\\.1\\.1:40456"));
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.0:40455/29|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
+    EXPECT_THAT((char *)m_channel->canonical_form, ReMatch("UDP-127\\.0\\.0\\.[1-7]:40455-224\\.0\\.1\\.1:20000"));
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=localhost/29|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
-    EXPECT_THAT((char *)m_channel->canonical_form, ReMatch("UDP-127\\.0\\.0\\.[1-7]:0-224\\.0\\.1\\.1:40456"));
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=localhost/29|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
+    EXPECT_THAT((char *)m_channel->canonical_form, ReMatch("UDP-127\\.0\\.0\\.[1-7]:0-224\\.0\\.1\\.1:20000"));
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.0/29|endpoint=224.0.1.1:40456"), 0) << aeron_errmsg();
-    EXPECT_THAT((char *)m_channel->canonical_form, ReMatch("UDP-127\\.0\\.0\\.[1-7]:0-224\\.0\\.1\\.1:40456"));
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=127.0.0.0/29|endpoint=224.0.1.1:20000"), 0) << aeron_errmsg();
+    EXPECT_THAT((char *)m_channel->canonical_form, ReMatch("UDP-127\\.0\\.0\\.[1-7]:0-224\\.0\\.1\\.1:20000"));
 }
 
 TEST_F(UdpChannelTest, shouldCanonicalizeForIpv6Multicast)
 {
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=[::1]|endpoint=[FF01::FD]:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-[::1]:0-[ff01::fd]:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=[::1]|endpoint=[FF01::FD]:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-[::1]:0-[ff01::fd]:20000");
 
-    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=[::1]:54321/64|endpoint=[FF01::FD]:40456"), 0) << aeron_errmsg();
-    EXPECT_STREQ(m_channel->canonical_form, "UDP-[::1]:54321-[ff01::fd]:40456");
+    ASSERT_EQ(parse_udp_channel("aeron:udp?interface=[::1]:54321/64|endpoint=[FF01::FD]:20000"), 0) << aeron_errmsg();
+    EXPECT_STREQ(m_channel->canonical_form, "UDP-[::1]:54321-[ff01::fd]:20000");
 }
 
 TEST_F(UdpChannelTest, shouldUseTagInCanonicalFormIfWildcardsInUseIPv6)
@@ -438,6 +588,28 @@ TEST_F(UdpChannelTest, shouldParseSocketBufferParameters)
     ASSERT_EQ(4096u, m_channel->socket_rcvbuf_length);
 }
 
+TEST_F(UdpChannelTest, shouldParseSocketTos)
+{
+    const char *uri = "aeron:udp?interface=localhost|endpoint=224.10.9.9:40124|so-tos=184";
+    ASSERT_EQ(parse_udp_channel(uri), 0) << aeron_errmsg();
+
+    ASSERT_EQ(184, m_channel->socket_tos);
+}
+
+TEST_F(UdpChannelTest, shouldDefaultSocketTosToNullValue)
+{
+    const char *uri = "aeron:udp?interface=localhost|endpoint=224.10.9.9:40124";
+    ASSERT_EQ(parse_udp_channel(uri), 0) << aeron_errmsg();
+
+    ASSERT_EQ(AERON_NULL_VALUE, m_channel->socket_tos);
+}
+
+TEST_F(UdpChannelTest, shouldRejectSocketTosOutsideValidRange)
+{
+    ASSERT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:40124|so-tos=-1"));
+    ASSERT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:40124|so-tos=256"));
+}
+
 TEST_F(UdpChannelTest, shouldParseReceiverWindow)
 {
     const char *uri = "aeron:udp?interface=localhost|endpoint=224.10.9.9:40124|rcv-wnd=8k";
@@ -468,9 +640,14 @@ TEST_F(UdpChannelTest, shouldDefaultTimestampOffsetsToMinusOne)
 
 TEST_F(UdpChannelTest, shouldValidateOffsetsDoNotOverlap)
 {
-    EXPECT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:0|media-rcv-ts-offset=0|channel-rcv-ts-offset=7"));
-    EXPECT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:0|media-rcv-ts-offset=0|channel-snd-ts-offset=7"));
-    EXPECT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:0|channel-snd-ts-offset=0|channel-rcv-ts-offset=7"));
+    EXPECT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:0|media-rcv-ts-offset=2|channel-rcv-ts-offset=9")) << aeron_errmsg();
+    assert_error_message_contains("media-rcv-ts-offset and channel-rcv-ts-offset overlap");
+
+    EXPECT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:0|media-rcv-ts-offset=14|channel-snd-ts-offset=19")) << aeron_errmsg();
+    assert_error_message_contains("media-rcv-ts-offset and channel-snd-ts-offset overlap");
+
+    EXPECT_EQ(-1, parse_udp_channel("aeron:udp?endpoint=localhost:0|media-rcv-ts-offset=reserved|channel-snd-ts-offset=3|channel-rcv-ts-offset=10"));
+    assert_error_message_contains("channel-rcv-ts-offset and channel-snd-ts-offset overlap");
 }
 
 TEST_P(UdpChannelNamesParameterisedTest, DISABLED_shouldBeValid)
@@ -545,8 +722,8 @@ INSTANTIATE_TEST_SUITE_P(
             "192.168.1.1:40124", "192.168.1.1", "192.168.1.2:40192", "192.168.1.2",
             "UDP-192.168.1.2:40192-192.168.1.1:40124"),
         std::make_tuple(
-            "[fe80::5246:5dff:fe73:df06]:40456", "[fe80::5246:5dff:fe73:df06]", (const char *)NULL, (const char *)NULL,
-            "UDP-127.0.0.1:0-[fe80::5246:5dff:fe73:df06]:40456")));
+            "[fe80::5246:5dff:fe73:df06]:20000", "[fe80::5246:5dff:fe73:df06]", (const char *)NULL, (const char *)NULL,
+            "UDP-127.0.0.1:0-[fe80::5246:5dff:fe73:df06]:20000")));
 
 TEST_P(UdpChannelEqualityParameterisedTest, shouldMatch)
 {

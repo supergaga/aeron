@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -240,57 +240,6 @@ TEST_P(ImageTest, shouldBoundedControlledPoll)
 
         POLL_FOR(0 < (*images)[0]->boundedControlledPoll(mockHandler.AsStdFunction(), 100000, 1), invoker);
         POLL_FOR(0 < (*images)[1]->boundedControlledPoll(mockHandler.AsStdFunction(), 100000, 1), invoker);
-    }
-
-    invoker.invoke();
-}
-
-TEST_P(ImageTest, shouldControlledPeek)
-{
-    buffer_t buf;
-    AtomicBuffer buffer(buf);
-    std::int32_t streamId = 982375;
-    ChannelUriStringBuilder uriBuilder;
-    const std::string channel = setParameters(std::get<0>(GetParam()), std::get<1>(GetParam()), uriBuilder)
-        .build();
-
-    Context ctx;
-    ctx.useConductorAgentInvoker(true);
-
-    std::shared_ptr<Aeron> aeron = Aeron::connect(ctx);
-    std::int64_t subId = aeron->addSubscription(channel, streamId);
-    std::int64_t pubId1 = aeron->addExclusivePublication(channel, streamId);
-    std::int64_t pubId2 = aeron->addExclusivePublication(channel, streamId);
-    AgentInvoker<ClientConductor>& invoker = aeron->conductorAgentInvoker();
-
-    MockFunction<ControlledPollAction(
-        concurrent::AtomicBuffer &buffer,
-        util::index_t offset,
-        util::index_t length,
-        concurrent::logbuffer::Header &header)> mockHandler;
-
-    EXPECT_CALL(mockHandler, Call(_, _, _, _)).Times(4).WillRepeatedly(Return(ControlledPollAction::CONTINUE));
-
-    {
-        POLL_FOR_NON_NULL(sub, aeron->findSubscription(subId), invoker);
-        POLL_FOR_NON_NULL(pub1, aeron->findExclusivePublication(pubId1), invoker);
-        POLL_FOR_NON_NULL(pub2, aeron->findExclusivePublication(pubId2), invoker);
-        POLL_FOR(pub1->isConnected() && pub2->isConnected() && sub->isConnected(), invoker);
-
-        std::string message = "hello world!";
-        buffer.putString(0, message);
-        POLL_FOR(0 < pub1->offer(buffer), invoker);
-        POLL_FOR(0 < pub2->offer(buffer), invoker);
-        POLL_FOR(2 == sub->imageCount(), invoker);
-
-        const std::shared_ptr<Image> image1 = sub->imageBySessionId(pub1->sessionId());
-        const std::shared_ptr<Image> image2 = sub->imageBySessionId(pub2->sessionId());
-
-        POLL_FOR(pub1->position() == image1->controlledPeek(0, mockHandler.AsStdFunction(), 100000), invoker);
-        POLL_FOR(pub2->position() == image2->controlledPeek(0, mockHandler.AsStdFunction(), 100000), invoker);
-
-        POLL_FOR(pub1->position() == image1->controlledPeek(0, mockHandler.AsStdFunction(), 100000), invoker);
-        POLL_FOR(pub2->position() == image2->controlledPeek(0, mockHandler.AsStdFunction(), 100000), invoker);
     }
 
     invoker.invoke();

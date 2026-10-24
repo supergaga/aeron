@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
 import org.agrona.collections.MutableReference;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -36,16 +37,22 @@ class ReentrantClientTest
     @RegisterExtension
     final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final TestMediaDriver mediaDriver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Tests::onError)
-        .dirDeleteOnStart(true),
+    private TestMediaDriver mediaDriver;
+
+    @BeforeEach
+    void setUp()
+    {
+        mediaDriver = TestMediaDriver.launch(new MediaDriver.Context()
+            .errorHandler(Tests::onError)
+            .dirDeleteOnStart(true),
         testWatcher);
+        testWatcher.dataCollector().add(mediaDriver.context().aeronDirectory());
+    }
 
     @AfterEach
     void after()
     {
         CloseHelper.close(mediaDriver);
-        mediaDriver.context().deleteDirectory();
     }
 
     @Test

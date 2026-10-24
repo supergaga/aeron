@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@
 #include <mutex>
 
 #include "util/Exceptions.h"
-#include "concurrent/AgentRunner.h"
 #include "concurrent/AgentInvoker.h"
 #include "Publication.h"
 #include "ExclusivePublication.h"
@@ -64,12 +63,15 @@ public:
      * Create an Aeron instance and connect to the media driver.
      * <p>
      * Threads required for interacting with the media driver are created and managed within the Aeron instance.
+     * <p>
+     * Note that the ownership of the Context object is passed over to the Aeron instance and the context object is
+     * invalid after calling this constructor.
      *
      * @param context for configuration of the client.
      */
     explicit Aeron(Context &context) :
         m_context(context.conclude()),
-        m_aeron(Aeron::init_aeron(m_context)),
+        m_aeron(Aeron::init_aeron(m_context, &m_aeron_context)),
         m_countersReader(aeron_counters_reader(m_aeron)),
         m_clientConductor(m_aeron),
         m_conductorInvoker(m_clientConductor, m_context.m_exceptionHandler)
@@ -77,14 +79,34 @@ public:
         aeron_start(m_aeron);
     }
 
+    explicit Aeron(aeron_t *aeron) :
+        m_aeron_context(aeron_context(aeron)),
+        m_aeron(aeron),
+        m_countersReader(aeron_counters_reader(m_aeron)),
+        m_clientConductor(m_aeron),
+        m_conductorInvoker(m_clientConductor, m_context.m_exceptionHandler)
+    {
+    }
+
     ~Aeron()
     {
+        aeron_on_close_client_pair_t closePair = {emptyCallback, nullptr};
+        aeron_add_close_handler(m_aeron, &closePair);
         aeron_close(m_aeron);
-        aeron_context_close(m_context.m_context);
+        aeron_context_close(m_aeron_context);
+
+        for (const std::pair<const std::int64_t, AsyncAddSubscription *>& e : m_pendingSubscriptions)
+        {
+            delete e.second;
+        }
 
         m_availableCounterHandlers.clear();
         m_unavailableCounterHandlers.clear();
         m_closeClientHandlers.clear();
+        m_pendingCounters.clear();
+        m_pendingPublications.clear();
+        m_pendingExclusivePublications.clear();
+        m_pendingSubscriptions.clear();
     }
 
     /**
@@ -107,7 +129,9 @@ public:
      */
     inline static std::shared_ptr<Aeron> connect(Context &context)
     {
-        return std::make_shared<Aeron>(context);
+        auto aeron = std::make_shared<Aeron>(context);
+        aeron->m_self = aeron;
+        return aeron;
     }
 
     /**
@@ -120,8 +144,7 @@ public:
     inline static std::shared_ptr<Aeron> connect()
     {
         Context ctx;
-
-        return std::make_shared<Aeron>(ctx);
+        return connect(ctx);
     }
 
     /**
@@ -169,16 +192,24 @@ public:
         auto search = m_pendingPublications.find(registrationId);
         if (search == m_pendingPublications.end())
         {
-            throw IllegalArgumentException("Unknown registration id", SOURCEINFO);
+            throw IllegalArgumentException(
+                std::string("Unknown registration id: ").append(std::to_string(registrationId)), SOURCEINFO, EINVAL);
         }
 
-        std::shared_ptr<Publication> publication = findPublication(search->second);
-        if (nullptr != publication)
+        try
+        {
+            std::shared_ptr<Publication> publication = findPublication(search->second);
+            if (nullptr != publication)
+            {
+                m_pendingPublications.erase(registrationId);
+            }
+            return publication;
+        }
+        catch (...)
         {
             m_pendingPublications.erase(registrationId);
+            throw;
         }
-
-        return publication;
     }
 
     /**
@@ -233,8 +264,22 @@ public:
         }
         else
         {
-            return std::make_shared<Publication>(m_aeron, publication);
+            return std::make_shared<Publication>(m_self.lock(), m_aeron, publication);
         }
+    }
+
+    /**
+     * Gets the registration id for addition of the publication. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddPublication may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addPublication used to check for completion.
+     * @return registration id for the publication.
+     */
+    inline std::int64_t addPublicationAsyncGetRegistrationId(AsyncAddPublication *addPublication)
+    {
+        return aeron_async_add_publication_get_registration_id(addPublication);
     }
 
     /**
@@ -247,7 +292,7 @@ public:
     inline std::int64_t addExclusivePublication(const std::string &channel, std::int32_t streamId)
     {
         AsyncAddExclusivePublication *addExclusivePublication = addExclusivePublicationAsync(channel, streamId);
-        std::int64_t registrationId = aeron_async_add_exclusive_exclusive_publication_get_registration_id(
+        std::int64_t registrationId = aeron_async_add_exclusive_publication_get_registration_id(
             addExclusivePublication);
 
         std::lock_guard<std::recursive_mutex> lock(m_adminLock);
@@ -281,16 +326,24 @@ public:
         auto search = m_pendingExclusivePublications.find(registrationId);
         if (search == m_pendingExclusivePublications.end())
         {
-            throw IllegalArgumentException("Unknown registration id", SOURCEINFO);
+            throw IllegalArgumentException(
+                std::string("Unknown registration id: ").append(std::to_string(registrationId)), SOURCEINFO, EINVAL);
         }
 
-        std::shared_ptr<ExclusivePublication> publication = findExclusivePublication(search->second);
-        if (nullptr != publication)
+        try
+        {
+            std::shared_ptr<ExclusivePublication> publication = findExclusivePublication(search->second);
+            if (nullptr != publication)
+            {
+                m_pendingExclusivePublications.erase(registrationId);
+            }
+            return publication;
+        }
+        catch (...)
         {
             m_pendingExclusivePublications.erase(registrationId);
+            throw;
         }
-
-        return publication;
     }
 
     /**
@@ -346,8 +399,22 @@ public:
         }
         else
         {
-            return std::make_shared<ExclusivePublication>(m_aeron, publication);
+            return std::make_shared<ExclusivePublication>(m_self.lock(), m_aeron, publication);
         }
+    }
+
+    /**
+     * Gets the registration id for addition of the exclusive publication. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddExclusivePublication may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addPublication used to check for completion.
+     * @return registration id for the exclusive publication.
+     */
+    inline std::int64_t addExclusivePublicationAsyncGetRegistrationId(AsyncAddExclusivePublication *addPublication)
+    {
+        return aeron_async_add_exclusive_publication_get_registration_id(addPublication);
     }
 
     /**
@@ -417,16 +484,26 @@ public:
         auto search = m_pendingSubscriptions.find(registrationId);
         if (search == m_pendingSubscriptions.end())
         {
-            throw IllegalArgumentException("Unknown registration id", SOURCEINFO);
+            throw IllegalArgumentException(
+                std::string("Unknown registration id: ").append(std::to_string(registrationId)), SOURCEINFO, EINVAL);
         }
 
-        std::shared_ptr<Subscription> subscription = findSubscription(search->second);
-        if (nullptr != subscription)
+        AsyncAddSubscription* addSubscription = search->second;
+        try
+        {
+            std::shared_ptr<Subscription> subscription = findSubscription(addSubscription);
+            if (nullptr != subscription)
+            {
+                m_pendingSubscriptions.erase(registrationId);
+            }
+            return subscription;
+        }
+        catch (...)
         {
             m_pendingSubscriptions.erase(registrationId);
+            delete addSubscription;
+            throw;
         }
-
-        return subscription;
     }
 
     /**
@@ -447,25 +524,33 @@ public:
         const on_unavailable_image_t &onUnavailableImageHandler)
     {
         auto *addSubscription = new AsyncAddSubscription(onAvailableImageHandler, onUnavailableImageHandler);
-        void *availableClientd =
-            const_cast<void *>(reinterpret_cast<const void *>(&addSubscription->m_onAvailableImage));
-        void *unavailableClientd =
-            const_cast<void *>(reinterpret_cast<const void *>(&addSubscription->m_onUnavailableImage));
-
-        if (aeron_async_add_subscription(
-            &addSubscription->m_async,
-            m_aeron,
-            channel.c_str(),
-            streamId,
-            onAvailableImageCallback,
-            availableClientd,
-            onUnavailableImageCallback,
-            unavailableClientd) < 0)
+        try
         {
-            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
-        }
+            void *availableClientd =
+                const_cast<void *>(reinterpret_cast<const void *>(&addSubscription->m_onAvailableImage));
+            void *unavailableClientd =
+                const_cast<void *>(reinterpret_cast<const void *>(&addSubscription->m_onUnavailableImage));
 
-        return addSubscription;
+            if (aeron_async_add_subscription(
+                &addSubscription->m_async,
+                m_aeron,
+                channel.c_str(),
+                streamId,
+                onAvailableImageCallback,
+                availableClientd,
+                onUnavailableImageCallback,
+                unavailableClientd) < 0)
+            {
+                AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+            }
+
+            return addSubscription;
+        }
+        catch (...)
+        {
+            delete addSubscription;
+            throw;
+        }
     }
 
     /**
@@ -506,6 +591,7 @@ public:
         int result = aeron_async_add_subscription_poll(&subscription, addSubscription->m_async);
         if (result < 0)
         {
+            addSubscription->m_async = nullptr;
             AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
         }
         else if (0 == result)
@@ -515,8 +601,22 @@ public:
         else
         {
             addSubscription->m_async = nullptr;
-            return std::make_shared<Subscription>(m_aeron, subscription, addSubscription);
+            return std::make_shared<Subscription>(m_self.lock(), m_aeron, subscription, addSubscription);
         }
+    }
+
+    /**
+     * Gets the registration id for addition of the subscription. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddSubscription may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addSubscription used to check for completion.
+     * @return registration id for the subscription.
+     */
+    inline std::int64_t addSubscriptionAsyncGetRegistrationId(AsyncAddSubscription *addSubscription)
+    {
+        return aeron_async_add_subscription_get_registration_id(addSubscription->m_async);
     }
 
     /**
@@ -571,6 +671,7 @@ public:
      * - If the media driver has returned an error, this method will throw the error returned.
      *
      * @see Aeron::addCounter
+     * @see Aeron::addStaticCounter
      *
      * @param registrationId of the Counter returned by Aeron::addCounter
      * @return Counter associated with the registrationId
@@ -582,17 +683,24 @@ public:
         auto search = m_pendingCounters.find(registrationId);
         if (search == m_pendingCounters.end())
         {
-            throw IllegalArgumentException("Unknown registration id", SOURCEINFO);
+            throw IllegalArgumentException(
+                std::string("Unknown registration id: ").append(std::to_string(registrationId)), SOURCEINFO, EINVAL);
         }
 
-        std::shared_ptr<Counter> counter = findCounter(search->second);
-
-        if (nullptr != counter)
+        try
+        {
+            std::shared_ptr<Counter> counter = findCounter(search->second);
+            if (nullptr != counter)
+            {
+                m_pendingCounters.erase(registrationId);
+            }
+            return counter;
+        }
+        catch (...)
         {
             m_pendingCounters.erase(registrationId);
+            throw;
         }
-
-        return counter;
     }
 
     /**
@@ -633,6 +741,7 @@ public:
      * - If the media driver has returned an error, this method will throw the error returned.
      *
      * @see Aeron::addCounter
+     * @see Aeron::addStaticCounter
      *
      * @param registrationId of the Counter returned by Aeron::addCounter
      * @return Counter associated with the registrationId
@@ -640,7 +749,6 @@ public:
     inline std::shared_ptr<Counter> findCounter(AsyncAddCounter *addCounter)
     {
         aeron_counter_t *counter;
-        std::int64_t registrationId = aeron_async_add_counter_get_registration_id(addCounter);
         int result = aeron_async_add_counter_poll(&counter, addCounter);
         if (result < 0)
         {
@@ -652,8 +760,82 @@ public:
         }
         else
         {
-            return std::make_shared<Counter>(counter, m_countersReader, registrationId);
+            aeron_counter_constants_t counter_constants = {};
+            aeron_counter_constants(counter, &counter_constants);
+            return std::make_shared<Counter>(
+                m_self.lock(), m_countersReader, counter, counter_constants.registration_id);
         }
+    }
+
+    /**
+     * Gets the registration id for addition of the counter. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddCounter may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addCounter used to check for completion.
+     * @return registration id for the counter.
+     */
+    inline std::int64_t addCounterAsyncGetRegistrationId(AsyncAddCounter *addCounter)
+    {
+        return aeron_async_add_counter_get_registration_id(addCounter);
+    }
+
+    /**
+     * Allocates or returns an existing static counter instance using specified <code>typeId</code> and
+     * <code>registrationId</code> pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * <code>Aeron</code> instance, i.e. won't be freed when this instance is closed or times out.
+     *
+     * @param typeId         for the counter.
+     * @param keyBuffer      containing the optional key for the counter.
+     * @param keyLength      of the key in the keyBuffer.
+     * @param label          for the counter.
+     * @param registrationId that uniquely identifies the static counter for a given <code>typeId</code>
+     * @return correlation id to resolve the AsyncAddCounter for the <code>Counter</code>.
+     */
+    std::int64_t addStaticCounter(
+        std::int32_t typeId,
+        const std::uint8_t *keyBuffer,
+        std::size_t keyLength,
+        const std::string &label,
+        std::int64_t registrationId)
+    {
+        AsyncAddCounter *addCounter = addStaticCounterAsync(typeId, keyBuffer, keyLength, label, registrationId);
+        std::int64_t correlationId = aeron_async_add_counter_get_registration_id(addCounter);
+
+        std::lock_guard<std::recursive_mutex> lock(m_adminLock);
+
+        m_pendingCounters[correlationId] = addCounter;
+        return correlationId;
+    }
+
+    /**
+     * Allocates or returns an existing static counter instance using specified <code>typeId</code> and
+     * <code>registrationId</code> pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * <code>Aeron</code> instance, i.e. won't be freed when this instance is closed or times out.
+     *
+     * @param typeId         for the counter.
+     * @param keyBuffer      containing the optional key for the counter.
+     * @param keyLength      of the key in the keyBuffer.
+     * @param label          for the counter.
+     * @param registrationId that uniquely identifies the static counter for a given <code>typeId</code>.
+     * @return AsyncAddCounter to find the counter.
+     */
+    inline AsyncAddCounter *addStaticCounterAsync(
+        std::int32_t typeId,
+        const std::uint8_t *keyBuffer,
+        std::size_t keyLength,
+        const std::string &label,
+        std::int64_t registrationId)
+    {
+        aeron_async_add_counter_t *addCounter;
+        if (aeron_async_add_static_counter(
+            &addCounter, m_aeron, typeId, keyBuffer, keyLength, label.c_str(), label.length(), registrationId) < 0)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
+
+        return addCounter;
     }
 
     /**
@@ -669,7 +851,7 @@ public:
         auto handler_ptr = std::make_shared<on_available_counter_t>(handler);
 
         std::int64_t registrationId = aeron_next_correlation_id(m_aeron);
-        m_availableCounterHandlers.emplace_back(std::make_pair(registrationId, handler_ptr));
+        m_availableCounterHandlers.emplace_back(registrationId, handler_ptr);
         auto &storedHandler = m_availableCounterHandlers.back();
 
         aeron_on_available_counter_pair_t counterPair;
@@ -731,7 +913,7 @@ public:
         auto handler_ptr = std::make_shared<on_unavailable_counter_t>(handler);
 
         std::int64_t registrationId = aeron_next_correlation_id(m_aeron);
-        m_unavailableCounterHandlers.emplace_back(std::make_pair(registrationId, handler_ptr));
+        m_unavailableCounterHandlers.emplace_back(registrationId, handler_ptr);
         auto &storedHandler = m_unavailableCounterHandlers.back();
 
         aeron_on_unavailable_counter_pair_t counterPair;
@@ -793,7 +975,7 @@ public:
         std::shared_ptr<on_close_client_t> handler_ptr = std::make_shared<on_close_client_t>(handler);
 
         std::int64_t registrationId = aeron_next_correlation_id(m_aeron);
-        m_closeClientHandlers.emplace_back(std::make_pair(registrationId, handler_ptr));
+        m_closeClientHandlers.emplace_back(registrationId, handler_ptr);
 
         aeron_on_close_client_pair_t counterPair;
         counterPair.handler = onCloseClientCallback;
@@ -850,7 +1032,7 @@ public:
     {
         if (!usesAgentInvoker())
         {
-            throw IllegalStateException("Not configured to use agent invoker", SOURCEINFO);
+            throw IllegalStateException("Not configured to use agent invoker", SOURCEINFO, EINVAL);
         }
 
         m_conductorInvoker.start();
@@ -864,7 +1046,7 @@ public:
      */
     inline bool usesAgentInvoker() const
     {
-        return aeron_context_get_use_conductor_agent_invoker(m_context.m_context);
+        return m_context.m_useConductorAgentInvoker;
     }
 
     /**
@@ -903,6 +1085,16 @@ public:
     }
 
     /**
+     * Get the underlying C Aeron client. Applications should not need to use this method.
+     *
+     * @return the underlying C Aeron client.
+     */
+    inline aeron_t *aeron() const
+    {
+        return m_aeron;
+    }
+
+    /**
      * Return the static version and build string for the binary library.
      *
      * @return static version and build string for the binary library.
@@ -915,6 +1107,7 @@ public:
 
 private:
     Context m_context;
+    aeron_context_t *m_aeron_context;
     aeron_t *m_aeron = nullptr;
     CountersReader m_countersReader;
     std::unordered_map<std::int64_t, AsyncAddPublication *> m_pendingPublications;
@@ -927,53 +1120,73 @@ private:
     std::recursive_mutex m_adminLock;
     ClientConductor m_clientConductor;
     AgentInvoker<ClientConductor> m_conductorInvoker;
+    std::weak_ptr<Aeron> m_self; // used to ensure destruction order
 
-    static aeron_t *init_aeron(Context &context)
+    static aeron_t *init_aeron(Context &context, aeron_context_t **aeron_context)
     {
+        aeron_context_t *_context;
+        aeron_context_init(&_context);
+
         aeron_t *aeron;
-        context.attachCallbacksToContext();
-        if (aeron_init(&aeron, context.m_context) < 0)
+        try
         {
+            context.attachCallbacksToContext(_context);
+        }
+        catch (IllegalArgumentException&)
+        {
+            aeron_context_close(_context);
+            throw;
+        }
+
+        if (aeron_init(&aeron, _context) < 0)
+        {
+            aeron_context_close(_context);
             AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
         }
+
+        *aeron_context = _context;
 
         return aeron;
     }
 
-    static void onAvailableImageCallback(void *clientd, aeron_subscription_t *subscription, aeron_image_t *image)
+    static void onAvailableImageCallback(void *clientd, aeron_subscription_t *subscription, aeron_image_t *image) noexcept
     {
-        on_available_image_t &callback = *reinterpret_cast<on_available_image_t *>(clientd);
+        const on_available_image_t &callback = *static_cast<on_available_image_t *>(clientd);
         Image imageWrapper(subscription, image);
         callback(imageWrapper);
     }
 
-    static void onUnavailableImageCallback(void *clientd, aeron_subscription_t *subscription, aeron_image_t *image)
+    static void onUnavailableImageCallback(void *clientd, aeron_subscription_t *subscription, aeron_image_t *image) noexcept
     {
-        on_unavailable_image_t &callback = *reinterpret_cast<on_unavailable_image_t *>(clientd);
+        const on_unavailable_image_t &callback = *static_cast<on_unavailable_image_t *>(clientd);
         Image imageWrapper(subscription, image);
         callback(imageWrapper);
     }
 
     static void onAvailableCounterCallback(
-        void *clientd, aeron_counters_reader_t *counters_reader, std::int64_t registration_id, std::int32_t counter_id)
+        void *clientd, aeron_counters_reader_t *counters_reader, std::int64_t registration_id, std::int32_t counter_id) noexcept
     {
-        CountersReader reader = CountersReader(counters_reader);
-        on_available_counter_t &callback = *reinterpret_cast<on_available_counter_t *>(clientd);
+        auto reader = CountersReader(counters_reader);
+        const on_available_counter_t &callback = *static_cast<on_available_counter_t *>(clientd);
         callback(reader, registration_id, counter_id);
     }
 
     static void onUnavailableCounterCallback(
-        void *clientd, aeron_counters_reader_t *counters_reader, std::int64_t registration_id, std::int32_t counter_id)
+        void *clientd, aeron_counters_reader_t *counters_reader, std::int64_t registration_id, std::int32_t counter_id) noexcept
     {
-        CountersReader reader = CountersReader(counters_reader);
-        on_unavailable_counter_t &callback = *reinterpret_cast<on_unavailable_counter_t *>(clientd);
+        auto reader = CountersReader(counters_reader);
+        const on_unavailable_counter_t &callback = *static_cast<on_unavailable_counter_t *>(clientd);
         callback(reader, registration_id, counter_id);
     }
 
-    static void onCloseClientCallback(void *clientd)
+    static void onCloseClientCallback(void *clientd) noexcept
     {
-        on_close_client_t &callback = *reinterpret_cast<on_close_client_t *>(clientd);
+        const on_close_client_t &callback = *static_cast<on_close_client_t *>(clientd);
         callback();
+    }
+
+    static void emptyCallback(void * /* clientd */) noexcept
+    {
     }
 };
 }

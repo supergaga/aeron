@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ public class SetControllableIdleStrategy
             if (null != statusIndicator)
             {
                 final int status = Integer.parseInt(args[0]);
-                statusIndicator.setOrdered(status);
+                statusIndicator.setRelease(status);
                 System.out.println("Set ControllableIdleStrategy status to " + status);
             }
             else

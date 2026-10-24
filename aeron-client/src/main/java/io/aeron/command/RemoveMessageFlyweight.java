@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,10 +38,19 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  *  +---------------------------------------------------------------+
  * </pre>
  */
-public class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
+public abstract class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
 {
-    private static final int REGISTRATION_ID_OFFSET = CORRELATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
-    private static final int MINIMUM_LENGTH = REGISTRATION_ID_OFFSET + SIZE_OF_LONG;
+    static final int REGISTRATION_ID_FIELD_OFFSET = CORRELATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
+    private static final int MINIMUM_LENGTH = REGISTRATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
+
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public RemoveMessageFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
@@ -64,7 +73,7 @@ public class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
      */
     public long registrationId()
     {
-        return buffer.getLong(offset + REGISTRATION_ID_OFFSET);
+        return buffer.getLong(offset + REGISTRATION_ID_FIELD_OFFSET);
     }
 
     /**
@@ -75,7 +84,7 @@ public class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
      */
     public RemoveMessageFlyweight registrationId(final long registrationId)
     {
-        buffer.putLong(offset + REGISTRATION_ID_OFFSET, registrationId);
+        buffer.putLong(offset + REGISTRATION_ID_FIELD_OFFSET, registrationId);
 
         return this;
     }

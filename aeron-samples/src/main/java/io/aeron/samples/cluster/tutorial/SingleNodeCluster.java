@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ package io.aeron.samples.cluster.tutorial;
 import io.aeron.CommonContext;
 import io.aeron.ExclusivePublication;
 import io.aeron.Image;
-import io.aeron.archive.Archive;
-import io.aeron.archive.ArchiveThreadingMode;
-import io.aeron.cluster.*;
+import io.aeron.cluster.ClusterControl;
+import io.aeron.cluster.ClusteredMediaDriver;
+import io.aeron.cluster.ConsensusModule;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.EgressListener;
 import io.aeron.cluster.codecs.CloseReason;
@@ -32,6 +32,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
+import io.aeron.samples.cluster.ClusterConfig;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
@@ -41,8 +42,10 @@ import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.console.ContinueBarrier;
 
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
+import static io.aeron.samples.cluster.ClusterConfig.*;
 import static org.agrona.BitUtil.SIZE_OF_INT;
 
 /**
@@ -53,10 +56,13 @@ import static org.agrona.BitUtil.SIZE_OF_INT;
  */
 public final class SingleNodeCluster implements AutoCloseable
 {
+    private static final int SEND_ATTEMPTS = 3;
     private static final int MESSAGE_ID = 1;
     private static final int TIMER_ID = 2;
+    private static final int PORT_BASE = 9000;
 
     // cluster side
+    private final ClusterConfig config;
     private final ClusteredMediaDriver clusteredMediaDriver;
     private final ClusteredServiceContainer container;
 
@@ -70,6 +76,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onMessage(
             final long clusterSessionId,
             final long timestamp,
@@ -84,6 +91,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onNewLeader(
             final long clusterSessionId,
             final long leadershipTermId,
@@ -104,6 +112,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onStart(final Cluster cluster, final Image snapshotImage)
         {
             this.cluster = cluster;
@@ -128,6 +137,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onSessionOpen(final ClientSession session, final long timestamp)
         {
             System.out.println("onSessionOpen " + session.id());
@@ -136,6 +146,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onSessionClose(final ClientSession session, final long timestamp, final CloseReason closeReason)
         {
             System.out.println("onSessionClose " + session.id() + " " + closeReason);
@@ -144,6 +155,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onSessionMessage(
             final ClientSession session,
             final long timestamp,
@@ -166,17 +178,14 @@ public final class SingleNodeCluster implements AutoCloseable
             }
             else
             {
-                idleStrategy.reset();
-                while (session.offer(buffer, offset, length) < 0)
-                {
-                    idleStrategy.idle();
-                }
+                echoMessage(session, buffer, offset, length);
             }
         }
 
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onTimerEvent(final long correlationId, final long timestamp)
         {
             System.out.println("onTimerEvent " + correlationId);
@@ -184,20 +193,13 @@ public final class SingleNodeCluster implements AutoCloseable
             final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer();
             buffer.putInt(0, 1);
 
-            cluster.forEachClientSession(
-                (clientSession) ->
-                {
-                    idleStrategy.reset();
-                    while (clientSession.offer(buffer, 0, SIZE_OF_INT) < 0)
-                    {
-                        idleStrategy.idle();
-                    }
-                });
+            cluster.forEachClientSession((clientSession) -> echoMessage(clientSession, buffer, 0, SIZE_OF_INT));
         }
 
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
         {
             System.out.println("onTakeSnapshot messageCount=" + messageCount);
@@ -213,6 +215,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onRoleChange(final Cluster.Role newRole)
         {
             System.out.println("onRoleChange " + newRole);
@@ -221,6 +224,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onTerminate(final Cluster cluster)
         {
         }
@@ -228,6 +232,7 @@ public final class SingleNodeCluster implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @Override
         public void onNewLeadershipTermEvent(
             final long leadershipTermId,
             final long logPosition,
@@ -245,6 +250,23 @@ public final class SingleNodeCluster implements AutoCloseable
         {
             return ((long)cluster.context().serviceId()) << 56 | correlationId;
         }
+
+        private void echoMessage(
+            final ClientSession session, final DirectBuffer buffer, final int offset, final int length)
+        {
+            idleStrategy.reset();
+            int attempts = SEND_ATTEMPTS;
+            do
+            {
+                final long result = session.offer(buffer, offset, length);
+                if (result > 0)
+                {
+                    return;
+                }
+                idleStrategy.idle();
+            }
+            while (--attempts > 0);
+        }
     }
 
     /**
@@ -255,43 +277,28 @@ public final class SingleNodeCluster implements AutoCloseable
      */
     public SingleNodeCluster(final ClusteredService externalService, final boolean isCleanStart)
     {
-        final MediaDriver.Context mediaDriverContext = new MediaDriver.Context();
-        final ConsensusModule.Context consensusModuleContext = new ConsensusModule.Context();
-        final Archive.Context archiveContext = new Archive.Context();
-        final ClusteredServiceContainer.Context serviceContainerContext = new ClusteredServiceContainer.Context();
-
         final ClusteredService service = null == externalService ? new SingleNodeCluster.Service() : externalService;
+        config = ClusterConfig.create(0, Collections.singletonList("localhost"), PORT_BASE, service);
 
-        mediaDriverContext
-            .threadingMode(ThreadingMode.SHARED)
-            .errorHandler(Throwable::printStackTrace)
-            .dirDeleteOnShutdown(true)
-            .dirDeleteOnStart(true);
-
-        archiveContext
-            .recordingEventsEnabled(false)
-            .threadingMode(ArchiveThreadingMode.SHARED)
-            .deleteArchiveOnStart(isCleanStart);
-
-        consensusModuleContext
-            .errorHandler(Throwable::printStackTrace)
-            .deleteDirOnStart(isCleanStart);
-
-        serviceContainerContext
-            .clusteredService(service)
-            .errorHandler(Throwable::printStackTrace);
+        config.mediaDriverContext().dirDeleteOnStart(true);
+        config.archiveContext().deleteArchiveOnStart(isCleanStart);
+        config.consensusModuleContext()
+            .deleteDirOnStart(isCleanStart)
+            .ingressChannel("aeron:udp?endpoint=" + config.ingressHostname() + ":" +
+            calculatePort(config.memberId(), PORT_BASE, CLIENT_FACING_PORT_OFFSET));
 
         clusteredMediaDriver = ClusteredMediaDriver.launch(
-            mediaDriverContext,
-            archiveContext,
-            consensusModuleContext);
+            config.mediaDriverContext(),
+            config.archiveContext(),
+            config.consensusModuleContext());
 
-        container = ClusteredServiceContainer.launch(serviceContainerContext);
+        container = ClusteredServiceContainer.launch(config.clusteredServiceContext());
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         final ErrorHandler errorHandler = clusteredMediaDriver.mediaDriver().context().errorHandler();
@@ -318,7 +325,10 @@ public final class SingleNodeCluster implements AutoCloseable
             new AeronCluster.Context()
                 .errorHandler(Throwable::printStackTrace)
                 .egressListener(egressMessageListener)
-                .aeronDirectoryName(aeronDirectoryName));
+                .aeronDirectoryName(aeronDirectoryName)
+                .ingressChannel("aeron:udp")
+                .ingressEndpoints(ingressEndpoints(
+                    Collections.singletonList(config.ingressHostname()), PORT_BASE, CLIENT_FACING_PORT_OFFSET)));
     }
 
     void sendMessageToCluster(final int id, final int messageLength)

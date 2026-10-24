@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,35 +13,63 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package io.aeron.test;
 
 import io.aeron.Aeron;
+import io.aeron.Counter;
 import io.aeron.Publication;
 import io.aeron.Subscription;
 import io.aeron.archive.status.RecordingPos;
+import io.aeron.driver.Configuration;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.RegistrationException;
 import io.aeron.exceptions.TimeoutException;
+import org.agrona.DirectBuffer;
 import org.agrona.LangUtil;
+import org.agrona.SystemUtil;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.SleepingMillisIdleStrategy;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.status.AtomicCounter;
+import org.agrona.concurrent.status.CountersManager;
 import org.agrona.concurrent.status.CountersReader;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.TestWatcher;
+import org.mockito.stubbing.Answer;
 
 import javax.management.InstanceNotFoundException;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
+import java.io.IOException;
+import java.io.PrintStream;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.file.FileVisitResult;
+import java.nio.file.FileVisitor;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.IntConsumer;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static io.aeron.Aeron.NULL_VALUE;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.doAnswer;
 
 /**
@@ -51,6 +79,13 @@ public class Tests
 {
     public static final IdleStrategy SLEEP_1_MS = new SleepingMillisIdleStrategy(1);
     private static final String LOGGING_MBEAN_NAME = "io.aeron:type=logging";
+    private static final ClassValue<Map<String, Field>> CLASS_FIELDS = new ClassValue<>()
+    {
+        protected Map<String, Field> computeValue(final Class<?> type)
+        {
+            return new HashMap<>();
+        }
+    };
 
     /**
      * Set a private field in a class for testing.
@@ -63,9 +98,7 @@ public class Tests
     {
         try
         {
-            final Field field = instance.getClass().getDeclaredField(fieldName);
-            field.setAccessible(true);
-            field.set(instance, value);
+            resolveField(instance.getClass(), fieldName).set(instance, value);
         }
         catch (final Exception ex)
         {
@@ -74,8 +107,30 @@ public class Tests
     }
 
     /**
+     * Get a private field in a class for testing.
+     *
+     * @param <T>       return type.
+     * @param instance  of the object to get the field value.
+     * @param fieldName to read.
+     * @return field value.
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T getField(final Object instance, final String fieldName)
+    {
+        try
+        {
+            return (T)resolveField(instance.getClass(), fieldName).get(instance);
+        }
+        catch (final Exception ex)
+        {
+            LangUtil.rethrowUnchecked(ex);
+            return null;
+        }
+    }
+
+    /**
      * Error handler that can be used as an implementation of {@link org.agrona.ErrorHandler} which will print out
-     * a stacktrace unless the exception is to type {@link AeronException.Category#WARN}.
+     * a stacktrace unless the exception is to type {@link io.aeron.exceptions.AeronException.Category#WARN}.
      *
      * @param ex to be handled.
      */
@@ -209,14 +264,8 @@ public class Tests
      */
     public static void sleep(final long durationMs)
     {
-        try
-        {
-            Thread.sleep(durationMs);
-        }
-        catch (final InterruptedException ex)
-        {
-            throw new TimeoutException(ex, AeronException.Category.ERROR);
-        }
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(durationMs));
+        checkInterruptStatus();
     }
 
     /**
@@ -227,14 +276,8 @@ public class Tests
      */
     public static void sleep(final long durationMs, final Supplier<String> messageSupplier)
     {
-        try
-        {
-            Thread.sleep(durationMs);
-        }
-        catch (final InterruptedException ex)
-        {
-            throw new TimeoutException(messageSupplier.get());
-        }
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(durationMs));
+        checkInterruptStatus(messageSupplier);
     }
 
     /**
@@ -246,14 +289,8 @@ public class Tests
      */
     public static void sleep(final long durationMs, final String format, final Object... params)
     {
-        try
-        {
-            Thread.sleep(durationMs);
-        }
-        catch (final InterruptedException ex)
-        {
-            throw new TimeoutException(String.format(format, params));
-        }
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(durationMs));
+        checkInterruptStatus(format, params);
     }
 
     /**
@@ -387,15 +424,93 @@ public class Tests
      */
     public static void await(final BooleanSupplier conditionSupplier, final long timeoutNs)
     {
+        await(conditionSupplier, timeoutNs, () -> "");
+    }
+
+    /**
+     * Await a condition with a timeout and also check for thread interrupt.
+     *
+     * @param conditionSupplier    for the condition to be awaited.
+     * @param timeoutNs            to await.
+     * @param errorMessageSupplier supplier of error message if timeout reached
+     */
+    public static void await(
+        final BooleanSupplier conditionSupplier,
+        final long timeoutNs,
+        final Supplier<String> errorMessageSupplier)
+    {
         final long deadlineNs = System.nanoTime() + timeoutNs;
         while (!conditionSupplier.getAsBoolean())
         {
             if ((deadlineNs - System.nanoTime()) <= 0)
             {
-                throw new TimeoutException();
+                throw new TimeoutException(errorMessageSupplier.get());
             }
 
             Tests.yield();
+        }
+    }
+
+    /**
+     * Await a condition with and check for thread interrupt.
+     *
+     * @param conditionSupplier    for the condition to be awaited.
+     * @param errorMessageSupplier supplier of error message if interrupt signalled
+     */
+    public static void await(final BooleanSupplier conditionSupplier, final Supplier<String> errorMessageSupplier)
+    {
+        while (!conditionSupplier.getAsBoolean())
+        {
+            Tests.yieldingIdle(errorMessageSupplier);
+        }
+    }
+
+    /**
+     * Await a condition with a timeout and also check for thread interrupt.
+     *
+     * @param argSupplier         argument for the condition + message.
+     * @param conditionsPredicate for the condition to be awaited.
+     * @param timeoutNs           to await.
+     * @param errorMessageCreator supplier of error message if timeout reached
+     * @param <T>                 type of argument to condition + message
+     */
+    public static <T> void await(
+        final Supplier<T> argSupplier,
+        final Predicate<T> conditionsPredicate,
+        final long timeoutNs,
+        final Function<T, String> errorMessageCreator)
+    {
+        final long deadlineNs = System.nanoTime() + timeoutNs;
+        T arg = argSupplier.get();
+        while (!conditionsPredicate.test(arg))
+        {
+            if ((deadlineNs - System.nanoTime()) <= 0)
+            {
+                throw new TimeoutException(errorMessageCreator.apply(arg));
+            }
+
+            Tests.yield();
+            arg = argSupplier.get();
+        }
+    }
+
+    /**
+     * Await a condition with and check for thread interrupt.
+     *
+     * @param argSupplier         argument for the condition + message.
+     * @param conditionsPredicate for the condition to be awaited.
+     * @param errorMessageCreator supplier of error message if timeout reached
+     * @param <T>                 type of argument to condition + message
+     */
+    public static <T> void await(
+        final Supplier<T> argSupplier,
+        final Predicate<T> conditionsPredicate,
+        final Function<T, String> errorMessageCreator)
+    {
+        final Supplier<String> msg = () -> errorMessageCreator.apply(argSupplier.get());
+        while (!conditionsPredicate.test(argSupplier.get()))
+        {
+            Tests.yieldingIdle(msg);
         }
     }
 
@@ -531,6 +646,17 @@ public class Tests
         while (!publication.isConnected())
         {
             Tests.yield();
+        }
+    }
+
+    public static void await(final String message, final BooleanSupplier... elements)
+    {
+        for (final BooleanSupplier element : elements)
+        {
+            while (!element.getAsBoolean())
+            {
+                Tests.yieldingIdle(message);
+            }
         }
     }
 
@@ -688,10 +814,10 @@ public class Tests
         };
     }
 
-    public static int awaitRecordingCounterId(final CountersReader counters, final int sessionId)
+    public static int awaitRecordingCounterId(final CountersReader counters, final int sessionId, final long archiveId)
     {
         int counterId;
-        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId)))
+        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId)))
         {
             Tests.yield();
         }
@@ -709,6 +835,184 @@ public class Tests
             }
 
             Tests.yield();
+        }
+    }
+
+    public static void printDirectoryContents(final String directoryName, final PrintStream out) throws IOException
+    {
+        printDirectoryContents(Paths.get(directoryName), out);
+    }
+
+    public static void printDirectoryContents(
+        final Path path,
+        final PrintStream out) throws IOException
+    {
+        Files.walkFileTree(path, new PrintingFileVisitor(out));
+    }
+
+    public static CountersManager newCountersManager(final int dataLength)
+    {
+        return new CountersManager(
+            new UnsafeBuffer(ByteBuffer.allocateDirect(Configuration.countersMetadataBufferLength(dataLength))),
+            new UnsafeBuffer(ByteBuffer.allocateDirect(dataLength)));
+    }
+
+    public static Answer<Counter> addCounterAnswer(
+        final CountersManager countersManager,
+        final LongSupplier registrationId)
+    {
+        return invocation ->
+        {
+            final int counterType = invocation.getArgument(0, Integer.class);
+            final DirectBuffer keyBuffer = invocation.getArgument(1, DirectBuffer.class);
+            final int keyOffset = invocation.getArgument(2, Integer.class);
+            final int keyLength = invocation.getArgument(3, Integer.class);
+            final DirectBuffer labelBuffer = invocation.getArgument(4, DirectBuffer.class);
+            final int labelOffset = invocation.getArgument(5, Integer.class);
+            final int labelLength = invocation.getArgument(6, Integer.class);
+
+            final int id = countersManager.allocate(
+                counterType, keyBuffer, keyOffset, keyLength, labelBuffer, labelOffset, labelLength);
+            countersManager.setCounterRegistrationId(id, registrationId.getAsLong());
+
+            return new Counter(countersManager, id);
+        };
+    }
+
+    public static Throwable setOrUpdateError(final Throwable existingError, final Throwable newError)
+    {
+        if (null == existingError)
+        {
+            return newError;
+        }
+
+        if (null != newError)
+        {
+            existingError.addSuppressed(newError);
+        }
+
+        return existingError;
+    }
+
+    public static void markImmutable(final Path path) throws Exception
+    {
+        if (SystemUtil.isLinux())
+        {
+            assertEquals(0, execute(List.of("chattr", "+i", path.toString())));
+        }
+        else if (SystemUtil.isMac())
+        {
+            assertEquals(0, execute(List.of("chflags", "uchg", path.toString())));
+        }
+        else
+        {
+            fail("Unsupported OS: " + OS.current());
+        }
+    }
+
+    public static void unmarkImmutable(final Path path) throws Exception
+    {
+        if (SystemUtil.isLinux())
+        {
+            assertEquals(0, execute(List.of("chattr", "-i", path.toString())));
+        }
+        else if (SystemUtil.isMac())
+        {
+            assertEquals(0, execute(List.of("chflags", "nouchg", path.toString())));
+        }
+        else
+        {
+            fail("Unsupported OS: " + OS.current());
+        }
+    }
+
+    private static int execute(final List<String> command) throws Exception
+    {
+        final Process process = new ProcessBuilder(command).inheritIO().start();
+        return process.waitFor();
+    }
+
+    private static void pad(final int indent, final PrintStream out)
+    {
+        if (0 != indent)
+        {
+            out.printf("%" + indent + "s", "");
+        }
+    }
+
+    private static Field resolveField(final Class<?> type, final String fieldName)
+    {
+        final Map<String, Field> fields = CLASS_FIELDS.get(type);
+        Field field = fields.get(fieldName);
+        try
+        {
+            if (null == field)
+            {
+                field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                fields.put(fieldName, field);
+            }
+        }
+        catch (final Exception ex)
+        {
+            LangUtil.rethrowUnchecked(ex);
+        }
+        return field;
+    }
+
+    private static class PrintingFileVisitor implements FileVisitor<Path>
+    {
+        private final PrintStream out;
+        private int indent = 0;
+
+        PrintingFileVisitor(final PrintStream out)
+        {
+            this.out = out;
+        }
+
+        public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs)
+        {
+            pad(indent, out);
+            out.println("[" + dir.toAbsolutePath() + "]");
+
+            if (Files.isSymbolicLink(dir))
+            {
+                return FileVisitResult.SKIP_SUBTREE;
+            }
+            else
+            {
+                indent += 2;
+                return FileVisitResult.CONTINUE;
+            }
+        }
+
+        public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) throws IOException
+        {
+            if (Files.isSymbolicLink(file))
+            {
+                final Path dest = Files.readSymbolicLink(file);
+                pad(indent, out);
+                out.println(file.getName(file.getNameCount() - 1) + " -> " + dest.toAbsolutePath());
+                return FileVisitResult.SKIP_SUBTREE;
+            }
+            else
+            {
+                pad(indent, out);
+                final long size = Files.size(file);
+                out.printf("%-40s %10d%n", file.getName(file.getNameCount() - 1), size);
+                return FileVisitResult.CONTINUE;
+            }
+        }
+
+        public FileVisitResult visitFileFailed(final Path file, final IOException exc)
+        {
+            return FileVisitResult.CONTINUE;
+        }
+
+        public FileVisitResult postVisitDirectory(final Path dir, final IOException exc)
+        {
+            indent -= 2;
+            return FileVisitResult.CONTINUE;
         }
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@ package io.aeron.archive.client;
 import io.aeron.Aeron;
 
 /**
- * Fluent API for setting optional replay parameters. Not threadsafe. Allows the user to configure starting position,
+ * Fluent API for setting optional replay parameters. Allows the user to configure starting position,
  * replay length, bounding counter (for a bounded replay) and the max length for file I/O operations.
+ * <p>
+ * Not threadsafe.
  */
 public class ReplayParams
 {
@@ -27,17 +29,20 @@ public class ReplayParams
     private int fileIoMaxLength;
     private long position;
     private long length;
+    private long replayToken;
+    private long subscriptionRegistrationId;
 
     /**
-     * Default, initialise all values to "null"
+     * Default, initialise all values to "null".
      */
+    @SuppressWarnings("this-escape")
     public ReplayParams()
     {
         reset();
     }
 
     /**
-     * reset all value to "null", allows for an instance to be reused
+     * Reset all value to "null", allows for an instance to be reused.
      *
      * @return this for a fluent API
      */
@@ -46,7 +51,9 @@ public class ReplayParams
         boundingLimitCounterId = Aeron.NULL_VALUE;
         fileIoMaxLength = Aeron.NULL_VALUE;
         position = AeronArchive.NULL_POSITION;
-        length = AeronArchive.NULL_LENGTH;
+        length = AeronArchive.REPLAY_ALL_AND_FOLLOW;
+        replayToken = Aeron.NULL_VALUE;
+        subscriptionRegistrationId = Aeron.NULL_VALUE;
         return this;
     }
 
@@ -75,8 +82,13 @@ public class ReplayParams
     }
 
     /**
-     * The length of the recorded stream to replay. If set to {@link AeronArchive#NULL_POSITION} (the default) will
-     * replay a whole stream of unknown length. If set to {@link Long#MAX_VALUE} it will follow a live recording.
+     * The length of the recorded stream to replay. If set to {@link AeronArchive#REPLAY_ALL_AND_FOLLOW} (the default)
+     * it will replay a whole stream of unknown length and then continue to follow the replay if it is live. If set to
+     * {@link AeronArchive#REPLAY_ALL_AND_STOP} it will replay up the limit calculated when the replay request is
+     * received then stop the replay, thereby ending the stream.
+     * <p>
+     * {@link AeronArchive#REPLAY_ALL_AND_FOLLOW} retains the same behaviour as using {@link AeronArchive#NULL_LENGTH}
+     * or {@link Long#MAX_VALUE}.
      *
      * @param length of the recording to be replayed.
      * @return this for a fluent API.
@@ -154,5 +166,51 @@ public class ReplayParams
     public boolean isBounded()
     {
         return Aeron.NULL_VALUE != boundingLimitCounterId;
+    }
+
+    /**
+     * Set a token used for replays when the initiating image is not the one used to create the archive
+     * connection/session.
+     *
+     * @param replayToken token to identify the replay
+     * @return this for a fluent API.
+     */
+    public ReplayParams replayToken(final long replayToken)
+    {
+        this.replayToken = replayToken;
+        return this;
+    }
+
+    /**
+     * Get a token used for replays when the initiating image is not the one used to create the archive
+     * connection/session.
+     *
+     * @return the replay token
+     */
+    public long replayToken()
+    {
+        return replayToken;
+    }
+
+    /**
+     * Set the subscription registration id to be used when doing a start replay using response channels and the
+     * response subscription is already created.
+     *
+     * @param registrationId of the subscription to receive the replay (should be set up with control-mode=response).
+     */
+    public void subscriptionRegistrationId(final long registrationId)
+    {
+        this.subscriptionRegistrationId = registrationId;
+    }
+
+    /**
+     * Get the subscription registration id to be used when doing a start replay using response channels and the
+     * response subscription is already created.
+     *
+     * @return registrationId of the subscription to receive the replay (should be set up with control-mode=response).
+     */
+    public long subscriptionRegistrationId()
+    {
+        return subscriptionRegistrationId;
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,8 @@ public:
         aeron_cnc_t *aeron_cnc;
         if (aeron_cnc_init(&aeron_cnc, baseDirectory, 10000) < 0)
         {
-            throw IOException(std::string("failed to open existing file cnc file in: ") + baseDirectory, SOURCEINFO);
+            throw IOException(
+                std::string("failed to open existing file cnc file in: ") + baseDirectory, SOURCEINFO, EIO);
         }
 
         return { aeron_cnc };

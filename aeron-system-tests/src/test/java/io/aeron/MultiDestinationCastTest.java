@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.test.*;
 import io.aeron.test.driver.TestMediaDriver;
+import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
@@ -40,8 +41,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
+import static io.aeron.ChannelUri.SPY_QUALIFIER;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThan;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
@@ -64,10 +68,11 @@ class MultiDestinationCastTest
     private static final int MESSAGES_PER_TERM = 64;
     private static final int MESSAGE_LENGTH =
         (TERM_BUFFER_LENGTH / MESSAGES_PER_TERM) - DataHeaderFlyweight.HEADER_LENGTH;
-    private static final String ROOT_DIR = CommonContext.getAeronDirectoryName() + File.separator;
+    private static final String ROOT_DIR = CommonContext.generateRandomDirName() + File.separator;
     private static final int FRAGMENT_LIMIT = 10;
 
     private final MediaDriver.Context driverBContext = new MediaDriver.Context();
+    private final MediaDriver.Context driverAContext = new MediaDriver.Context();
 
     private Aeron clientA;
     private Aeron clientB;
@@ -93,24 +98,24 @@ class MultiDestinationCastTest
 
         buffer.putInt(0, 1);
 
-        final MediaDriver.Context driverAContext = new MediaDriver.Context()
-            .errorHandler(errorHandler)
+        driverAContext.errorHandler(errorHandler)
             .publicationTermBufferLength(TERM_BUFFER_LENGTH)
             .aeronDirectoryName(baseDirA)
+            .dirDeleteOnShutdown(true)
             .threadingMode(ThreadingMode.SHARED);
 
         driverBContext.publicationTermBufferLength(TERM_BUFFER_LENGTH)
             .errorHandler(errorHandler)
             .aeronDirectoryName(baseDirB)
+            .dirDeleteOnShutdown(true)
             .threadingMode(ThreadingMode.SHARED);
 
         driverA = TestMediaDriver.launch(driverAContext, testWatcher);
+        testWatcher.dataCollector().add(driverA.context().aeronDirectory());
         driverB = TestMediaDriver.launch(driverBContext, testWatcher);
+        testWatcher.dataCollector().add(driverB.context().aeronDirectory());
         clientA = Aeron.connect(new Aeron.Context().aeronDirectoryName(driverAContext.aeronDirectoryName()));
         clientB = Aeron.connect(new Aeron.Context().aeronDirectoryName(driverBContext.aeronDirectoryName()));
-
-        testWatcher.dataCollector().add(driverA.context().aeronDirectory());
-        testWatcher.dataCollector().add(driverB.context().aeronDirectory());
     }
 
     @AfterEach
@@ -138,8 +143,12 @@ class MultiDestinationCastTest
 
     @Test
     @InterruptAfter(10)
+    @SlowTest
     void shouldSpinUpAndShutdownWithManual()
     {
+        driverAContext.imageLivenessTimeoutNs(TimeUnit.SECONDS.toNanos(1));
+        driverBContext.imageLivenessTimeoutNs(TimeUnit.SECONDS.toNanos(1));
+
         launch(Tests::onError);
 
         final String taggedMdcUri = new ChannelUriStringBuilder(PUB_MDC_MANUAL_URI).tags(
@@ -161,6 +170,10 @@ class MultiDestinationCastTest
         }
 
         assertFalse(clientA.isCommandActive(correlationId));
+
+        final long removeCorrelationId = publication.asyncRemoveDestination(SUB2_MDC_MANUAL_URI);
+        Tests.await("Remove Active", () -> !clientA.isCommandActive(removeCorrelationId));
+        Tests.await("Subscription disconnect", () -> subscriptionB.hasNoImages());
     }
 
     @Test
@@ -196,6 +209,39 @@ class MultiDestinationCastTest
         verifyFragments(fragmentHandlerA, numMessagesToSend);
         verifyFragments(fragmentHandlerB, numMessagesToSend);
         verifyFragments(fragmentHandlerC, numMessagesToSend);
+    }
+
+    @Test
+    @InterruptAfter(20)
+    void shouldSubscribeWithSessionId()
+    {
+        final int numMessagesToSend = MESSAGES_PER_TERM * 3;
+
+        launch(Tests::onError);
+
+        final String sessionId = "|session-id=" + BitUtil.generateRandomisedId();
+        subscriptionA = clientA.addSubscription(SUB1_MDC_DYNAMIC_URI + sessionId, STREAM_ID);
+        subscriptionB = clientB.addSubscription(SUB2_MDC_DYNAMIC_URI + sessionId, STREAM_ID);
+        publication = clientA.addPublication(PUB_MDC_DYNAMIC_URI + sessionId, STREAM_ID);
+
+        while (subscriptionA.hasNoImages() || subscriptionB.hasNoImages())
+        {
+            Tests.yield();
+        }
+
+        for (int i = 0; i < numMessagesToSend; i++)
+        {
+            while (publication.offer(buffer, 0, buffer.capacity()) < 0L)
+            {
+                Tests.yield();
+            }
+
+            pollForFragment(subscriptionA, fragmentHandlerA);
+            pollForFragment(subscriptionB, fragmentHandlerB);
+        }
+
+        verifyFragments(fragmentHandlerA, numMessagesToSend);
+        verifyFragments(fragmentHandlerB, numMessagesToSend);
     }
 
     @Test
@@ -420,6 +466,216 @@ class MultiDestinationCastTest
             {
                 Tests.yieldingIdle(messageSupplierB);
             }
+        }
+    }
+
+    @Test
+    void shouldSpyOnDynamicMdcConnectionWithWildcardPortUsingTags()
+    {
+        launch(Tests::onError);
+
+        final long pubTag = clientA.nextCorrelationId();
+
+        final String uri = new ChannelUriStringBuilder("aeron:udp?control=localhost:0|control-mode=dynamic|ssc=true")
+            .tags(pubTag, null)
+            .build();
+
+        final String spyUri = new ChannelUriStringBuilder().prefix(SPY_QUALIFIER)
+            .media("udp")
+            .tags(pubTag, null)
+            .build();
+
+        publication = clientA.addPublication(uri, STREAM_ID);
+        subscriptionA = clientA.addSubscription(spyUri, STREAM_ID);
+
+        Tests.awaitConnected(publication);
+
+        while (publication.offer(buffer, 0, buffer.capacity()) < 0L)
+        {
+            Tests.yield();
+        }
+
+        pollForFragment(subscriptionA, fragmentHandlerA);
+    }
+
+    @Test
+    void shouldHandleSubscriptionsIfUsingTagsAndEndpointsMatchButSessionIdInUse()
+    {
+        launch(Tests::onError);
+
+        try (
+            Publication pub1 = clientA.addExclusivePublication(PUB_MDC_DYNAMIC_URI, STREAM_ID);
+            Publication pub2 = clientA.addExclusivePublication(PUB_MDC_DYNAMIC_URI, STREAM_ID))
+        {
+
+            final String sub1Uri = new ChannelUriStringBuilder(SUB1_MDC_DYNAMIC_URI)
+                .endpoint("127.0.0.1:0")
+                .tags("1001")
+                .sessionId(pub1.sessionId())
+                .build();
+
+            final String sub2Uri = new ChannelUriStringBuilder(SUB1_MDC_DYNAMIC_URI)
+                .endpoint("127.0.0.1:0")
+                .tags("1001")
+                .sessionId(pub2.sessionId())
+                .build();
+
+            try (
+                Subscription sub1 = clientB.addSubscription(sub1Uri, STREAM_ID);
+                Subscription sub2 = clientB.addSubscription(sub2Uri, STREAM_ID))
+            {
+                Tests.awaitConnected(sub1);
+                Tests.awaitConnected(sub2);
+                Tests.awaitConnected(pub1);
+                Tests.awaitConnected(pub2);
+
+                while (pub1.offer(buffer, 0, buffer.capacity()) < 0L)
+                {
+                    Tests.yield();
+                }
+
+                while (pub2.offer(buffer, 0, buffer.capacity()) < 0L)
+                {
+                    Tests.yield();
+                }
+
+                final long nowMs = System.currentTimeMillis();
+                long sub1Count = 0;
+                long sub2Count = 0;
+                while (System.currentTimeMillis() - nowMs < 500L)
+                {
+                    sub1Count += sub1.poll((a, b, c, d) -> {}, 10);
+                    sub2Count += sub2.poll((a, b, c, d) -> {}, 10);
+
+                    assertThat(sub1Count, lessThan(2L));
+                    assertThat(sub2Count, lessThan(2L));
+                }
+            }
+        }
+    }
+
+    @Test
+    @SlowTest
+    @InterruptAfter(5)
+    void shouldNotAllowMdcSubscriptionsWhenChannelHasControlButNotSpecifiedAsMdc()
+    {
+        launch(Tests::onError);
+
+        try (
+            Publication pub = clientA.addPublication(
+                "aeron:udp?control=localhost:24325|endpoint=localhost:10000", STREAM_ID);
+            Subscription subOk = clientA.addSubscription(
+                "aeron:udp?control=localhost:24325|endpoint=localhost:10000", STREAM_ID);
+            Subscription subWrong = clientA.addSubscription(
+                "aeron:udp?control=localhost:24325|endpoint=localhost:10001", STREAM_ID))
+        {
+            Tests.awaitConnected(pub);
+            Tests.awaitConnected(subOk);
+
+            final long deadlineMs = System.currentTimeMillis() + 2_000;
+            while (System.currentTimeMillis() < deadlineMs)
+            {
+                assertFalse(subWrong.isConnected());
+                Tests.sleep(1);
+            }
+        }
+    }
+
+    @Test
+    @InterruptAfter(5)
+    @SlowTest
+    void shouldAllowMdcDestinationEndpointsToBeShared()
+    {
+        launch(Tests::onError);
+
+        try (
+            Publication mdcA = clientA.addPublication(PUB_MDC_MANUAL_URI, STREAM_ID);
+            Publication mdcB = clientA.addPublication(PUB_MDC_MANUAL_URI, STREAM_ID + 1);
+            Subscription subA = clientB.addSubscription(SUB1_MDC_MANUAL_URI, STREAM_ID);
+            Subscription subB = clientB.addSubscription(SUB1_MDC_MANUAL_URI, STREAM_ID + 1))
+        {
+            mdcA.addDestination(SUB1_MDC_MANUAL_URI);
+            mdcB.addDestination(SUB1_MDC_MANUAL_URI);
+            Tests.awaitConnected(mdcA);
+            Tests.awaitConnected(mdcB);
+            Tests.awaitConnected(subA);
+            Tests.awaitConnected(subB);
+
+            while (mdcA.offer(buffer, 0, buffer.capacity()) < 0L)
+            {
+                Tests.yield();
+            }
+
+            pollForFragment(subA, fragmentHandlerA);
+            assertNoFragmentsReceived(subB, 1_000L);
+
+            while (mdcB.offer(buffer, 0, buffer.capacity()) < 0L)
+            {
+                Tests.yield();
+            }
+
+            pollForFragment(subB, fragmentHandlerA);
+            assertNoFragmentsReceived(subA, 1_000L);
+        }
+    }
+
+    @Test
+    @InterruptAfter(20)
+    @SlowTest
+    void shouldRemoveDestinationUsingRegistrationId()
+    {
+        driverAContext.imageLivenessTimeoutNs(TimeUnit.SECONDS.toNanos(1));
+        driverBContext.imageLivenessTimeoutNs(TimeUnit.SECONDS.toNanos(1));
+
+        launch(Tests::onError);
+
+        try (
+            Publication mdc = clientA.addPublication(PUB_MDC_MANUAL_URI, STREAM_ID);
+            Subscription sub1 = clientB.addSubscription(SUB1_MDC_MANUAL_URI, STREAM_ID);
+            Subscription sub2 = clientB.addSubscription(SUB2_MDC_MANUAL_URI, STREAM_ID))
+        {
+            final long registrationId1 = mdc.asyncAddDestination(SUB1_MDC_MANUAL_URI);
+            final long registrationId2 = mdc.asyncAddDestination(SUB2_MDC_MANUAL_URI);
+            while (clientA.isCommandActive(registrationId2))
+            {
+                Tests.yield();
+            }
+
+            Tests.await("Connections", mdc::isConnected, sub1::isConnected, sub2::isConnected);
+
+            while (mdc.offer(buffer, 0, buffer.capacity()) < 0L)
+            {
+                Tests.yield();
+            }
+
+            pollForFragment(sub1, fragmentHandlerA);
+            pollForFragment(sub2, fragmentHandlerB);
+
+            mdc.removeDestination(registrationId2);
+
+            Tests.await("Disconnected", () -> !sub2.isConnected());
+
+            while (mdc.offer(buffer, 0, buffer.capacity()) < 0L)
+            {
+                Tests.yield();
+            }
+
+            pollForFragment(sub1, fragmentHandlerA);
+            assertNoFragmentsReceived(sub2, 1_000L);
+
+            final long correlationId = mdc.asyncRemoveDestination(registrationId1);
+            Tests.await("Command Active", () -> !clientA.isCommandActive(correlationId));
+            Tests.await("Disconnected", () -> !sub1.isConnected(), () -> !mdc.isConnected());
+        }
+    }
+
+    private static void assertNoFragmentsReceived(final Subscription subB, final long noMessageTimeout)
+    {
+        final long t0 = System.currentTimeMillis();
+        while (System.currentTimeMillis() - t0 < noMessageTimeout)
+        {
+            assertEquals(0, subB.poll((a, b, c, d) -> {}, 10));
+            Tests.yield();
         }
     }
 

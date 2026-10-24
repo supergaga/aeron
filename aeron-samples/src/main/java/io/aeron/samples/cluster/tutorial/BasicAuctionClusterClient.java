@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ public class BasicAuctionClusterClient implements EgressListener
     private final int numOfBids;
     private final int bidIntervalMs;
 
-    private long correlationId = ThreadLocalRandom.current().nextLong();
+    private long nextCorrelationId = 0;
     private long lastBidSeen = 100;
 
     /**
@@ -68,6 +68,7 @@ public class BasicAuctionClusterClient implements EgressListener
      * {@inheritDoc}
      */
     // tag::response[]
+    @Override
     public void onMessage(
         final long clusterSessionId,
         final long timestamp,
@@ -91,6 +92,7 @@ public class BasicAuctionClusterClient implements EgressListener
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onSessionEvent(
         final long correlationId,
         final long clusterSessionId,
@@ -107,6 +109,7 @@ public class BasicAuctionClusterClient implements EgressListener
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onNewLeader(
         final long clusterSessionId,
         final long leadershipTermId,
@@ -160,7 +163,7 @@ public class BasicAuctionClusterClient implements EgressListener
     // tag::publish[]
     private long sendBid(final AeronCluster aeronCluster, final long price)
     {
-        final long correlationId = this.correlationId++;
+        final long correlationId = nextCorrelationId++;
         actionBidBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);            // <1>
         actionBidBuffer.putLong(CUSTOMER_ID_OFFSET, customerId);
         actionBidBuffer.putLong(PRICE_OFFSET, price);

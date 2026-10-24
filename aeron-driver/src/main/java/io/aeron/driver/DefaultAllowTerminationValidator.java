@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,16 @@ import java.io.File;
 public class DefaultAllowTerminationValidator implements TerminationValidator
 {
     /**
+     * Default constructor.
+     */
+    public DefaultAllowTerminationValidator()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public boolean allowTermination(
         final File aeronDir, final DirectBuffer tokenBuffer, final int tokenOffset, final int tokenLength)
     {

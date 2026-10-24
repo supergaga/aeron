@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@
 #define _GNU_SOURCE
 #endif
 
+#include <inttypes.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdio.h>
 #include <errno.h>
 
@@ -226,7 +226,7 @@ static int aeron_idle_strategy_backoff_state_init_args(void **state, const char 
     uint64_t max_yields = strtoull(yields_str, &end_ptr, 10);
     if ((0 == max_yields && 0 != errno) || end_ptr == yields_str)
     {
-        AERON_SET_ERR(errno, "max yields not parseable: %s", max_yields);
+        AERON_SET_ERR(errno, "max yields not parseable: %s", yields_str);
         return -1;
     }
 
@@ -358,14 +358,15 @@ int aeron_agent_init(
     aeron_idle_strategy_func_t idle_strategy_func,
     void *idle_strategy_state)
 {
-    if (NULL == runner || NULL == do_work || NULL == idle_strategy_func)
+    if (NULL == runner || NULL == do_work || NULL == idle_strategy_func || role_name == NULL)
     {
         AERON_SET_ERR(
             EINVAL,
-            "Parameters must not be null, runner: %s, do_work: %s, idle_strategy_func: %s",
+            "Parameters must not be null, runner: %s, do_work: %s, idle_strategy_func: %s, role_name: %s",
             AERON_NULL_STR(runner),
             AERON_NULL_STR(do_work),
-            AERON_NULL_STR(idle_strategy_func));
+            AERON_NULL_STR(idle_strategy_func),
+            AERON_NULL_STR(role_name));
         return -1;
     }
 
@@ -375,8 +376,8 @@ int aeron_agent_init(
     runner->do_work = do_work;
     runner->on_close = on_close;
 
-    size_t role_name_length = strlen(role_name);
-    if (aeron_alloc((void **)&runner->role_name, role_name_length + 1) < 0)
+    size_t role_name_length = strlen(role_name) + 1;
+    if (aeron_alloc((void **)&runner->role_name, role_name_length) < 0)
     {
         AERON_APPEND_ERR("Failed to allocate role_name for runner: %s", role_name);
         return -1;
@@ -404,7 +405,13 @@ static void *agent_main(void *arg)
 
     while (aeron_agent_is_running(runner))
     {
-        runner->idle_strategy(runner->idle_strategy_state, runner->do_work(runner->agent_state));
+        int rc = runner->do_work(runner->agent_state);
+        if (rc < 0)
+        {
+            aeron_err_clear();
+            break;
+        }
+        runner->idle_strategy(runner->idle_strategy_state, rc);
     }
 
     return NULL;
@@ -418,7 +425,16 @@ int aeron_agent_start(aeron_agent_runner_t *runner)
         return -1;
     }
 
-    pthread_attr_t attr;
+    if (AERON_AGENT_STATE_INITED != runner->state)
+    {
+        AERON_SET_ERR(
+            EINVAL,
+            "runner must be in AERON_AGENT_STATE_INITED(%" PRIu8 ") in order to start state=%" PRIu8,
+            AERON_AGENT_STATE_INITED, runner->state);
+        return -1;
+    }
+
+    aeron_thread_attr_t attr;
     int pthread_result;
     if ((pthread_result = aeron_thread_attr_init(&attr)) != 0)
     {
@@ -441,11 +457,11 @@ int aeron_agent_stop(aeron_agent_runner_t *runner)
 {
     if (NULL == runner)
     {
-        AERON_SET_ERR(EINVAL, "%s", "invalid argument");
+        AERON_SET_ERR(EINVAL, "%s", "runner is null");
         return -1;
     }
 
-    AERON_PUT_ORDERED(runner->running, false);
+    AERON_SET_RELEASE(runner->running, false);
 
     if (AERON_AGENT_STATE_STARTED == runner->state)
     {

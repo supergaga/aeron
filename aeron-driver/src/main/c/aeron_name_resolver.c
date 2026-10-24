@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,9 +77,9 @@ int aeron_default_name_resolver_supplier(
 {
     resolver->lookup_func = aeron_default_name_resolver_lookup;
     resolver->resolve_func = aeron_default_name_resolver_resolve;
+    resolver->start_func = aeron_default_name_resolver_start;
     resolver->do_work_func = aeron_default_name_resolver_do_work;
     resolver->close_func = aeron_default_name_resolver_close;
-    resolver->on_resolve_func = NULL != context ? context->on_name_resolve_func : NULL;
     resolver->state = NULL;
     resolver->name = "default";
 
@@ -93,25 +93,26 @@ int aeron_default_name_resolver_resolve(
     bool is_re_resolution,
     struct sockaddr_storage *address)
 {
-    int result = aeron_ip_addr_resolver(name, address, AF_INET, IPPROTO_UDP);
-
-    if (NULL != resolver->on_resolve_func)
+    if (0 == aeron_ip_addr_resolver(name, address, AF_INET, IPPROTO_UDP))
     {
-        struct sockaddr_storage *resolved_address = 0 <= result ? address : NULL;
-        resolver->on_resolve_func(resolver, name, resolved_address);
+        return 0;
     }
-
-    return result;
+    return aeron_ip_addr_resolver(name, address, AF_INET6, IPPROTO_UDP);
 }
 
 int aeron_default_name_resolver_lookup(
     aeron_name_resolver_t *resolver,
     const char *name,
     const char *uri_param_name,
-    bool is_re_resolution,
+    bool is_re_lookup,
     const char **resolved_name)
 {
     *resolved_name = name;
+    return 0;
+}
+
+int aeron_default_name_resolver_start(aeron_name_resolver_t *resolver)
+{
     return 0;
 }
 
@@ -163,8 +164,6 @@ int aeron_name_resolver_resolve_host_and_port(
                 result = resolver->resolve_func(
                     resolver, parsed_address.host, uri_param_name, is_re_resolution, sockaddr);
             }
-
-            ((struct sockaddr_in *)sockaddr)->sin_port = htons((uint16_t)port);
         }
         else if (AF_INET6 == family_hint)
         {
@@ -177,8 +176,18 @@ int aeron_name_resolver_resolve_host_and_port(
                 result = resolver->resolve_func(
                     resolver, parsed_address.host, uri_param_name, is_re_resolution, sockaddr);
             }
+        }
 
-            ((struct sockaddr_in6 *)sockaddr)->sin6_port = htons((uint16_t)port);
+        if (0 == result)
+        {
+            if (AF_INET == sockaddr->ss_family)
+            {
+                ((struct sockaddr_in *)sockaddr)->sin_port = htons((uint16_t)port);
+            }
+            else if (AF_INET6 == sockaddr->ss_family)
+            {
+                ((struct sockaddr_in6 *)sockaddr)->sin6_port = htons((uint16_t)port);
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 
 #include <stddef.h>
 
-int aeron_alloc_no_err(void **ptr, size_t size);
 int aeron_alloc(void **ptr, size_t size);
 int aeron_alloc_aligned(void **ptr, size_t *offset, size_t size, size_t alignment);
 int aeron_reallocf(void **ptr, size_t size);

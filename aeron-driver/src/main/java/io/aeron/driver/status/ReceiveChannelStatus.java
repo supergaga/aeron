@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import org.agrona.concurrent.status.CountersManager;
 /**
  * The status of a receiving channel endpoint represented as a counter value.
  */
-public class ReceiveChannelStatus
+public final class ReceiveChannelStatus
 {
     /**
      * Type id of a receive channel status indicator.
@@ -35,6 +35,10 @@ public class ReceiveChannelStatus
      * Human-readable name for the counter.
      */
     public static final String NAME = "rcv-channel";
+
+    private ReceiveChannelStatus()
+    {
+    }
 
     /**
      * Allocate a new channel status counter for a stream.

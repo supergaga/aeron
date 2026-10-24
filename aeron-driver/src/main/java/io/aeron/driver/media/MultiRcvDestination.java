@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,26 +23,31 @@ import org.agrona.collections.ArrayUtil;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.PortUnreachableException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 import static io.aeron.driver.media.ReceiveChannelEndpoint.DESTINATION_ADDRESS_TIMEOUT;
-import static io.aeron.driver.media.UdpChannelTransport.sendError;
+import static io.aeron.driver.media.UdpChannelTransport.onSendError;
 
 final class MultiRcvDestination
 {
     private static final ReceiveDestinationTransport[] EMPTY_TRANSPORTS = new ReceiveDestinationTransport[0];
 
-    private int numDestinations = 0;
     private ReceiveDestinationTransport[] transports = EMPTY_TRANSPORTS;
 
-    void close(final ErrorHandler errorHandler, final DataTransportPoller poller)
+    void close(final ErrorHandler errorHandler)
+    {
+        CloseHelper.closeAll(errorHandler, transports);
+    }
+
+    void cancelRead(final ReceiveChannelEndpoint endpoint, final DataTransportPoller poller)
     {
         for (final ReceiveDestinationTransport transport : transports)
         {
-            CloseHelper.close(errorHandler, transport);
-            if (null != poller)
+            if (null != transport)
             {
-                poller.selectNowWithoutProcessing();
+                poller.cancelRead(endpoint, transport);
             }
         }
     }
@@ -62,7 +67,6 @@ final class MultiRcvDestination
 
         transports = ArrayUtil.ensureCapacity(transports, index + 1);
         transports[index] = transport;
-        numDestinations++;
 
         return index;
     }
@@ -70,7 +74,6 @@ final class MultiRcvDestination
     void removeDestination(final int transportIndex)
     {
         transports[transportIndex] = null;
-        numDestinations--;
     }
 
     boolean hasDestination(final int transportIndex)
@@ -165,7 +168,6 @@ final class MultiRcvDestination
     static int sendTo(
         final UdpChannelTransport transport, final ByteBuffer buffer, final InetSocketAddress remoteAddress)
     {
-        final int remaining = buffer.remaining();
         int bytesSent = 0;
         try
         {
@@ -175,11 +177,25 @@ final class MultiRcvDestination
                 bytesSent = transport.sendDatagramChannel.send(buffer, remoteAddress);
             }
         }
+        catch (final PortUnreachableException ignore)
+        {
+        }
         catch (final IOException ex)
         {
-            sendError(remaining, ex, remoteAddress);
+            onSendError(ex, remoteAddress, transport.errorHandler);
         }
 
         return bytesSent;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "MultiRcvDestination{" +
+            "transports=" + Arrays.toString(transports) +
+            '}';
     }
 }

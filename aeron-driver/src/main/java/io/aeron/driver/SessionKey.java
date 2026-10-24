@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@ final class SessionKey
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean equals(final Object o)
     {
         if (this == o)
@@ -60,6 +61,7 @@ final class SessionKey
     /**
      * {@inheritDoc}
      */
+    @Override
     public int hashCode()
     {
         return 31 * sessionId * streamId * channel.hashCode();
@@ -68,6 +70,7 @@ final class SessionKey
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "SessionKey{" +

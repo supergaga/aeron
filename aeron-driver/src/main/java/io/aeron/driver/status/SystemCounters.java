@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import java.util.EnumMap;
 /**
  * Aggregate entry point for managing counters of system status.
  */
-public class SystemCounters implements AutoCloseable
+public final class SystemCounters implements AutoCloseable
 {
     private final EnumMap<SystemCounterDescriptor, AtomicCounter> counterByDescriptorMap =
         new EnumMap<>(SystemCounterDescriptor.class);
@@ -59,5 +59,16 @@ public class SystemCounters implements AutoCloseable
     public void close()
     {
         CloseHelper.closeAll(counterByDescriptorMap.values());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "SystemCounters{" +
+            "counterByDescriptorMap=" + counterByDescriptorMap +
+            '}';
     }
 }

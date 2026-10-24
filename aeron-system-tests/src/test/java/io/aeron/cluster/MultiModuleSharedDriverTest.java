@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,9 +24,16 @@ import io.aeron.cluster.client.EgressListener;
 import io.aeron.cluster.service.ClientSession;
 import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.driver.MediaDriver;
+import io.aeron.driver.NameResolverAgent;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.Header;
-import io.aeron.test.*;
+import io.aeron.test.DataCollector;
+import io.aeron.test.EventLogExtension;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.TestContexts;
+import io.aeron.test.Tests;
 import io.aeron.test.cluster.StubClusteredService;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.driver.RedirectingNameResolver;
@@ -43,7 +50,7 @@ import java.io.File;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class MultiModuleSharedDriverTest
 {
     @RegisterExtension
@@ -51,7 +58,7 @@ class MultiModuleSharedDriverTest
 
     @Test
     @InterruptAfter(20)
-    @SuppressWarnings({ "try", "methodlength"})
+    @SuppressWarnings({ "try", "methodlength" })
     void shouldSupportTwoSingleNodeClusters()
     {
         final MediaDriver.Context driverCtx = new MediaDriver.Context()
@@ -166,14 +173,16 @@ class MultiModuleSharedDriverTest
                     .aeronDirectoryName(node0.archivingMediaDriver.mediaDriver().aeronDirectoryName())
                     .egressListener(egressListener)
                     .ingressChannel("aeron:udp?term-length=64k")
-                    .ingressEndpoints(TestCluster.ingressEndpoints(0, 2))
-                    .egressChannel("aeron:udp?endpoint=localhost:9020"));
+                    .ingressEndpoints(TestCluster.ingressEndpoints(
+                        node0.consensusModule0.context().clusterId(), 0, 2, 2))
+                    .egressChannel("aeron:udp?endpoint=localhost:0"));
                 AeronCluster client1 = AeronCluster.connect(new AeronCluster.Context()
                     .aeronDirectoryName(node1.archivingMediaDriver.mediaDriver().aeronDirectoryName())
                     .egressListener(egressListener)
                     .ingressChannel("aeron:udp?term-length=64k")
-                    .ingressEndpoints(TestCluster.ingressEndpoints(1, 2))
-                    .egressChannel("aeron:udp?endpoint=localhost:9120")))
+                    .ingressEndpoints(TestCluster.ingressEndpoints(
+                        node1.consensusModule1.context().clusterId(), 0, 2, 2))
+                    .egressChannel("aeron:udp?endpoint=localhost:0")))
             {
                 echoMessage(client0, "Message 0", egress);
                 echoMessage(client1, "Message 1", egress);
@@ -211,11 +220,7 @@ class MultiModuleSharedDriverTest
             final int length,
             final Header header)
         {
-            idleStrategy.reset();
-            while (session.offer(buffer, offset, length) < 0)
-            {
-                idleStrategy.idle();
-            }
+            echoMessage(session, buffer, offset, length);
         }
     }
 
@@ -224,6 +229,7 @@ class MultiModuleSharedDriverTest
         final int nodeId;
         final DataCollector dataCollector;
         final ArchivingMediaDriver archivingMediaDriver;
+        final NameResolverAgent nameResolver;
 
         final ConsensusModule consensusModule0;
         final ClusteredServiceContainer container0;
@@ -237,11 +243,12 @@ class MultiModuleSharedDriverTest
         {
             this.nodeId = nodeId;
             this.dataCollector = dataCollector;
+            nameResolver = new RedirectingNameResolver(TestCluster.DEFAULT_NODE_MAPPINGS);
 
             final MediaDriver.Context driverCtx = new MediaDriver.Context()
-                .aeronDirectoryName(CommonContext.getAeronDirectoryName() + "-" + nodeId)
+                .aeronDirectoryName(CommonContext.generateRandomDirName())
                 .threadingMode(ThreadingMode.SHARED)
-                .nameResolver(new RedirectingNameResolver(TestCluster.DEFAULT_NODE_MAPPINGS))
+                .nameResolver(nameResolver)
                 .dirDeleteOnStart(true);
 
             final Archive.Context archiveCtx = TestContexts.localhostArchive()
@@ -252,19 +259,20 @@ class MultiModuleSharedDriverTest
                 .deleteArchiveOnStart(true);
 
             archivingMediaDriver = ArchivingMediaDriver.launch(driverCtx, archiveCtx);
+            dataCollector.add(archivingMediaDriver.archive().context().archiveDir());
+            dataCollector.add(archivingMediaDriver.mediaDriver().context().aeronDirectory());
+
             consensusModule0 = consensusModule(0, driverCtx.aeronDirectoryName());
+            dataCollector.add(consensusModule0.context().clusterDir());
             container0 = container(consensusModule0.context());
+
             consensusModule1 = consensusModule(1, driverCtx.aeronDirectoryName());
+            dataCollector.add(consensusModule1.context().clusterDir());
             container1 = container(consensusModule1.context());
         }
 
         public void close()
         {
-            dataCollector.add(consensusModule0.context().clusterDir());
-            dataCollector.add(consensusModule1.context().clusterDir());
-            dataCollector.add(archivingMediaDriver.archive().context().archiveDir());
-            dataCollector.add(archivingMediaDriver.mediaDriver().context().aeronDirectory());
-
             CloseHelper.closeAll(
                 client0,
                 consensusModule0,
@@ -278,17 +286,19 @@ class MultiModuleSharedDriverTest
         ConsensusModule consensusModule(final int clusterId, final String aeronDirectoryName)
         {
             final int nodeOffset = (clusterId * 100) + (nodeId * 10);
+            final String ingressChannelWithInvalidEndpointFormatToBeRemovedByNameResolver =
+                "aeron:udp?term-length=64k|endpoint=node" + nodeId + ":2" + clusterId + "11" + nodeId;
             final ConsensusModule.Context ctx = new ConsensusModule.Context()
                 .clusterMemberId(nodeId)
                 .clusterId(clusterId)
                 .deleteDirOnStart(true)
                 .aeronDirectoryName(aeronDirectoryName)
                 .clusterDir(new File(SystemUtil.tmpDirName(), "cluster-" + nodeId + "-" + clusterId))
-                .clusterMembers(TestCluster.clusterMembers(clusterId, 2))
+                .clusterMembers(TestCluster.clusterMembers(clusterId, 0, 2, 2, false))
                 .logChannel("aeron:udp?term-length=64k")
                 .serviceStreamId(104 + nodeOffset)
                 .consensusModuleStreamId(105 + nodeOffset)
-                .ingressChannel("aeron:udp?term-length=64k")
+                .ingressChannel(ingressChannelWithInvalidEndpointFormatToBeRemovedByNameResolver)
                 .replicationChannel("aeron:udp?endpoint=localhost:0");
 
             return ConsensusModule.launch(ctx);

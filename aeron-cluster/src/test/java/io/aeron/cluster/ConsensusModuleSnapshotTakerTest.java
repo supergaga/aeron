@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package io.aeron.cluster;
 
+import io.aeron.Aeron;
 import io.aeron.Counter;
 import io.aeron.ExclusivePublication;
 import io.aeron.cluster.codecs.*;
 import io.aeron.cluster.service.ClusterClock;
 import io.aeron.logbuffer.BufferClaim;
+
 import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
+import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
@@ -33,8 +38,6 @@ import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static org.agrona.BitUtil.align;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class ConsensusModuleSnapshotTakerTest
@@ -45,7 +48,6 @@ class ConsensusModuleSnapshotTakerTest
     private final PendingMessageTrackerDecoder pendingMessageTrackerDecoder = new PendingMessageTrackerDecoder();
     private final TimerDecoder timerDecoder = new TimerDecoder();
     private final ClusterSessionDecoder clusterSessionDecoder = new ClusterSessionDecoder();
-    private final ClusterMembersDecoder clusterMembersDecoder = new ClusterMembersDecoder();
     private final ExclusivePublication publication = mock(ExclusivePublication.class);
     private final IdleStrategy idleStrategy = mock(IdleStrategy.class);
 
@@ -100,7 +102,7 @@ class ConsensusModuleSnapshotTakerTest
         when(publication.offer(any(), anyInt(), anyInt()))
             .thenReturn(BACK_PRESSURED, 9L);
 
-        snapshotTaker.snapshot(pendingServiceMessageTracker);
+        snapshotTaker.snapshot(pendingServiceMessageTracker, mock(ErrorHandler.class));
 
         final InOrder inOrder = inOrder(idleStrategy, publication);
         inOrder.verify(idleStrategy).reset();
@@ -118,6 +120,35 @@ class ConsensusModuleSnapshotTakerTest
         assertEquals(-8791026472627208192L, pendingMessageTrackerDecoder.logServiceSessionId());
         assertEquals(capacity, pendingMessageTrackerDecoder.pendingMessageCapacity());
         assertEquals(serviceId, pendingMessageTrackerDecoder.serviceId());
+    }
+
+    @Test
+    void snapshotPendingServiceMessageTrackerWithServiceMessagesMissedByFollower()
+    {
+        final int serviceId = 6;
+        final PendingServiceMessageTracker pendingServiceMessageTracker = new PendingServiceMessageTracker(
+            serviceId, mock(Counter.class), mock(LogPublisher.class), mock(ClusterClock.class));
+        final AtomicBuffer headerMessageBuffer = new UnsafeBuffer(new byte[1024]);
+
+        final long expectedLogServiceSessionId = pendingServiceMessageTracker.logServiceSessionId() + 1;
+        final long expectedNextServiceSessionId = expectedLogServiceSessionId + 1;
+        when(publication.tryClaim(anyInt(), any())).thenAnswer(
+            (invocation) ->
+            {
+                final int length = invocation.getArgument(0, Integer.class);
+                final BufferClaim bufferClaim = invocation.getArgument(1, BufferClaim.class);
+
+                bufferClaim.wrap(headerMessageBuffer, 0, length + 32);
+                return (long)length;
+            });
+
+        pendingServiceMessageTracker.sweepFollowerMessages(expectedLogServiceSessionId);
+
+        snapshotTaker.snapshot(pendingServiceMessageTracker, mock(ErrorHandler.class));
+
+        pendingMessageTrackerDecoder.wrapAndApplyHeader(headerMessageBuffer, HEADER_LENGTH, messageHeaderDecoder);
+        assertEquals(expectedNextServiceSessionId, pendingMessageTrackerDecoder.nextServiceSessionId());
+        assertEquals(expectedLogServiceSessionId, pendingMessageTrackerDecoder.logServiceSessionId());
     }
 
     @Test
@@ -154,8 +185,9 @@ class ConsensusModuleSnapshotTakerTest
         final String responseChannel = "aeron:ipc";
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterSessionEncoder.BLOCK_LENGTH +
             ClusterSessionEncoder.responseChannelHeaderLength() + responseChannel.length();
-        final ClusterSession clusterSession = new ClusterSession(
-            556, 13, 1024, 800, 42, responseChannel, CloseReason.CLIENT_ACTION);
+        final ClusterSession clusterSession = new ClusterSession(2, 556, 42, responseChannel, "");
+        clusterSession.loadSnapshotState(
+            13, 1024, 800, CloseReason.CLIENT_ACTION);
         when(publication.maxPayloadLength()).thenReturn(length);
         when(publication.tryClaim(eq(length), any()))
             .thenReturn(BACK_PRESSURED, ADMIN_ACTION)
@@ -177,7 +209,7 @@ class ConsensusModuleSnapshotTakerTest
         assertEquals(clusterSession.id(), clusterSessionDecoder.clusterSessionId());
         assertEquals(clusterSession.correlationId(), clusterSessionDecoder.correlationId());
         assertEquals(clusterSession.openedLogPosition(), clusterSessionDecoder.openedLogPosition());
-        assertEquals(clusterSession.timeOfLastActivityNs(), clusterSessionDecoder.timeOfLastActivity());
+        assertEquals(Aeron.NULL_VALUE, clusterSessionDecoder.timeOfLastActivity());
         assertEquals(clusterSession.closeReason(), clusterSessionDecoder.closeReason());
         assertEquals(clusterSession.responseStreamId(), clusterSessionDecoder.responseStreamId());
         assertEquals(responseChannel, clusterSessionDecoder.responseChannel());
@@ -189,8 +221,10 @@ class ConsensusModuleSnapshotTakerTest
         final String responseChannel = "aeron:ipc?alias=very very very long string|mtu=4444";
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterSessionEncoder.BLOCK_LENGTH +
             ClusterSessionEncoder.responseChannelHeaderLength() + responseChannel.length();
-        final ClusterSession clusterSession = new ClusterSession(
-            42, -1, 76, 98, 4, responseChannel, CloseReason.TIMEOUT);
+        final ClusterSession clusterSession = new ClusterSession(0, 42, 4, responseChannel, "");
+        clusterSession.loadSnapshotState(
+            -1, 76, 98, CloseReason.TIMEOUT);
+
         when(publication.maxPayloadLength()).thenReturn(length - 1);
         when(publication.offer(any(), eq(0), eq(length)))
             .thenReturn(BACK_PRESSURED, ADMIN_ACTION)
@@ -212,73 +246,10 @@ class ConsensusModuleSnapshotTakerTest
         assertEquals(clusterSession.id(), clusterSessionDecoder.clusterSessionId());
         assertEquals(clusterSession.correlationId(), clusterSessionDecoder.correlationId());
         assertEquals(clusterSession.openedLogPosition(), clusterSessionDecoder.openedLogPosition());
-        assertEquals(clusterSession.timeOfLastActivityNs(), clusterSessionDecoder.timeOfLastActivity());
+        assertEquals(Aeron.NULL_VALUE, clusterSessionDecoder.timeOfLastActivity());
         assertEquals(clusterSession.closeReason(), clusterSessionDecoder.closeReason());
         assertEquals(clusterSession.responseStreamId(), clusterSessionDecoder.responseStreamId());
         assertEquals(responseChannel, clusterSessionDecoder.responseChannel());
-    }
-
-    @Test
-    void snapshotClusterMembersShouldUseTryClaimIfDataFitsIntoMaxPayloadSize()
-    {
-        final int offset = 120;
-        final int memberId = 2;
-        final int highMemberId = 8;
-        final String clusterMembers = "0,ingress:port,consensus:port,log:port,catchup:port,archive:port|" +
-            "1,ingress:port,consensus:port,log:port,catchup:port,archive:port|" +
-            "2,ingress:port,consensus:port,log:port,catchup:port,archive:port";
-        final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterMembersEncoder.BLOCK_LENGTH +
-            ClusterMembersEncoder.clusterMembersHeaderLength() + clusterMembers.length();
-        when(publication.maxPayloadLength()).thenReturn(length);
-        when(publication.tryClaim(eq(length), any()))
-            .thenReturn(ADMIN_ACTION)
-            .thenAnswer(mockTryClaim(offset));
-
-        snapshotTaker.snapshotClusterMembers(memberId, highMemberId, clusterMembers);
-
-        final InOrder inOrder = inOrder(idleStrategy, publication);
-        inOrder.verify(publication).maxPayloadLength();
-        inOrder.verify(idleStrategy).reset();
-        inOrder.verify(publication).tryClaim(anyInt(), any());
-        inOrder.verify(idleStrategy).idle();
-        inOrder.verify(publication).tryClaim(anyInt(), any());
-        inOrder.verifyNoMoreInteractions();
-
-        clusterMembersDecoder.wrapAndApplyHeader(buffer, offset + HEADER_LENGTH, messageHeaderDecoder);
-        assertEquals(memberId, clusterMembersDecoder.memberId());
-        assertEquals(highMemberId, clusterMembersDecoder.highMemberId());
-        assertEquals(clusterMembers, clusterMembersDecoder.clusterMembers());
-    }
-
-    @Test
-    void snapshotClusterMembersShouldUseOfferIfDataDoesNotFitIntoMaxPayloadSize()
-    {
-        final int memberId = 2;
-        final int highMemberId = 8;
-        final String clusterMembers = "0,ingress:port,consensus:port,log:port,catchup:port,archive:port|" +
-            "1,ingress:port,consensus:port,log:port,catchup:port,archive:port|" +
-            "2,ingress:port,consensus:port,log:port,catchup:port,archive:port";
-        final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterMembersEncoder.BLOCK_LENGTH +
-            ClusterMembersEncoder.clusterMembersHeaderLength() + clusterMembers.length();
-        when(publication.maxPayloadLength()).thenReturn(40);
-        when(publication.offer(any(), eq(0), eq(length)))
-            .thenReturn(BACK_PRESSURED)
-            .thenAnswer(mockOffer());
-
-        snapshotTaker.snapshotClusterMembers(memberId, highMemberId, clusterMembers);
-
-        final InOrder inOrder = inOrder(idleStrategy, publication);
-        inOrder.verify(publication).maxPayloadLength();
-        inOrder.verify(idleStrategy).reset();
-        inOrder.verify(publication).offer(any(), anyInt(), anyInt());
-        inOrder.verify(idleStrategy).idle();
-        inOrder.verify(publication).offer(any(), anyInt(), anyInt());
-        inOrder.verifyNoMoreInteractions();
-
-        clusterMembersDecoder.wrapAndApplyHeader(buffer, 0, messageHeaderDecoder);
-        assertEquals(memberId, clusterMembersDecoder.memberId());
-        assertEquals(highMemberId, clusterMembersDecoder.highMemberId());
-        assertEquals(clusterMembers, clusterMembersDecoder.clusterMembers());
     }
 
     private Answer<Long> mockTryClaim(final int offset)

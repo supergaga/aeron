@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,13 +42,20 @@ int aeron_driver_ensure_dir_is_recreated(aeron_driver_context_t *context);
 typedef std::array<std::uint8_t, CAPACITY> buffer_t;
 typedef std::array<std::uint8_t, 4 * CAPACITY> buffer_4x_t;
 
+typedef struct log_buffer_info_stct
+{
+    aeron_mapped_raw_log_t mapped_raw_log;
+    char log_file_name[AERON_MAX_PATH];
+}
+log_buffer_info_t;
+
 void verify_conductor_cmd_function(int32_t msg_type_id, const void *item, size_t length, void *clientd)
 {
     auto *cmd = (aeron_command_base_t *)item;
     ASSERT_EQ(clientd, (void *)cmd->func);
 }
 
-class ReceiverTestBase : public testing::Test
+class ReceiverTestBase
 {
 public:
     ReceiverTestBase() :
@@ -59,7 +66,7 @@ public:
     }
 
 protected:
-    void SetUp() override
+    void DoSetUp()
     {
         aeron_test_udp_bindings_load(&m_transport_bindings);
         aeron_driver_context_init(&m_context);
@@ -76,7 +83,6 @@ protected:
         aeron_mpsc_rb_init(&m_conductor_command_queue, command_buffer, command_buffer_capacity);
 
         m_conductor_proxy.command_queue = &m_conductor_command_queue;
-        m_conductor_proxy.threading_mode = AERON_THREADING_MODE_DEDICATED;
         m_conductor_proxy.fail_counter = &m_conductor_fail_counter;
         m_conductor_proxy.conductor = nullptr;
 
@@ -100,15 +106,26 @@ protected:
             &m_error_log, m_error_log_buffer.data(), m_error_log_buffer.size(), aeron_epoch_clock);
         aeron_driver_receiver_init(&m_receiver, m_context, &m_system_counters, &m_error_log);
 
+        aeron_loss_reporter_init(&m_loss_reporter, m_loss_reporter_buffer.data(), m_loss_reporter_buffer.size());
+
         m_receiver_proxy.receiver = &m_receiver;
         m_context->receiver_proxy = &m_receiver_proxy;
+        m_context->error_log = &m_error_log;
+        m_context->error_buffer = m_error_log_buffer.data();
+        m_context->error_buffer_length = m_error_log_buffer.size();
     }
 
-    void TearDown() override
+    void DoTearDown()
     {
         for (auto image : m_images)
         {
             aeron_publication_image_close(&m_counters_manager, image);
+        }
+
+        for (auto log_buffer : m_log_buffers)
+        {
+            m_context->raw_log_free_func(&log_buffer->mapped_raw_log, log_buffer->log_file_name);
+            aeron_free(log_buffer);
         }
 
         for (auto endpoint : m_endpoints)
@@ -137,7 +154,7 @@ protected:
         status_indicator.value_addr = aeron_counters_manager_addr(&m_counters_manager, status_indicator.counter_id);
 
         aeron_receive_destination_t *destination = nullptr;
-        if (!channel->is_manual_control_mode)
+        if (AERON_UDP_CHANNEL_CONTROL_MODE_MANUAL != channel->control_mode)
         {
             if (0 != aeron_receive_destination_create(
                 &destination, channel, channel, m_context, &m_counters_manager, 0, status_indicator.counter_id))
@@ -186,12 +203,36 @@ protected:
         return channel;
     }
 
+    static aeron_data_header_t *dataPacket(
+        buffer_t &buffer,
+        int32_t stream_id,
+        int32_t session_id,
+        size_t frame_length,
+        int32_t term_id = 0,
+        int32_t term_offset = 0)
+    {
+        auto *data_header = (aeron_data_header_t *)buffer.data();
+        data_header->frame_header.frame_length = (int32_t)frame_length;
+        data_header->frame_header.version = AERON_FRAME_HEADER_VERSION;
+        data_header->frame_header.flags = 0;
+        data_header->frame_header.type = AERON_HDR_TYPE_DATA;
+        data_header->stream_id = stream_id;
+        data_header->session_id = session_id;
+        data_header->term_id = term_id;
+        data_header->term_offset = term_offset;
+
+        return data_header;
+    }
+
     aeron_publication_image_t *createImage(
         aeron_receive_channel_endpoint_t *endpoint,
         aeron_receive_destination_t *destination,
         int32_t stream_id,
         int32_t session_id,
-        int64_t correlation_id = 0)
+        int64_t correlation_id = 0,
+        bool is_reliable = true,
+        bool treat_as_multicast = false,
+        bool is_sparse = true)
     {
         aeron_publication_image_t *image;
         aeron_congestion_control_strategy_t *congestion_control_strategy;
@@ -199,12 +240,19 @@ protected:
         // Counters are copied...
         aeron_position_t hwm_position;
         aeron_position_t pos_position;
+        aeron_atomic_counter_t rcv_naks_sent;
+
+        bool is_exclusive = false;
+        int64_t client_id = 9999999;
         pos_position.counter_id = aeron_counter_publisher_position_allocate(
-            &m_counters_manager, 0, session_id, stream_id, strlen("foo"), "foo");
+            &m_counters_manager, client_id, 0, session_id, stream_id, strlen("foo"), "foo", is_exclusive);
         pos_position.value_addr = aeron_counters_manager_addr(&m_counters_manager, pos_position.counter_id);
         hwm_position.counter_id = aeron_counter_publisher_position_allocate(
-            &m_counters_manager, 0, session_id, stream_id, strlen("foo"), "foo");
+            &m_counters_manager, client_id, 0, session_id, stream_id, strlen("foo"), "foo", is_exclusive);
         hwm_position.value_addr = aeron_counters_manager_addr(&m_counters_manager, hwm_position.counter_id);
+        rcv_naks_sent.counter_id = aeron_counter_receiver_naks_sent_allocate(
+            &m_counters_manager, client_id, 0, session_id, stream_id, strlen("foo"), "foo");
+        rcv_naks_sent.value_addr = aeron_counters_manager_addr(&m_counters_manager, rcv_naks_sent.counter_id);
 
         aeron_udp_channel_t *channel = endpoint->conductor_fields.udp_channel;
         m_context->congestion_control_supplier_func(
@@ -218,11 +266,68 @@ protected:
             m_context,
             &m_counters_manager);
 
+        aeron_driver_conductor_t conductor; // the conductor struct is only used for its context
+        conductor.context = m_context;
+
+
+        log_buffer_info_t *log_buffer_info;
+        if (aeron_alloc((void **)&log_buffer_info, sizeof(log_buffer_info_t)) < 0)
+        {
+            return nullptr;
+        }
+
+        int path_length = aeron_publication_image_location(
+            log_buffer_info->log_file_name,
+            sizeof(log_buffer_info->log_file_name),
+            m_context->aeron_dir,
+            correlation_id);
+        if (path_length < 0)
+        {
+            aeron_free(log_buffer_info);
+            return nullptr;
+        }
+
+        if (m_context->raw_log_map_func(
+            &log_buffer_info->mapped_raw_log,
+            log_buffer_info->log_file_name,
+            is_sparse,
+            TERM_BUFFER_SIZE,
+            m_context->file_page_size) < 0)
+        {
+            aeron_free(log_buffer_info);
+            return nullptr;
+        }
+
+        m_log_buffers.push_back(log_buffer_info);
+
         if (aeron_publication_image_create(
-            &image, endpoint, destination, m_context, correlation_id, session_id, stream_id, 0, 0, 0,
-            &hwm_position, &pos_position, congestion_control_strategy,
-            &channel->remote_control, &channel->local_data,
-            TERM_BUFFER_SIZE, MTU, nullptr, true, true, false, &m_system_counters) < 0)
+            &image,
+            endpoint,
+            destination,
+            &conductor,
+            correlation_id,
+            session_id,
+            stream_id,
+            0,
+            0,
+            0,
+            &hwm_position,
+            &pos_position,
+            &rcv_naks_sent,
+            congestion_control_strategy,
+            &channel->remote_control,
+            &channel->local_data,
+            TERM_BUFFER_SIZE,
+            MTU,
+            UINT8_C(0),
+            &m_loss_reporter,
+            is_reliable,
+            is_sparse,
+            treat_as_multicast,
+            &m_system_counters,
+            &log_buffer_info->mapped_raw_log,
+            static_cast<size_t>(path_length),
+            log_buffer_info->log_file_name) < 0)
         {
             congestion_control_strategy->fini(congestion_control_strategy);
             return nullptr;
@@ -231,20 +336,6 @@ protected:
         m_images.push_back(image);
 
         return image;
-    }
-
-    static aeron_data_header_t *dataPacket(
-        buffer_t &buffer, int32_t stream_id, int32_t session_id, int32_t term_id = 0, int32_t term_offset = 0)
-    {
-        auto *data_header = (aeron_data_header_t *)buffer.data();
-        data_header->frame_header.type = AERON_HDR_TYPE_DATA;
-        data_header->frame_header.flags = 0;
-        data_header->stream_id = stream_id;
-        data_header->session_id = session_id;
-        data_header->term_id = term_id;
-        data_header->term_offset = term_offset;
-
-        return data_header;
     }
 
     static aeron_setup_header_t *setupPacket(
@@ -274,12 +365,15 @@ protected:
     int64_t m_conductor_fail_counter = 0;
     aeron_driver_receiver_t m_receiver = {};
     aeron_distinct_error_log_t m_error_log = {};
+    aeron_loss_reporter_t m_loss_reporter = {};
+    AERON_DECL_ALIGNED(buffer_t m_loss_reporter_buffer, 16) = {};
     AERON_DECL_ALIGNED(buffer_t m_error_log_buffer, 16) = {};
     AERON_DECL_ALIGNED(buffer_t m_counter_value_buffer, 16) = {};
     AERON_DECL_ALIGNED(buffer_4x_t m_counter_meta_buffer, 16) = {};
     std::vector<aeron_receive_channel_endpoint_t *> m_endpoints;
     std::vector<aeron_udp_channel_t *> m_channels_for_tear_down;
     std::vector<aeron_publication_image_t *> m_images;
+    std::vector<log_buffer_info_t *> m_log_buffers;
 };
 
 #endif //AERON_AERON_RECEIVER_TEST_H

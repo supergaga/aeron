@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,21 +56,21 @@ namespace aeron { namespace concurrent { namespace logbuffer
 namespace FrameDescriptor
 {
 
-static const util::index_t FRAME_ALIGNMENT = 32;
+static constexpr util::index_t FRAME_ALIGNMENT = 32;
 
-static const std::uint8_t BEGIN_FRAG = 0x80;
-static const std::uint8_t END_FRAG = 0x40;
-static const std::uint8_t UNFRAGMENTED = BEGIN_FRAG | END_FRAG;
+static constexpr std::uint8_t BEGIN_FRAG = 0x80;
+static constexpr std::uint8_t END_FRAG = 0x40;
+static constexpr std::uint8_t UNFRAGMENTED = BEGIN_FRAG | END_FRAG;
 
-static const util::index_t ALIGNED_HEADER_LENGTH = 32;
+static constexpr util::index_t ALIGNED_HEADER_LENGTH = 32;
 
-static const util::index_t VERSION_OFFSET = 4;
-static const util::index_t FLAGS_OFFSET = 5;
-static const util::index_t TYPE_OFFSET = 6;
-static const util::index_t LENGTH_OFFSET = 0;
-static const util::index_t TERM_OFFSET = 8;
+static constexpr util::index_t VERSION_OFFSET = 4;
+static constexpr util::index_t FLAGS_OFFSET = 5;
+static constexpr util::index_t TYPE_OFFSET = 6;
+static constexpr util::index_t LENGTH_OFFSET = 0;
+static constexpr util::index_t TERM_OFFSET = 8;
 
-static const util::index_t MAX_MESSAGE_LENGTH = 16 * 1024 * 1024;
+static constexpr util::index_t MAX_MESSAGE_LENGTH = 16 * 1024 * 1024;
 
 inline static void checkHeaderLength(util::index_t length)
 {
@@ -78,7 +78,7 @@ inline static void checkHeaderLength(util::index_t length)
     {
         throw util::IllegalStateException(
             "frame header length " + std::to_string(length) +
-            " must be equal to " + std::to_string(DataFrameHeader::LENGTH), SOURCEINFO);
+            " must be equal to " + std::to_string(DataFrameHeader::LENGTH), SOURCEINFO, EINVAL);
     }
 }
 
@@ -88,7 +88,7 @@ inline static void checkMaxFrameLength(util::index_t length)
     {
         throw util::IllegalStateException(
             "max frame length must be a multiple of " + std::to_string(FRAME_ALIGNMENT) +
-            ", length=" + std::to_string(length), SOURCEINFO);
+            ", length=" + std::to_string(length), SOURCEINFO, EINVAL);
     }
 }
 

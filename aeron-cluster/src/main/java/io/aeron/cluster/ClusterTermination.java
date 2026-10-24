@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,14 @@
  */
 package io.aeron.cluster;
 
-
-import io.aeron.cluster.client.ClusterException;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.exceptions.AeronException;
 import org.agrona.ErrorHandler;
 
 class ClusterTermination
 {
     private long deadlineNs;
-    private boolean haveServicesTerminated = false;
+    private boolean isAwaitingServices = true;
 
     ClusterTermination(final long deadlineNs)
     {
@@ -35,19 +34,30 @@ class ClusterTermination
         this.deadlineNs = deadlineNs;
     }
 
-    boolean canTerminate(final ClusterMember[] members, final long terminationPosition, final long nowNs)
+    boolean canTerminate(final ClusterMember[] members, final long nowNs)
     {
-        if (haveServicesTerminated)
+        if (isAwaitingServices)
         {
-            return haveFollowersTerminated(members, terminationPosition) || nowNs >= deadlineNs;
+            return false;
         }
 
-        return false;
+        boolean result = true;
+
+        for (final ClusterMember member : members)
+        {
+            if (!member.isLeader() && !member.hasTerminated())
+            {
+                result = false;
+                break;
+            }
+        }
+
+        return result || nowNs >= deadlineNs;
     }
 
     void onServicesTerminated()
     {
-        haveServicesTerminated = true;
+        isAwaitingServices = false;
     }
 
     void terminationPosition(
@@ -66,26 +76,10 @@ class ClusterTermination
             {
                 if (!consensusPublisher.terminationPosition(member.publication(), leadershipTermId, position))
                 {
-                    errorHandler.onError(new ClusterException(
+                    errorHandler.onError(new ClusterEvent(
                         "failed to send termination position to member=" + member.id(), AeronException.Category.WARN));
                 }
             }
         }
-    }
-
-    private static boolean haveFollowersTerminated(final ClusterMember[] members, final long terminationPosition)
-    {
-        boolean result = true;
-
-        for (final ClusterMember member : members)
-        {
-            if (!member.isLeader() && !member.hasTerminated())
-            {
-                result = false;
-                break;
-            }
-        }
-
-        return result;
     }
 }

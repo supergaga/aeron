@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import org.agrona.collections.MutableBoolean;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -56,19 +57,26 @@ class BufferClaimMessageTest
     @RegisterExtension
     final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Tests::onError)
-        .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-        .threadingMode(ThreadingMode.SHARED),
-        testWatcher);
+    private TestMediaDriver driver;
+    private Aeron aeron;
 
-    private final Aeron aeron = Aeron.connect();
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .errorHandler(Tests::onError)
+                .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
+                .threadingMode(ThreadingMode.SHARED),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
+    }
 
     @AfterEach
     void after()
     {
         CloseHelper.closeAll(aeron, driver);
-        driver.context().deleteDirectory();
     }
 
     @ParameterizedTest
@@ -119,11 +127,10 @@ class BufferClaimMessageTest
     @InterruptAfter(10)
     void shouldTransferReservedValue(final String channel)
     {
-        final BufferClaim bufferClaim = new BufferClaim();
-
         try (Subscription subscription = aeron.addSubscription(channel, STREAM_ID);
             Publication publication = aeron.addPublication(channel, STREAM_ID))
         {
+            final BufferClaim bufferClaim = new BufferClaim();
             while (publication.tryClaim(MESSAGE_LENGTH, bufferClaim) < 0L)
             {
                 Tests.yield();
@@ -134,18 +141,17 @@ class BufferClaimMessageTest
             bufferClaim.commit();
 
             final MutableBoolean done = new MutableBoolean();
+            final FragmentHandler fragmentHandler =
+                (buffer, offset, length, header) ->
+                {
+                    assertEquals(MESSAGE_LENGTH, length);
+                    assertEquals(reservedValue, header.reservedValue());
+                    done.value = true;
+                };
+
             while (!done.get())
             {
-                final int fragments = subscription.poll(
-                    (buffer, offset, length, header) ->
-                    {
-                        assertEquals(MESSAGE_LENGTH, length);
-                        assertEquals(reservedValue, header.reservedValue());
-
-                        done.value = true;
-                    },
-                    FRAGMENT_COUNT_LIMIT);
-
+                final int fragments = subscription.poll(fragmentHandler, FRAGMENT_COUNT_LIMIT);
                 if (0 == fragments)
                 {
                     Tests.yield();

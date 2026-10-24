@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,17 +29,23 @@
 #include "aeron_context.h"
 #include "util/aeron_error.h"
 #include "util/aeron_parse_util.h"
+#include "util/aeron_strutil.h"
 
 #define AERON_CONTEXT_USE_CONDUCTOR_AGENT_INVOKER_DEFAULT (false)
 #define AERON_CONTEXT_DRIVER_TIMEOUT_MS_DEFAULT (10 * 1000L)
 #define AERON_CONTEXT_KEEPALIVE_INTERVAL_NS_DEFAULT (500 * 1000 * 1000LL)
 #define AERON_CONTEXT_RESOURCE_LINGER_DURATION_NS_DEFAULT (3 * 1000 * 1000 * 1000LL)
+#define AERON_CONTEXT_IDLE_SLEEP_DURATION_NS_DEFAULT (16 * 1000 * 1000LL)
 #define AERON_CONTEXT_PRE_TOUCH_MAPPED_MEMORY_DEFAULT (false)
 
 void aeron_default_error_handler(void *clientd, int errcode, const char *message)
 {
-    fprintf(stderr, "ERROR: (%d): %s\n", errcode, message);
+    AERON_FPRINTF(stderr, "ERROR: (%d): %s\n", errcode, message);
     exit(EXIT_FAILURE);
+}
+
+void aeron_default_error_frame_handler(void *clientd, aeron_publication_error_values_t *message)
+{
 }
 
 int aeron_context_init(aeron_context_t **context)
@@ -49,31 +55,39 @@ int aeron_context_init(aeron_context_t **context)
     if (NULL == context)
     {
         AERON_SET_ERR(EINVAL, "%s", "aeron_context_init(NULL)");
-        return -1;
+        goto error;
     }
 
     if (aeron_alloc((void **)&_context, sizeof(aeron_context_t)) < 0)
     {
         AERON_APPEND_ERR("%s", "Unable to allocate aeron_context");
-        return -1;
+        goto error;
     }
 
-    if (aeron_alloc((void **)&_context->aeron_dir, AERON_MAX_PATH) < 0)
+    const size_t command_buffer_capacity = AERON_CLIENT_COMMAND_QUEUE_CAPACITY * 64 + AERON_RB_TRAILER_LENGTH;
+    size_t offset;
+    if (aeron_alloc_aligned((void **)&_context->command_buffer, &offset, command_buffer_capacity, AERON_CACHE_LINE_LENGTH) < 0)
     {
-        AERON_APPEND_ERR("%s", "Unable to allocate aeron_dir path");
-        return -1;
+        AERON_APPEND_ERR("%s", "Unable to allocate buffer for commands");
+        goto error;
     }
 
-    if (aeron_mpsc_concurrent_array_queue_init(&_context->command_queue, AERON_CLIENT_COMMAND_QUEUE_CAPACITY) < 0)
+    if (aeron_mpsc_rb_init(&_context->command_rb, _context->command_buffer + offset, command_buffer_capacity) < 0)
     {
-        AERON_APPEND_ERR("%s", "Unable to init command_queue");
-        return -1;
+        AERON_APPEND_ERR("%s", "Unable to init command_rb");
+        goto error;
     }
 
-    aeron_default_path(_context->aeron_dir, AERON_MAX_PATH - 1);
+    if (aeron_default_path(_context->aeron_dir, sizeof(_context->aeron_dir)) < 0)
+    {
+        AERON_APPEND_ERR("%s", "Failed to resolve default aeron directory path");
+        goto error;
+    }
 
+    _context->client_name[0] = '\0';
     _context->error_handler = aeron_default_error_handler;
     _context->error_handler_clientd = NULL;
+    _context->error_frame_handler = aeron_default_error_frame_handler;
     _context->on_new_publication = NULL;
     _context->on_new_publication_clientd = NULL;
     _context->on_new_exclusive_publication = NULL;
@@ -87,6 +101,11 @@ int aeron_context_init(aeron_context_t **context)
     _context->on_close_client = NULL;
     _context->on_close_client_clientd = NULL;
 
+    _context->idle_strategy_name = NULL;
+    _context->idle_strategy_init_args = NULL;
+    _context->idle_strategy_state = NULL;
+    _context->idle_strategy_func = NULL;
+
     _context->use_conductor_agent_invoker = AERON_CONTEXT_USE_CONDUCTOR_AGENT_INVOKER_DEFAULT;
     _context->agent_on_start_func = NULL;
     _context->agent_on_start_state = NULL;
@@ -94,6 +113,7 @@ int aeron_context_init(aeron_context_t **context)
     _context->driver_timeout_ms = AERON_CONTEXT_DRIVER_TIMEOUT_MS_DEFAULT;
     _context->keepalive_interval_ns = AERON_CONTEXT_KEEPALIVE_INTERVAL_NS_DEFAULT;
     _context->resource_linger_duration_ns = AERON_CONTEXT_RESOURCE_LINGER_DURATION_NS_DEFAULT;
+    _context->idle_sleep_duration_ns = AERON_CONTEXT_IDLE_SLEEP_DURATION_NS_DEFAULT;
 
     _context->epoch_clock = aeron_epoch_clock;
     _context->nano_clock = aeron_nano_clock;
@@ -102,7 +122,20 @@ int aeron_context_init(aeron_context_t **context)
 
     if ((value = getenv(AERON_DIR_ENV_VAR)))
     {
-        snprintf(_context->aeron_dir, AERON_MAX_PATH - 1, "%s", value);
+        if (aeron_context_set_dir(_context, value) < 0)
+        {
+            AERON_APPEND_ERR("%s", "");
+            goto error;
+        }
+    }
+
+    if ((value = getenv(AERON_CLIENT_NAME_ENV_VAR)))
+    {
+        if (aeron_context_set_client_name(_context, value) < 0)
+        {
+            AERON_APPEND_ERR("%s", "");
+            goto error;
+        }
     }
 
     if ((value = getenv(AERON_DRIVER_TIMEOUT_ENV_VAR)))
@@ -114,7 +147,7 @@ int aeron_context_init(aeron_context_t **context)
         if ((0 == result && 0 != errno) || '\0' != *end_ptr)
         {
             AERON_SET_ERR(EINVAL, "could not parse driver timeout: %s=%s", AERON_DRIVER_TIMEOUT_ENV_VAR, value);
-            return -1;
+            goto error;
         }
 
         _context->driver_timeout_ms = result;
@@ -126,23 +159,58 @@ int aeron_context_init(aeron_context_t **context)
         if (aeron_parse_duration_ns(value, &result) < 0)
         {
             AERON_SET_ERR(EINVAL, "could not parse: %s=%s", AERON_CLIENT_RESOURCE_LINGER_DURATION_ENV_VAR, value);
-            return -1;
+            goto error;
         }
 
         _context->resource_linger_duration_ns = result;
     }
 
+    if ((value = getenv(AERON_CLIENT_IDLE_SLEEP_DURATION_ENV_VAR)))
+    {
+        uint64_t result;
+        if (aeron_parse_duration_ns(value, &result) < 0)
+        {
+            AERON_SET_ERR(EINVAL, "could not parse: %s=%s", AERON_CLIENT_IDLE_SLEEP_DURATION_ENV_VAR, value);
+            goto error;
+        }
+
+        _context->idle_sleep_duration_ns = result;
+    }
+
     _context->pre_touch_mapped_memory = aeron_parse_bool(
         getenv(AERON_CLIENT_PRE_TOUCH_MAPPED_MEMORY_ENV_VAR), AERON_CONTEXT_PRE_TOUCH_MAPPED_MEMORY_DEFAULT);
 
-    if ((_context->idle_strategy_func = aeron_idle_strategy_load(
-        "sleep-ns", &_context->idle_strategy_state, NULL, "1ms")) == NULL)
+    _context->idle_strategy_name = aeron_strndup("sleep-ns", AERON_MAX_PATH);
+
+    size_t init_args_size = 21; // 20 (UINT64_MAX) + 1
+    if (aeron_alloc((void**)&_context->idle_strategy_init_args, init_args_size) < 0)
     {
-        return -1;
+        AERON_APPEND_ERR("%s", "");
+        goto error;
+    }
+
+    int rc = snprintf(_context->idle_strategy_init_args, init_args_size, "%" PRIu64, _context->idle_sleep_duration_ns);
+    if (rc < 0 || rc >= (int)init_args_size)
+    {
+        AERON_SET_ERR(EINVAL, "error formatting idle_strategy_init_args=%d", rc);
+        goto error;
+    }
+
+    if ((_context->idle_strategy_func = aeron_idle_strategy_load(
+        _context->idle_strategy_name,
+        &_context->idle_strategy_state,
+        NULL,
+        _context->idle_strategy_init_args)) == NULL)
+    {
+        goto error;
     }
 
     *context = _context;
     return 0;
+
+error:
+    aeron_context_close(_context);
+    return -1;
 }
 
 int aeron_context_close(aeron_context_t *context)
@@ -151,10 +219,10 @@ int aeron_context_close(aeron_context_t *context)
     {
         aeron_unmap(&context->cnc_map);
 
-        aeron_mpsc_concurrent_array_queue_close(&context->command_queue);
-
-        aeron_free((void *)context->aeron_dir);
+        aeron_free(context->command_buffer);
         aeron_free(context->idle_strategy_state);
+        aeron_free(context->idle_strategy_init_args);
+        aeron_free((void*)context->idle_strategy_name);
         aeron_free(context);
     }
 
@@ -178,13 +246,35 @@ int aeron_context_set_dir(aeron_context_t *context, const char *value)
     AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
     AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, value);
 
-    snprintf(context->aeron_dir, AERON_MAX_PATH - 1, "%s", value);
+    snprintf(context->aeron_dir, sizeof(context->aeron_dir), "%s", value);
     return 0;
 }
 
 const char *aeron_context_get_dir(aeron_context_t *context)
 {
     return NULL != context ? context->aeron_dir : NULL;
+}
+
+int aeron_context_set_client_name(aeron_context_t *context, const char *value)
+{
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, value);
+
+    size_t copy_length = 0;
+    if (!aeron_str_length(value, AERON_COUNTER_MAX_CLIENT_NAME_LENGTH + 1, &copy_length))
+    {
+        AERON_SET_ERR(EINVAL, "client_name length must <= %d", AERON_COUNTER_MAX_CLIENT_NAME_LENGTH);
+        return -1;
+    }
+
+    memcpy(context->client_name, value, copy_length);
+    context->client_name[copy_length] = '\0';
+    return 0;
+}
+
+const char *aeron_context_get_client_name(aeron_context_t *context)
+{
+    return NULL != context ? context->client_name : "";
 }
 
 int aeron_context_set_driver_timeout_ms(aeron_context_t *context, uint64_t value)
@@ -226,6 +316,63 @@ uint64_t aeron_context_get_resource_linger_duration_ns(aeron_context_t *context)
     return NULL == context ? AERON_CONTEXT_RESOURCE_LINGER_DURATION_NS_DEFAULT : context->resource_linger_duration_ns;
 }
 
+int aeron_context_set_idle_sleep_duration_ns(aeron_context_t *context, uint64_t value)
+{
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
+
+    context->idle_sleep_duration_ns = value;
+    return 0;
+}
+
+uint64_t aeron_context_get_idle_sleep_duration_ns(aeron_context_t *context)
+{
+    return NULL == context ? AERON_CONTEXT_IDLE_SLEEP_DURATION_NS_DEFAULT : context->idle_sleep_duration_ns;
+}
+
+int aeron_context_set_idle_strategy_init_args(aeron_context_t *context, const char *value)
+{
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
+
+    aeron_free(context->idle_strategy_init_args);
+    context->idle_strategy_init_args = NULL == value ? NULL : aeron_strndup(value, AERON_MAX_PATH);
+
+    return 0;
+}
+
+const char *aeron_context_get_idle_strategy_init_args(aeron_context_t *context)
+{
+    return NULL != context ? context->idle_strategy_init_args : NULL;
+}
+
+int aeron_context_set_idle_strategy(aeron_context_t *context, const char *value)
+{
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, value);
+
+    aeron_free(context->idle_strategy_state);
+    aeron_free((void *)context->idle_strategy_name);
+
+    context->idle_strategy_state = NULL;
+    context->idle_strategy_name = NULL;
+
+    if ((context->idle_strategy_func = aeron_idle_strategy_load(
+        value,
+        &context->idle_strategy_state,
+        NULL,
+        context->idle_strategy_init_args)) == NULL)
+    {
+        return -1;
+    }
+
+    context->idle_strategy_name = aeron_strndup(value, AERON_MAX_PATH);
+    return 0;
+}
+
+const char *aeron_context_get_idle_strategy(aeron_context_t *context)
+{
+    return NULL != context ? context->idle_strategy_name : "sleep-ns";
+}
+
 int aeron_context_set_pre_touch_mapped_memory(aeron_context_t *context, bool value)
 {
     AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
@@ -257,6 +404,26 @@ void *aeron_context_get_error_handler_clientd(aeron_context_t *context)
 {
     return NULL != context ? context->error_handler_clientd : NULL;
 }
+
+int aeron_context_set_publication_error_frame_handler(aeron_context_t *context, aeron_publication_error_frame_handler_t handler, void *clientd)
+{
+    AERON_CONTEXT_SET_CHECK_ARG_AND_RETURN(-1, context);
+
+    context->error_frame_handler = handler;
+    context->error_frame_handler_clientd = clientd;
+    return 0;
+}
+
+aeron_publication_error_frame_handler_t aeron_context_get_publication_error_frame_handler(aeron_context_t *context)
+{
+    return NULL != context ? context->error_frame_handler : NULL;
+}
+
+void *aeron_context_get_publication_error_frame_handler_clientd(aeron_context_t *context)
+{
+    return NULL != context ? context->error_frame_handler_clientd : NULL;
+}
+
 
 int aeron_context_set_on_new_publication(aeron_context_t *context, aeron_on_new_publication_t handler, void *clientd)
 {
@@ -394,9 +561,9 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
 {
     size_t min_length = AERON_CNC_VERSION_AND_META_DATA_LENGTH;
 
-    if (AERON_MAX_PATH < token_length)
+    if (token_length > AERON_MAX_PATH)
     {
-        AERON_SET_ERR(EINVAL, "Token too long: %lu", (unsigned long)token_length);
+        AERON_SET_ERR(EINVAL, "Token too long: %" PRIu64, (uint64_t)token_length);
         return -1;
     }
 
@@ -421,12 +588,12 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
         if (aeron_map_existing_file(&cnc_mmap, filename) < 0)
         {
             AERON_APPEND_ERR("%s", "Failed to map cnc for driver termination");
-            return aeron_errcode();
+            return -1;
         }
 
         if (cnc_mmap.length > min_length)
         {
-            int result = 1;
+            int result = -1;
 
             aeron_cnc_metadata_t *metadata = (aeron_cnc_metadata_t *)cnc_mmap.addr;
             int32_t cnc_version = aeron_cnc_version_volatile(metadata);
@@ -434,8 +601,6 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
             if (cnc_version <= 0)
             {
                 AERON_SET_ERR(EINVAL, "%s", "Aeron CnC not initialised");
-
-                result = -1;
                 goto cleanup;
             }
 
@@ -443,11 +608,9 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
             {
                 AERON_SET_ERR(
                     EINVAL,
-                    "Aeron CnC version does not match: client=%" PRId32 ", file=%" PRId32,
+                    "Aeron CnC version does not match: client=%" PRIi32 ", file=%" PRIi32,
                     AERON_CNC_VERSION,
                     cnc_version);
-
-                result = -1;
                 goto cleanup;
             }
 
@@ -455,18 +618,15 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
             {
                 AERON_SET_ERR(
                     EINVAL,
-                    "Driver version insufficient: client=%" PRId32 ", file=%" PRId32,
+                    "Driver version insufficient: client=%" PRIi32 ", file=%" PRIi32,
                     AERON_CNC_VERSION,
                     cnc_version);
-
-                result = -1;
                 goto cleanup;
             }
 
             if (!aeron_cnc_is_file_length_sufficient(&cnc_mmap))
             {
-                AERON_SET_ERR(EINVAL, "Aeron CnC file length not sufficient: length=%" PRId64, file_length_result);
-                result = -1;
+                AERON_SET_ERR(EINVAL, "Aeron CnC file length not sufficient: length=%" PRIi64, file_length_result);
                 goto cleanup;
             }
 
@@ -475,7 +635,16 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
                 &rb, aeron_cnc_to_driver_buffer(metadata), (size_t)metadata->to_driver_buffer_length) < 0)
             {
                 AERON_APPEND_ERR("%s", "Failed to setup ring buffer for termination");
-                result = -1;
+                goto cleanup;
+            }
+
+            if (token_length > rb.max_message_length)
+            {
+                AERON_SET_ERR(
+                    EINVAL,
+                    "Token length (%" PRIu64 ") > max message length (%" PRIu64 ")",
+                    (uint64_t)token_length,
+                    (uint64_t)rb.max_message_length);
                 goto cleanup;
             }
 
@@ -483,8 +652,8 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
             const int32_t offset = aeron_mpsc_rb_try_claim(&rb, AERON_COMMAND_TERMINATE_DRIVER, command_length);
             if (offset < 0)
             {
-                AERON_SET_ERR(AERON_CLIENT_ERROR_BUFFER_FULL, "%s", "Unable to write to driver ring buffer");
-                result = -1;
+                AERON_SET_ERR(-AERON_CLIENT_ERROR_BUFFER_FULL, "%s", "Unable to write to driver ring buffer");
+                goto cleanup;
             }
 
             aeron_terminate_driver_command_t *command = (aeron_terminate_driver_command_t *)(rb.buffer + offset);
@@ -495,6 +664,7 @@ int aeron_context_request_driver_termination(const char *directory, const uint8_
             memcpy((void *)(command + 1), token_buffer, token_length);
 
             aeron_mpsc_rb_commit(&rb, offset);
+            result = 1;
 
 cleanup:
             aeron_unmap(&cnc_mmap);

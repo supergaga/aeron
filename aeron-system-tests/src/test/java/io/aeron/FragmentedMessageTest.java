@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -37,7 +38,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
-import static io.aeron.logbuffer.FrameDescriptor.END_FRAG_FLAG;
+import static io.aeron.logbuffer.FrameDescriptor.UNFRAGMENTED;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.*;
@@ -66,15 +67,23 @@ class FragmentedMessageTest
         .errorHandler(Tests::onError)
         .threadingMode(ThreadingMode.SHARED);
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(driverContext, testWatcher);
+    private TestMediaDriver driver;
 
-    private final Aeron aeron = Aeron.connect();
+    private Aeron aeron;
+
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(driverContext, testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
+    }
 
     @AfterEach
     void after()
     {
         CloseHelper.closeAll(aeron, driver);
-        driver.context().deleteDirectory();
     }
 
     @ParameterizedTest
@@ -126,7 +135,7 @@ class FragmentedMessageTest
                 assertEquals(srcBuffer.getByte(i), capturedBuffer.getByte(i), "same at i=" + i);
             }
 
-            assertEquals(END_FRAG_FLAG, headerArg.getValue().flags());
+            assertEquals(UNFRAGMENTED, headerArg.getValue().flags());
         }
     }
 }

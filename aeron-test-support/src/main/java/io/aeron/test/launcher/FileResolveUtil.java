@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,11 +45,6 @@ public class FileResolveUtil
         return resolveAeronJar("aeron-all", false);
     }
 
-    public static File resolveAeronAgentJar()
-    {
-        return resolveAeronJar("aeron-agent", true);
-    }
-
     private static File resolveAeronJar(final String moduleName, final boolean allowMultipleFiles)
     {
         final File projectRoot = resolveProjectRoot();
@@ -62,10 +57,10 @@ public class FileResolveUtil
 
         final File[] aeronAllJarFiles = allBuildLibs.listFiles(
             (dir, name) ->
-                name.startsWith(moduleName + "-") &&
-                name.endsWith(".jar") &&
-                !name.endsWith("-sources.jar") &&
-                !name.endsWith("-javadoc.jar"));
+            name.startsWith(moduleName + "-") &&
+            name.endsWith(".jar") &&
+            !name.endsWith("-sources.jar") &&
+            !name.endsWith("-javadoc.jar"));
 
         if (null == aeronAllJarFiles || 0 == aeronAllJarFiles.length)
         {

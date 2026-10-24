@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,15 @@ import org.agrona.concurrent.NanoClock;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class TestClusterClock implements ClusterClock, EpochClock, NanoClock
+public class TestClusterClock implements ClusterClock, NanoClock
 {
     private final AtomicLong tick = new AtomicLong();
     private final TimeUnit timeUnit;
+
+    public TestClusterClock()
+    {
+        this(TimeUnit.MILLISECONDS);
+    }
 
     public TestClusterClock(final TimeUnit timeUnit)
     {
@@ -39,7 +44,7 @@ public class TestClusterClock implements ClusterClock, EpochClock, NanoClock
 
     public long time()
     {
-        return timeUnit.toMillis(tick.get());
+        return tick.get();
     }
 
     public long nanoTime()
@@ -47,18 +52,43 @@ public class TestClusterClock implements ClusterClock, EpochClock, NanoClock
         return timeUnit.toNanos(tick.get());
     }
 
+    public long timeMillis()
+    {
+        return timeUnit.toMillis(tick.get());
+    }
+
+    public long timeMicros()
+    {
+        return timeUnit.toMicros(tick.get());
+    }
+
+    public long timeNanos()
+    {
+        return timeUnit.toNanos(tick.get());
+    }
+
+    public long convertToNanos(final long time)
+    {
+        return timeUnit.toNanos(time);
+    }
+
     public void update(final long tick, final TimeUnit tickTimeUnit)
     {
-        this.tick.set(tickTimeUnit.convert(tick, tickTimeUnit));
+        this.tick.set(timeUnit.convert(tick, tickTimeUnit));
     }
 
     public long increment(final long tick, final TimeUnit tickTimeUnit)
     {
-        return this.tick.addAndGet(tickTimeUnit.convert(tick, tickTimeUnit));
+        return this.tick.addAndGet(timeUnit.convert(tick, tickTimeUnit));
     }
 
     public long increment(final long tick)
     {
         return increment(tick, timeUnit());
+    }
+
+    public EpochClock asEpochClock()
+    {
+        return this::timeMillis;
     }
 }

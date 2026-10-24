@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import org.agrona.CloseHelper;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
@@ -30,9 +29,18 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.EnumSet;
 
-import static io.aeron.logbuffer.LogBufferDescriptor.*;
+import static io.aeron.logbuffer.LogBufferDescriptor.LOG_META_DATA_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.LOG_META_DATA_SECTION_INDEX;
+import static io.aeron.logbuffer.LogBufferDescriptor.PARTITION_COUNT;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MAX_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.checkPageSize;
+import static io.aeron.logbuffer.LogBufferDescriptor.checkTermLength;
+import static java.nio.channels.FileChannel.MapMode.READ_ONLY;
 import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
-import static java.nio.file.StandardOpenOption.*;
+import static java.nio.file.StandardOpenOption.READ;
+import static java.nio.file.StandardOpenOption.SPARSE;
+import static java.nio.file.StandardOpenOption.WRITE;
 
 /**
  * Takes a log file name and maps the file into memory and wraps it with {@link UnsafeBuffer}s as appropriate.
@@ -41,7 +49,9 @@ import static java.nio.file.StandardOpenOption.*;
  */
 public final class LogBuffers implements AutoCloseable
 {
-    private static final EnumSet<StandardOpenOption> FILE_OPTIONS = EnumSet.of(READ, WRITE, SPARSE);
+    private static final EnumSet<StandardOpenOption> FILE_OPTIONS_R = EnumSet.of(READ);
+    private static final EnumSet<StandardOpenOption> FILE_OPTIONS_RW = EnumSet.of(READ, WRITE, SPARSE);
+    static final long MIN_LOG_BUFFER_FILE_SIZE = (TERM_MIN_LENGTH * PARTITION_COUNT) + LOG_META_DATA_LENGTH;
 
     private long lingerDeadlineNs = Long.MAX_VALUE;
     private int refCount;
@@ -58,6 +68,17 @@ public final class LogBuffers implements AutoCloseable
      */
     public LogBuffers(final String logFileName)
     {
+        this(logFileName, false);
+    }
+
+    /**
+     * Construct the log buffers for a given log file.
+     *
+     * @param logFileName to be mapped.
+     * @param readOnly    flag to indicate if mapping should only be read-only.
+     */
+    public LogBuffers(final String logFileName, final boolean readOnly)
+    {
         int termLength = 0;
         FileChannel fileChannel = null;
         UnsafeBuffer logMetaDataBuffer = null;
@@ -65,12 +86,20 @@ public final class LogBuffers implements AutoCloseable
 
         try
         {
-            fileChannel = FileChannel.open(Paths.get(logFileName), FILE_OPTIONS);
+            final EnumSet<StandardOpenOption> fileOptions = readOnly ? FILE_OPTIONS_R : FILE_OPTIONS_RW;
+            fileChannel = FileChannel.open(Paths.get(logFileName), fileOptions);
             final long logLength = fileChannel.size();
+            if (logLength < MIN_LOG_BUFFER_FILE_SIZE)
+            {
+                throw new IllegalStateException(
+                    "Log file length less than min length of " + MIN_LOG_BUFFER_FILE_SIZE + ": length=" + logLength +
+                    ", filename=" + logFileName);
+            }
 
+            final FileChannel.MapMode mapMode = readOnly ? READ_ONLY : READ_WRITE;
             if (logLength < Integer.MAX_VALUE)
             {
-                final MappedByteBuffer mappedBuffer = fileChannel.map(READ_WRITE, 0, logLength);
+                final MappedByteBuffer mappedBuffer = fileChannel.map(mapMode, 0, logLength);
                 mappedBuffer.order(ByteOrder.LITTLE_ENDIAN);
                 mappedByteBuffers = new MappedByteBuffer[]{ mappedBuffer };
 
@@ -82,6 +111,7 @@ public final class LogBuffers implements AutoCloseable
 
                 checkTermLength(termLength);
                 checkPageSize(pageSize);
+                checkFileSize(logFileName, logLength, termLength);
 
                 for (int i = 0; i < PARTITION_COUNT; i++)
                 {
@@ -101,7 +131,7 @@ public final class LogBuffers implements AutoCloseable
                 final long metaDataMappingLength = logLength - metaDataSectionOffset;
 
                 final MappedByteBuffer metaDataMappedBuffer = fileChannel.map(
-                    READ_WRITE, metaDataSectionOffset, metaDataMappingLength);
+                    mapMode, metaDataSectionOffset, metaDataMappingLength);
                 metaDataMappedBuffer.order(ByteOrder.LITTLE_ENDIAN);
 
                 mappedByteBuffers[LOG_META_DATA_SECTION_INDEX] = metaDataMappedBuffer;
@@ -114,34 +144,30 @@ public final class LogBuffers implements AutoCloseable
                 final int metaDataTermLength = LogBufferDescriptor.termLength(logMetaDataBuffer);
                 final int pageSize = LogBufferDescriptor.pageSize(logMetaDataBuffer);
 
-                checkPageSize(pageSize);
                 if (metaDataTermLength != assumedTermLength)
                 {
                     throw new IllegalStateException(
                         "assumed term length " + assumedTermLength +
                         " does not match metadata: termLength=" + metaDataTermLength);
                 }
-
+                checkPageSize(pageSize);
+                checkFileSize(logFileName, logLength, termLength);
                 termLength = assumedTermLength;
 
                 for (int i = 0; i < PARTITION_COUNT; i++)
                 {
                     final long position = assumedTermLength * (long)i;
-                    final MappedByteBuffer mappedBuffer = fileChannel.map(READ_WRITE, position, assumedTermLength);
+                    final MappedByteBuffer mappedBuffer = fileChannel.map(mapMode, position, assumedTermLength);
                     mappedBuffer.order(ByteOrder.LITTLE_ENDIAN);
                     mappedByteBuffers[i] = mappedBuffer;
                     termBuffers[i] = mappedBuffer;
                 }
             }
         }
-        catch (final IOException ex)
+        catch (final Exception ex)
         {
+            close(fileChannel, logMetaDataBuffer, mappedByteBuffers);
             LangUtil.rethrowUnchecked(ex);
-        }
-        catch (final IllegalStateException ex)
-        {
-            close();
-            throw ex;
         }
 
         this.termLength = termLength;
@@ -202,7 +228,14 @@ public final class LogBuffers implements AutoCloseable
 
             for (int i = 0, length = atomicBuffer.capacity(); i < length; i += pageSize)
             {
-                atomicBuffer.compareAndSetInt(i, value, value);
+                if (buffer.isReadOnly())
+                {
+                    atomicBuffer.getIntVolatile(i);
+                }
+                else
+                {
+                    atomicBuffer.compareAndSetInt(i, value, value);
+                }
             }
         }
     }
@@ -210,31 +243,10 @@ public final class LogBuffers implements AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
-        Throwable error = null;
-        try
-        {
-            CloseHelper.close(fileChannel);
-        }
-        catch (final Exception ex)
-        {
-            error = ex;
-        }
-
-        for (int i = 0, length = mappedByteBuffers.length; i < length; i++)
-        {
-            final MappedByteBuffer mappedByteBuffer = mappedByteBuffers[i];
-            mappedByteBuffers[i] = null;
-            BufferUtil.free(mappedByteBuffer);
-        }
-
-        logMetaDataBuffer.wrap(0, 0);
-
-        if (error != null)
-        {
-            LangUtil.rethrowUnchecked(error);
-        }
+        close(fileChannel, logMetaDataBuffer, mappedByteBuffers);
     }
 
     /**
@@ -285,5 +297,48 @@ public final class LogBuffers implements AutoCloseable
     public long lingerDeadlineNs()
     {
         return lingerDeadlineNs;
+    }
+
+    private static void checkFileSize(final String logFileName, final long logLength, final int termLength)
+    {
+        if (logLength < (PARTITION_COUNT * (long)termLength) + LOG_META_DATA_LENGTH)
+        {
+            throw new IllegalStateException("Log file length is too short for its term length: length=" + logLength +
+                ", termLength=" + termLength + ", filename=" + logFileName);
+        }
+    }
+
+    private static void close(
+        final FileChannel fileChannel, final UnsafeBuffer logMetaDataBuffer, final MappedByteBuffer[] mappedByteBuffers)
+    {
+        Throwable error = null;
+        try
+        {
+            CloseHelper.close(fileChannel);
+        }
+        catch (final Exception ex)
+        {
+            error = ex;
+        }
+
+        if (logMetaDataBuffer != null)
+        {
+            logMetaDataBuffer.wrap(0, 0);
+        }
+
+        if (null != mappedByteBuffers)
+        {
+            for (int i = 0, length = mappedByteBuffers.length; i < length; i++)
+            {
+                final MappedByteBuffer mappedByteBuffer = mappedByteBuffers[i];
+                mappedByteBuffers[i] = null;
+                BufferUtil.free(mappedByteBuffer);
+            }
+        }
+
+        if (error != null)
+        {
+            LangUtil.rethrowUnchecked(error);
+        }
     }
 }

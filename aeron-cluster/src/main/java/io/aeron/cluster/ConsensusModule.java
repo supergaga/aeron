@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,14 +15,34 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.ChannelUri;
+import io.aeron.CommonContext;
+import io.aeron.Counter;
+import io.aeron.RethrowingErrorHandler;
+import io.aeron.Subscription;
 import io.aeron.archive.Archive;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.ClusterException;
+import io.aeron.cluster.codecs.AdminRequestDecoder;
+import io.aeron.cluster.codecs.AdminRequestType;
+import io.aeron.cluster.codecs.BackupQueryDecoder;
+import io.aeron.cluster.codecs.HeartbeatRequestDecoder;
+import io.aeron.cluster.codecs.MessageHeaderDecoder;
+import io.aeron.cluster.codecs.StandbySnapshotDecoder;
 import io.aeron.cluster.codecs.mark.ClusterComponentType;
-import io.aeron.cluster.service.*;
+import io.aeron.cluster.service.ClusterClock;
+import io.aeron.cluster.service.ClusterCounters;
+import io.aeron.cluster.service.ClusterMarkFile;
+import io.aeron.cluster.service.ClusteredServiceContainer;
+import io.aeron.cluster.service.SnapshotDurationTracker;
+import io.aeron.config.Config;
+import io.aeron.config.DefaultType;
+import io.aeron.cpu.topology.AffinityRegistry;
 import io.aeron.driver.DutyCycleTracker;
+import io.aeron.driver.NameResolver;
 import io.aeron.driver.status.DutyCycleStallTracker;
 import io.aeron.exceptions.ConcurrentConcludeException;
 import io.aeron.exceptions.ConfigurationException;
@@ -31,38 +51,94 @@ import io.aeron.security.AuthenticatorSupplier;
 import io.aeron.security.AuthorisationService;
 import io.aeron.security.AuthorisationServiceSupplier;
 import io.aeron.security.DefaultAuthenticatorSupplier;
-import org.agrona.*;
-import org.agrona.concurrent.*;
+import io.aeron.version.Versioned;
+import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
+import org.agrona.ExpandableArrayBuffer;
+import org.agrona.IoUtil;
+import org.agrona.LangUtil;
+import org.agrona.MarkFile;
+import org.agrona.SemanticVersion;
+import org.agrona.Strings;
+import org.agrona.SystemUtil;
+import org.agrona.concurrent.Agent;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NoOpLock;
+import org.agrona.concurrent.ShutdownSignalBarrier;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.YieldingIdleStrategy;
+import org.agrona.concurrent.affinity.ThreadAffinity;
 import org.agrona.concurrent.errors.DistinctErrorLog;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.charset.StandardCharsets;
 import java.util.Random;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.function.Function;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
+import static io.aeron.AeronCounters.CLUSTER_ELECTION_COUNT_TYPE_ID;
+import static io.aeron.AeronCounters.CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID;
+import static io.aeron.AeronCounters.CLUSTER_STANDBY_SNAPSHOT_COUNTER_TYPE_ID;
+import static io.aeron.AeronCounters.NODE_CONTROL_TOGGLE_TYPE_ID;
 import static io.aeron.AeronCounters.validateCounterTypeId;
-import static io.aeron.CommonContext.*;
+import static io.aeron.ChannelUri.addAliasIfAbsent;
+import static io.aeron.ChannelUri.parse;
+import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.INITIAL_TERM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_OFFSET_PARAM_NAME;
+import static io.aeron.CommonContext.UDP_CHANNEL;
+import static io.aeron.CommonContext.driverFilePageSize;
+import static io.aeron.CommonContext.fallbackLogger;
+import static io.aeron.CommonContext.threadName;
+import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_CLIENT_TIMEOUT_COUNT_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_CLOCK_PROP_NAME;
+import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_CPU_AFFINITY_PROP_NAME;
 import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_NODE_ROLE_TYPE_ID;
 import static io.aeron.cluster.ConsensusModule.Configuration.COMMIT_POSITION_TYPE_ID;
-import static io.aeron.cluster.ConsensusModule.Configuration.*;
-import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.*;
-import static java.nio.charset.StandardCharsets.US_ASCII;
-import static java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater;
+import static io.aeron.cluster.ConsensusModule.Configuration.CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.CONSENSUS_MODULE_STATE_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.CONTROL_TOGGLE_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.ELECTION_STATE_TYPE_ID;
+import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.MAX_SERVICE_COUNT;
+import static io.aeron.cluster.ConsensusModule.Configuration.SERVICE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.SNAPSHOT_COUNTER_TYPE_ID;
+import static java.lang.Boolean.parseBoolean;
 import static org.agrona.BitUtil.findNextPositivePowerOfTwo;
-import static org.agrona.SystemUtil.*;
+import static org.agrona.SystemUtil.getDurationInNanos;
+import static org.agrona.SystemUtil.getSizeAsInt;
+import static org.agrona.SystemUtil.loadPropertiesFiles;
 
 /**
  * Component which resides on each node and is responsible for coordinating consensus within a cluster in concert
  * with the lifecycle of clustered services.
  */
+@Versioned
 public final class ConsensusModule implements AutoCloseable
 {
+    /**
+     * Default set of flags when taking a snapshot.
+     */
+    public static final int CLUSTER_ACTION_FLAGS_DEFAULT = 0;
+
+    /**
+     * Flag for a snapshot taken on a standby node.
+     */
+    public static final int CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT = 1;
+
     /**
      * Possible states for the {@link ConsensusModule}.
      * These will be reflected in the {@link Context#moduleStateCounter()} counter.
@@ -187,13 +263,15 @@ public final class ConsensusModule implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        try (ConsensusModule consensusModule = launch())
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ConsensusModule ignored = launch(new Context().terminationHook(barrier::signalAll)))
         {
-            consensusModule.context().shutdownSignalBarrier().await();
+            barrier.await();
             System.out.println("Shutdown ConsensusModule...");
         }
     }
@@ -202,6 +280,8 @@ public final class ConsensusModule implements AutoCloseable
     private final ConsensusModuleAgent conductor;
     private final AgentRunner conductorRunner;
     private final AgentInvoker conductorInvoker;
+
+    static final String AERON_CLUSTER_CONSENSUS_THREAD_NAME = "aeron-cl-cm";
 
     ConsensusModule(final Context ctx)
     {
@@ -220,7 +300,11 @@ public final class ConsensusModule implements AutoCloseable
             else
             {
                 conductorRunner = new AgentRunner(
-                    ctx.idleStrategy(), ctx.errorHandler(), ctx.errorCounter(), conductor);
+                    ctx.idleStrategy(),
+                    ctx.errorHandler(),
+                    ctx.errorCounter(),
+                    conductor,
+                    ctx.affinityRegistry.mappedAffinityValue(CLUSTER_CPU_AFFINITY_PROP_NAME));
                 conductorInvoker = null;
             }
         }
@@ -230,9 +314,10 @@ public final class ConsensusModule implements AutoCloseable
         }
         catch (final Exception ex)
         {
-            if (null != ctx.markFile)
+            final ClusterMarkFile markFile = ctx.markFile;
+            if (null != markFile)
             {
-                ctx.markFile.signalFailedStart();
+                markFile.signalFailedStart();
             }
 
             CloseHelper.quietClose(ctx::close);
@@ -295,6 +380,7 @@ public final class ConsensusModule implements AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         CloseHelper.closeAll(conductorRunner, conductorInvoker);
@@ -303,8 +389,13 @@ public final class ConsensusModule implements AutoCloseable
     /**
      * Configuration options for cluster.
      */
+    @Config(existsInC = false)
     public static final class Configuration
     {
+        private Configuration()
+        {
+        }
+
         /**
          * Major version of the network protocol from consensus module to consensus module. If these don't match then
          * consensus modules are not compatible.
@@ -339,21 +430,25 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * Property name for the limit for fragments to be consumed on each poll of ingress.
          */
+        @Config
         public static final String CLUSTER_INGRESS_FRAGMENT_LIMIT_PROP_NAME = "aeron.cluster.ingress.fragment.limit";
 
         /**
          * Default for the limit for fragments to be consumed on each poll of ingress.
          */
+        @Config
         public static final int CLUSTER_INGRESS_FRAGMENT_LIMIT_DEFAULT = 50;
 
         /**
          * Property name for whether IPC ingress is allowed or not.
          */
+        @Config
         public static final String CLUSTER_INGRESS_IPC_ALLOWED_PROP_NAME = "aeron.cluster.ingress.ipc.allowed";
 
         /**
          * Default for whether IPC ingress is allowed or not.
          */
+        @Config
         public static final String CLUSTER_INGRESS_IPC_ALLOWED_DEFAULT = "false";
 
         /**
@@ -364,95 +459,114 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * Property name for the identity of the cluster member.
          */
+        @Config
         public static final String CLUSTER_MEMBER_ID_PROP_NAME = "aeron.cluster.member.id";
 
         /**
          * Default property for the cluster member identity.
          */
+        @Config
         public static final int CLUSTER_MEMBER_ID_DEFAULT = 0;
 
         /**
          * Property name for the identity of the appointed leader. This is when automated leader elections are
          * not employed.
+         * <p>
+         * This feature is for testing and not recommended for production usage.
          */
+        @Config
         public static final String APPOINTED_LEADER_ID_PROP_NAME = "aeron.cluster.appointed.leader.id";
 
         /**
          * Default property for the appointed cluster leader id. A value of {@link Aeron#NULL_VALUE} means no leader
          * has been appointed and thus an automated leader election should occur.
          */
+        @Config
         public static final int APPOINTED_LEADER_ID_DEFAULT = Aeron.NULL_VALUE;
 
         /**
          * Property name for the comma separated list of cluster member endpoints.
          * <p>
          * <code>
-         *     0,ingress:port,consensus:port,log:port,catchup:port,archive:port| \
-         *     1,ingress:port,consensus:port,log:port,catchup:port,archive:port| ...
+         * 0,ingress:port,consensus:port,log:port,catchup:port,archive:port| \
+         * 1,ingress:port,consensus:port,log:port,catchup:port,archive:port| ...
          * </code>
          * <p>
-         * The ingress endpoints will be used as the endpoint substituted into the
-         * {@link io.aeron.cluster.client.AeronCluster.Configuration#INGRESS_CHANNEL_PROP_NAME} if the endpoint
-         * is not provided when unicast.
+         * Where:
+         * <ul>
+         *     <li><em><strong>ingress:port</strong></em> - an externally advertised endpoint on which a particular
+         *     Cluster node listens for the ingress traffic. This endpoint information is sent to {@code AeronCluster}
+         *     clients upon a redirect and on leadership change.
+         *     <p>
+         *     On the current Cluster node itself, this endpoint information will be used as the {@code endpoint}
+         *     substituted into the {@link ConsensusModule.Context#ingressChannel()} if that does not have an
+         *     {@code endpoint} parameter defined.
+         *     </li>
+         *     <li><em><strong>consensus:port</strong></em> - a Cluster-internal endpoint for consensus traffic.</li>
+         *     <li><em><strong>log:port</strong></em> - a Cluster-internal endpoint for Raft log.</li>
+         *     <li><em><strong>catchup:port</strong></em> - a Cluster-internal endpoint for follower catch up during
+         *     election.</li>
+         *     <li><em><strong>archive:port</strong></em> - a Cluster-internal endpoint on which node's Archive is
+         *     reachable.</li>
+         * </ul>
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
         public static final String CLUSTER_MEMBERS_PROP_NAME = "aeron.cluster.members";
 
         /**
-         * Property name for the comma separated list of cluster consensus endpoints used for adding passive
-         * followers as well as dynamic join of a cluster.
+         * Property name for the comma separated list of cluster consensus endpoints used for cluster
+         * backup and cluster standby nodes.
          */
+        @Config
         public static final String CLUSTER_CONSENSUS_ENDPOINTS_PROP_NAME = "aeron.cluster.consensus.endpoints";
 
         /**
          * Default property for the list of cluster consensus endpoints.
          */
+        @Config
         public static final String CLUSTER_CONSENSUS_ENDPOINTS_DEFAULT = "";
-
-        /**
-         * Property name for whether cluster member information in snapshots should be ignored on load or not.
-         */
-        public static final String CLUSTER_MEMBERS_IGNORE_SNAPSHOT_PROP_NAME = "aeron.cluster.members.ignore.snapshot";
-
-        /**
-         * Default property for whether cluster member information in snapshots should be ignored or not.
-         */
-        public static final String CLUSTER_MEMBERS_IGNORE_SNAPSHOT_DEFAULT = "false";
 
         /**
          * Channel for the clustered log.
          */
+        @Config
         public static final String LOG_CHANNEL_PROP_NAME = "aeron.cluster.log.channel";
 
         /**
          * Channel for the clustered log. This channel can exist for a potentially long time given cluster operation
          * so attention should be given to configuration such as term-length and mtu.
          */
+        @Config
         public static final String LOG_CHANNEL_DEFAULT = "aeron:udp?term-length=64m";
 
         /**
          * Property name for the comma separated list of member endpoints.
          * <p>
          * <code>
-         *     ingress:port,consensus:port,log:port,catchup:port,archive:port
+         * ingress:port,consensus:port,log:port,catchup:port,archive:port
          * </code>
          *
          * @see #CLUSTER_MEMBERS_PROP_NAME
          */
+        @Config
         public static final String MEMBER_ENDPOINTS_PROP_NAME = "aeron.cluster.member.endpoints";
 
         /**
          * Default property for member endpoints.
          */
+        @Config
         public static final String MEMBER_ENDPOINTS_DEFAULT = "";
 
         /**
          * Stream id within a channel for the clustered log.
          */
+        @Config
         public static final String LOG_STREAM_ID_PROP_NAME = "aeron.cluster.log.stream.id";
 
         /**
          * Stream id within a channel for the clustered log.
          */
+        @Config
         public static final int LOG_STREAM_ID_DEFAULT = 100;
 
         /**
@@ -484,49 +598,58 @@ public final class ConsensusModule implements AutoCloseable
          * Channel to be used communicating cluster consensus to each other. This can be used for default
          * configuration with the endpoints replaced with those provided by {@link #CLUSTER_MEMBERS_PROP_NAME}.
          */
+        @Config
         public static final String CONSENSUS_CHANNEL_PROP_NAME = "aeron.cluster.consensus.channel";
 
         /**
          * Channel to be used for communicating cluster consensus to each other. This can be used for default
          * configuration with the endpoints replaced with those provided by {@link #CLUSTER_MEMBERS_PROP_NAME}.
          */
-        public static final String CONSENSUS_CHANNEL_DEFAULT = "aeron:udp?term-length=64k";
+        @Config
+        public static final String CONSENSUS_CHANNEL_DEFAULT = "aeron:udp";
 
         /**
          * Stream id within a channel for communicating consensus messages.
          */
+        @Config
         public static final String CONSENSUS_STREAM_ID_PROP_NAME = "aeron.cluster.consensus.stream.id";
 
         /**
-         * Stream id for the archived snapshots within a channel.
+         * Stream id for the communicating consensus messages.
          */
+        @Config
         public static final int CONSENSUS_STREAM_ID_DEFAULT = 108;
 
         /**
          * Channel to be used for replicating logs and snapshots from other archives to the local one.
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
         public static final String REPLICATION_CHANNEL_PROP_NAME = "aeron.cluster.replication.channel";
 
         /**
          * Channel template used for replaying logs to a follower using the {@link ClusterMember#catchupEndpoint()}.
          */
+        @Config
         public static final String FOLLOWER_CATCHUP_CHANNEL_PROP_NAME = "aeron.cluster.follower.catchup.channel";
 
         /**
          * Default channel template used for replaying logs to a follower using the
          * {@link ClusterMember#catchupEndpoint()}.
          */
+        @Config
         public static final String FOLLOWER_CATCHUP_CHANNEL_DEFAULT = UDP_CHANNEL;
 
         /**
          * Channel used to build the control request channel for the leader Archive.
          */
+        @Config
         public static final String LEADER_ARCHIVE_CONTROL_CHANNEL_PROP_NAME =
             "aeron.cluster.leader.archive.control.channel";
 
         /**
          * Default channel used to build the control request channel for the leader Archive.
          */
+        @Config
         public static final String LEADER_ARCHIVE_CONTROL_CHANNEL_DEFAULT = "aeron:udp?term-length=64k";
 
         /**
@@ -554,7 +677,7 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * Type id of a recovery state counter.
          */
-        public static final int RECOVERY_STATE_TYPE_ID = RecoveryState.RECOVERY_STATE_TYPE_ID;
+        public static final int RECOVERY_STATE_TYPE_ID = AeronCounters.CLUSTER_RECOVERY_STATE_TYPE_ID;
 
         /**
          * Counter type id for count of snapshots taken.
@@ -589,166 +712,210 @@ public final class ConsensusModule implements AutoCloseable
          *
          * @see io.aeron.cluster.service.ClusteredServiceContainer.Configuration#SERVICE_ID_PROP_NAME
          */
+        @Config
         public static final String SERVICE_COUNT_PROP_NAME = "aeron.cluster.service.count";
 
         /**
-         * The number of services in this cluster instance.
+         * The default number of services in this cluster instance.
          */
+        @Config
         public static final int SERVICE_COUNT_DEFAULT = 1;
 
         /**
          * Maximum number of cluster sessions that can be active concurrently.
          */
+        @Config
         public static final String MAX_CONCURRENT_SESSIONS_PROP_NAME = "aeron.cluster.max.sessions";
 
         /**
          * Maximum number of cluster sessions that can be active concurrently.
          */
+        @Config
         public static final int MAX_CONCURRENT_SESSIONS_DEFAULT = 10;
 
         /**
          * Timeout for a session if no activity is observed.
          */
+        @Config
         public static final String SESSION_TIMEOUT_PROP_NAME = "aeron.cluster.session.timeout";
 
         /**
          * Timeout for a session if no activity is observed.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 10L * 1000 * 1000 * 1000)
         public static final long SESSION_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
 
         /**
          * Timeout for a leader if no heartbeat is received by another member.
          */
+        @Config
         public static final String LEADER_HEARTBEAT_TIMEOUT_PROP_NAME = "aeron.cluster.leader.heartbeat.timeout";
 
         /**
          * Timeout for a leader if no heartbeat is received by another member.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 10L * 1000 * 1000 * 1000)
         public static final long LEADER_HEARTBEAT_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
 
         /**
          * Interval at which a leader will send heartbeats if the log is not progressing.
          */
+        @Config
         public static final String LEADER_HEARTBEAT_INTERVAL_PROP_NAME = "aeron.cluster.leader.heartbeat.interval";
 
         /**
          * Interval at which a leader will send heartbeats if the log is not progressing.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 200L * 1000 * 1000)
         public static final long LEADER_HEARTBEAT_INTERVAL_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(200);
 
         /**
          * Timeout after which an election vote will be attempted after startup while waiting to canvass the status
          * of members if a majority has been heard from.
          */
+        @Config
         public static final String STARTUP_CANVASS_TIMEOUT_PROP_NAME = "aeron.cluster.startup.canvass.timeout";
 
         /**
          * Default timeout after which an election vote will be attempted on startup when waiting to canvass the
          * status of all members before going for a majority if possible.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 60L * 1000 * 1000 * 1000)
         public static final long STARTUP_CANVASS_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(60);
 
         /**
          * Timeout after which an election fails if the candidate does not get a majority of votes.
          */
+        @Config
         public static final String ELECTION_TIMEOUT_PROP_NAME = "aeron.cluster.election.timeout";
 
         /**
          * Default timeout after which an election fails if the candidate does not get a majority of votes.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 1000L * 1000 * 1000)
         public static final long ELECTION_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(1);
 
         /**
          * Interval at which a member will send out status updates during election phases.
          */
+        @Config
         public static final String ELECTION_STATUS_INTERVAL_PROP_NAME = "aeron.cluster.election.status.interval";
 
         /**
          * Default interval at which a member will send out status updates during election phases.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 100L * 1000 * 1000)
         public static final long ELECTION_STATUS_INTERVAL_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(100);
-
-        /**
-         * Interval at which a dynamic joining member will send add cluster member and snapshot recording
-         * queries.
-         */
-        public static final String DYNAMIC_JOIN_INTERVAL_PROP_NAME = "aeron.cluster.dynamic.join.interval";
-
-        /**
-         * Default interval at which a dynamic joining member will send add cluster member and snapshot recording
-         * queries.
-         */
-        public static final long DYNAMIC_JOIN_INTERVAL_DEFAULT_NS = TimeUnit.SECONDS.toNanos(1);
 
         /**
          * Name of the system property for specifying a supplier of {@link Authenticator} for the cluster.
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "io.aeron.security.DefaultAuthenticatorSupplier")
         public static final String AUTHENTICATOR_SUPPLIER_PROP_NAME = "aeron.cluster.authenticator.supplier";
 
         /**
          * Name of the system property for specifying a supplier of {@link AuthorisationService} for the cluster.
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
         public static final String AUTHORISATION_SERVICE_SUPPLIER_PROP_NAME =
             "aeron.cluster.authorisation.service.supplier";
 
         /**
-         * Default {@link AuthorisationServiceSupplier} that returns {@link AuthorisationService} that forbids all
-         * command from being executed (i.e. {@link AuthorisationService#DENY_ALL}).
+         * Default {@link AuthorisationServiceSupplier} that returns an {@link AuthorisationService} that
+         * allows the commands necessary for Cluster Backup and Aeron Cluster Standby.
+         * ({@link AllowBackupAndStandbyAuthorisationService}).
          */
         public static final AuthorisationServiceSupplier DEFAULT_AUTHORISATION_SERVICE_SUPPLIER =
-            () -> AuthorisationService.DENY_ALL;
+            () -> AllowBackupAndStandbyAuthorisationService.INSTANCE;
 
         /**
          * Size in bytes of the error buffer for the cluster.
          */
+        @Config
         public static final String ERROR_BUFFER_LENGTH_PROP_NAME = "aeron.cluster.error.buffer.length";
 
         /**
          * Size in bytes of the error buffer for the cluster.
          */
-        public static final int ERROR_BUFFER_LENGTH_DEFAULT = 1024 * 1024;
+        @Config
+        public static final int ERROR_BUFFER_LENGTH_DEFAULT = ClusterMarkFile.ERROR_BUFFER_MIN_LENGTH;
 
         /**
          * Timeout a leader will wait on getting termination ACKs from followers.
          */
+        @Config
         public static final String TERMINATION_TIMEOUT_PROP_NAME = "aeron.cluster.termination.timeout";
 
         /**
          * Property name for threshold value for the consensus module agent work cycle threshold to track
          * for being exceeded.
          */
+        @Config
         public static final String CYCLE_THRESHOLD_PROP_NAME = "aeron.cluster.cycle.threshold";
 
         /**
          * Default threshold value for the consensus module agent work cycle threshold to track for being exceeded.
          */
-        public static final long CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+        @Config(defaultType = DefaultType.LONG, defaultLong = 100_000_000L)
+        public static final long CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(100);
+
+        /**
+         * Property name for threshold value, which is used for tracking total snapshot duration breaches.
+         */
+        @Config
+        public static final String TOTAL_SNAPSHOT_DURATION_THRESHOLD_PROP_NAME =
+            "aeron.cluster.total.snapshot.threshold";
+
+        /**
+         * Default threshold value, which is used for tracking total snapshot duration breaches.
+         */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 1000L * 1000 * 1000)
+        public static final long TOTAL_SNAPSHOT_DURATION_THRESHOLD_DEFAULT_NS =
+            TimeUnit.MILLISECONDS.toNanos(1000);
+
+        /**
+         * Property name for the standby snapshot notification processing delay.
+         */
+        @Config
+        public static final String STANDBY_SNAPSHOT_NOTIFICATION_PROCESSING_DELAY_PROP_NAME =
+            "aeron.cluster.standby.snapshot.notification.processing.delay";
+
+        /**
+         * Default standby snapshot notification processing delay.
+         */
+        @Config
+        public static final long STANDBY_SNAPSHOT_NOTIFICATION_PROCESSING_DELAY_DEFAULT_NS = 0;
 
         /**
          * Default timeout a leader will wait on getting termination ACKs from followers.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 10L * 1000 * 1000 * 1000)
         public static final long TERMINATION_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
 
         /**
          * Resolution in nanoseconds for each tick of the timer wheel for scheduling deadlines.
          */
+        @Config
         public static final String WHEEL_TICK_RESOLUTION_PROP_NAME = "aeron.cluster.wheel.tick.resolution";
 
         /**
          * Resolution in nanoseconds for each tick of the timer wheel for scheduling deadlines. Defaults to 8ms.
          */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 4L * 1000 * 1000)
         public static final long WHEEL_TICK_RESOLUTION_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(8);
 
         /**
          * Number of ticks, or spokes, on the timer wheel. Higher number of ticks reduces potential conflicts
          * traded off against memory usage.
          */
+        @Config
         public static final String TICKS_PER_WHEEL_PROP_NAME = "aeron.cluster.ticks.per.wheel";
 
         /**
          * Number of ticks, or spokes, on the timer wheel. Higher number of ticks reduces potential conflicts
          * traded off against memory usage. Defaults to 128 per wheel.
          */
+        @Config
         public static final int TICKS_PER_WHEEL_DEFAULT = 128;
 
         /**
@@ -759,16 +926,19 @@ public final class ConsensusModule implements AutoCloseable
          * <li>2 - sync file data + metadata.</li>
          * </ul>
          */
+        @Config
         public static final String FILE_SYNC_LEVEL_PROP_NAME = "aeron.cluster.file.sync.level";
 
         /**
          * Default file sync level of normal writes.
          */
+        @Config
         public static final int FILE_SYNC_LEVEL_DEFAULT = 0;
 
         /**
          * {@link TimerServiceSupplier} to be used for creating the {@link TimerService} used by consensus module.
          */
+        @Config
         public static final String TIMER_SERVICE_SUPPLIER_PROP_NAME = "aeron.cluster.timer.service.supplier";
 
         /**
@@ -787,13 +957,88 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * Default {@link TimerServiceSupplier}.
          */
+        @Config
         public static final String TIMER_SERVICE_SUPPLIER_DEFAULT = TIMER_SERVICE_SUPPLIER_WHEEL;
 
         /**
          * Property name for the name returned from {@link Agent#roleName()} for the consensus module.
          */
+        @Config(defaultType = DefaultType.STRING, defaultString = "")
         public static final String CLUSTER_CONSENSUS_MODULE_AGENT_ROLE_NAME_PROP_NAME =
             "aeron.cluster.consensus.module.agent.role.name";
+
+        /**
+         * CPU the consensus module thread is pinned to. An index into the effective cgroup cpuset when
+         * {@link CommonContext#THREAD_AFFINITY_USE_CPUSET_OFFSETS_PROP_NAME} is set.
+         */
+        @Config(defaultType = DefaultType.INT, defaultInt = ThreadAffinity.NO_AFFINITY)
+        public static final String CLUSTER_CPU_AFFINITY_PROP_NAME = "aeron.cluster.cpu.affinity";
+
+        /**
+         * Property name for replication progress timeout.
+         *
+         * @since 1.41.0
+         */
+        @Config
+        public static final String CLUSTER_REPLICATION_PROGRESS_TIMEOUT_PROP_NAME =
+            "aeron.cluster.replication.progress.timeout";
+
+        /**
+         * Default timeout for replication progress in nanoseconds.
+         *
+         * @since 1.41.0
+         */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 10L * 1000 * 1000 * 1000)
+        public static final long CLUSTER_REPLICATION_PROGRESS_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
+
+        /**
+         * Property name for replication progress interval.
+         *
+         * @since 1.41.0
+         */
+        @Config(defaultType = DefaultType.LONG, defaultLong = 0)
+        public static final String CLUSTER_REPLICATION_PROGRESS_INTERVAL_PROP_NAME =
+            "aeron.cluster.replication.progress.interval";
+
+        /**
+         * Property name of enabling the acceptance of standby snapshots.
+         */
+        @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = false)
+        public static final String CLUSTER_ACCEPT_STANDBY_SNAPSHOTS_PROP_NAME =
+            "aeron.cluster.accept.standby.snapshots";
+
+        /**
+         * Property name of setting {@link ClusterClock}. Should specify a fully qualified class name.
+         * Defaults to {@link MillisecondClusterClock}.
+         *
+         * @since 1.44.0
+         */
+        @Config(defaultType = DefaultType.STRING, defaultString = "io.aeron.cluster.MillisecondClusterClock")
+        public static final String CLUSTER_CLOCK_PROP_NAME = "aeron.cluster.clock";
+
+        /**
+         * Property name of setting {@link ConsensusModuleExtension}. Should specify a fully qualified class name.
+         *
+         * @since 1.45.0
+         */
+        public static final String CONSENSUS_MODULE_EXTENSION_CLASS_NAME_PROP_NAME =
+            "aeron.cluster.consensus.module.extension";
+
+        /**
+         * Property name of the setting to control whether the consensus module should bind the control endpoint of
+         * the consensus publication to its local consensus address.
+         */
+        @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+        public static final String CONSENSUS_MODULE_ENABLE_CONTROL_ON_CONSENSUS_CHANNEL_PROP_NAME =
+            "aeron.cluster.consensus.control.enable";
+
+        /**
+         * Property name of the setting to control whether the consensus module should bind the control endpoint of
+         * the consensus publication to its local log address.
+         */
+        @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+        public static final String CONSENSUS_MODULE_ENABLE_CONTROL_ON_LOG_CHANNEL_PROP_NAME =
+            "aeron.cluster.log.control.enable";
 
         /**
          * The value {@link #CLUSTER_INGRESS_FRAGMENT_LIMIT_DEFAULT} or system property
@@ -835,6 +1080,8 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * The value {@link #APPOINTED_LEADER_ID_DEFAULT} or system property
          * {@link #APPOINTED_LEADER_ID_PROP_NAME} if set.
+         * <p>
+         * This feature is for testing and not recommended for production usage.
          *
          * @return {@link #APPOINTED_LEADER_ID_DEFAULT} or system property
          * {@link #APPOINTED_LEADER_ID_PROP_NAME} if set.
@@ -864,19 +1111,6 @@ public final class ConsensusModule implements AutoCloseable
         public static String clusterConsensusEndpoints()
         {
             return System.getProperty(CLUSTER_CONSENSUS_ENDPOINTS_PROP_NAME, CLUSTER_CONSENSUS_ENDPOINTS_DEFAULT);
-        }
-
-        /**
-         * The value {@link #CLUSTER_MEMBERS_IGNORE_SNAPSHOT_DEFAULT} or system property
-         * {@link #CLUSTER_MEMBERS_IGNORE_SNAPSHOT_PROP_NAME} if set.
-         *
-         * @return {@link #CLUSTER_MEMBERS_IGNORE_SNAPSHOT_DEFAULT} or system property
-         * {@link #CLUSTER_MEMBERS_IGNORE_SNAPSHOT_PROP_NAME} it set.
-         */
-        public static boolean clusterMembersIgnoreSnapshot()
-        {
-            return "true".equalsIgnoreCase(System.getProperty(
-                CLUSTER_MEMBERS_IGNORE_SNAPSHOT_PROP_NAME, CLUSTER_MEMBERS_IGNORE_SNAPSHOT_DEFAULT));
         }
 
         /**
@@ -918,7 +1152,8 @@ public final class ConsensusModule implements AutoCloseable
          */
         public static String snapshotChannel()
         {
-            return System.getProperty(SNAPSHOT_CHANNEL_PROP_NAME, SNAPSHOT_CHANNEL_DEFAULT);
+            return System.getProperty(
+                ClusteredServiceContainer.Configuration.SNAPSHOT_CHANNEL_PROP_NAME, SNAPSHOT_CHANNEL_DEFAULT);
         }
 
         /**
@@ -930,7 +1165,8 @@ public final class ConsensusModule implements AutoCloseable
          */
         public static int snapshotStreamId()
         {
-            return Integer.getInteger(SNAPSHOT_STREAM_ID_PROP_NAME, SNAPSHOT_STREAM_ID_DEFAULT);
+            return Integer.getInteger(
+                ClusteredServiceContainer.Configuration.SNAPSHOT_STREAM_ID_PROP_NAME, SNAPSHOT_STREAM_ID_DEFAULT);
         }
 
         /**
@@ -1024,19 +1260,6 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Interval at which a dynamic joining member will send out add cluster members and snapshot recording
-         * queries.
-         *
-         * @return Interval at which a dynamic joining member will send out add cluster members and snapshot recording
-         * queries.
-         * @see #DYNAMIC_JOIN_INTERVAL_PROP_NAME
-         */
-        public static long dynamicJoinIntervalNs()
-        {
-            return getDurationInNanos(DYNAMIC_JOIN_INTERVAL_PROP_NAME, DYNAMIC_JOIN_INTERVAL_DEFAULT_NS);
-        }
-
-        /**
          * Timeout waiting for follower termination by leader.
          *
          * @return timeout in nanoseconds to wait followers to terminate.
@@ -1055,6 +1278,31 @@ public final class ConsensusModule implements AutoCloseable
         public static long cycleThresholdNs()
         {
             return getDurationInNanos(CYCLE_THRESHOLD_PROP_NAME, CYCLE_THRESHOLD_DEFAULT_NS);
+        }
+
+        /**
+         * Get threshold value, which is used for monitoring total snapshot duration breaches of its predefined
+         * threshold.
+         *
+         * @return threshold value in nanoseconds.
+         */
+        public static long totalSnapshotDurationThresholdNs()
+        {
+            return getDurationInNanos(
+                TOTAL_SNAPSHOT_DURATION_THRESHOLD_PROP_NAME, TOTAL_SNAPSHOT_DURATION_THRESHOLD_DEFAULT_NS);
+        }
+
+        /**
+         * Get the delay before recording a standby snapshot notification.
+         * The delay starts after the commit position passes the snapshot's log position.
+         *
+         * @return the delay, in nanoseconds.
+         */
+        public static long standbySnapshotNotificationProcessingDelayNs()
+        {
+            return getDurationInNanos(
+                STANDBY_SNAPSHOT_NOTIFICATION_PROCESSING_DELAY_PROP_NAME,
+                STANDBY_SNAPSHOT_NOTIFICATION_PROCESSING_DELAY_DEFAULT_NS);
         }
 
         /**
@@ -1110,6 +1358,15 @@ public final class ConsensusModule implements AutoCloseable
             if (Strings.isEmpty(supplierClassName))
             {
                 return DEFAULT_AUTHORISATION_SERVICE_SUPPLIER;
+            }
+            else if (AuthorisationService.DENY_ALL_NAME.equals(supplierClassName))
+            {
+                return () -> AuthorisationService.DENY_ALL;
+            }
+            else if (AuthorisationService.ALLOW_ALL_NAME.equals(supplierClassName))
+            {
+                fallbackLogger().println("Warning: Cluster authorisation service set to allow all requests");
+                return () -> AuthorisationService.ALLOW_ALL;
             }
 
             try
@@ -1241,6 +1498,101 @@ public final class ConsensusModule implements AutoCloseable
         {
             return System.getProperty(CLUSTER_CONSENSUS_MODULE_AGENT_ROLE_NAME_PROP_NAME);
         }
+
+        /**
+         * CPU the consensus module thread is pinned to.
+         *
+         * @return CPU, or cpuset index, or {@link ThreadAffinity#NO_AFFINITY}.
+         * @see #CLUSTER_CPU_AFFINITY_PROP_NAME
+         */
+        public static int cpuAffinity()
+        {
+            return Integer.getInteger(CLUSTER_CPU_AFFINITY_PROP_NAME, ThreadAffinity.NO_AFFINITY);
+        }
+
+        /**
+         * The amount of time to wait to time out an archive replication when progress has stalled.
+         *
+         * @return system property {@link #CLUSTER_REPLICATION_PROGRESS_TIMEOUT_PROP_NAME} or
+         * {@link #CLUSTER_REPLICATION_PROGRESS_TIMEOUT_DEFAULT_NS}.
+         * @since 1.41.0
+         */
+        public static long replicationProgressTimeoutNs()
+        {
+            return SystemUtil.getDurationInNanos(
+                CLUSTER_REPLICATION_PROGRESS_TIMEOUT_PROP_NAME, CLUSTER_REPLICATION_PROGRESS_TIMEOUT_DEFAULT_NS);
+        }
+
+
+        /**
+         * Interval between checks for progress on an archive replication.
+         *
+         * @return system property {@link #CLUSTER_REPLICATION_PROGRESS_INTERVAL_PROP_NAME} or {@link Aeron#NULL_VALUE}
+         * if not set.
+         * @since 1.41.0
+         */
+        public static long replicationProgressIntervalNs()
+        {
+            return SystemUtil.getDurationInNanos(CLUSTER_REPLICATION_PROGRESS_INTERVAL_PROP_NAME, Aeron.NULL_VALUE);
+        }
+
+        /**
+         * If this node should accept snapshots from standby nodes.
+         *
+         * @return value from property {@link #CLUSTER_ACCEPT_STANDBY_SNAPSHOTS_PROP_NAME} or false if not set.
+         */
+        public static boolean acceptStandbySnapshots()
+        {
+            return Boolean.getBoolean(CLUSTER_ACCEPT_STANDBY_SNAPSHOTS_PROP_NAME);
+        }
+
+        /**
+         * Create a new {@link ConsensusModuleExtension} based on the configured
+         * {@link #CONSENSUS_MODULE_EXTENSION_CLASS_NAME_PROP_NAME}.
+         *
+         * @return a new {@link ConsensusModuleExtension} based on the configured
+         * {@link #CONSENSUS_MODULE_EXTENSION_CLASS_NAME_PROP_NAME}.
+         */
+        public static ConsensusModuleExtension newConsensusModuleExtension()
+        {
+            final String className = System.getProperty(Configuration.CONSENSUS_MODULE_EXTENSION_CLASS_NAME_PROP_NAME);
+            if (null != className)
+            {
+                try
+                {
+                    return (ConsensusModuleExtension)Class.forName(className).getConstructor().newInstance();
+                }
+                catch (final Exception ex)
+                {
+                    LangUtil.rethrowUnchecked(ex);
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Determine the ConsensusModule should bind the control endpoint of the consensus publication.
+         *
+         * @return <code>true</code> if the ConsensusModule should bind the control endpoint of the consensus
+         * publication.
+         */
+        public static boolean enableControlOnConsensusChannel()
+        {
+            return parseBoolean(System.getProperty(
+                CONSENSUS_MODULE_ENABLE_CONTROL_ON_CONSENSUS_CHANNEL_PROP_NAME, "true"));
+        }
+
+        /**
+         * Determine the ConsensusModule should bind the control endpoint of the log publication.
+         *
+         * @return <code>true</code> if the ConsensusModule should bind the log endpoint of the consensus
+         * publication.
+         */
+        public static boolean enableControlOnLogChannel()
+        {
+            return parseBoolean(System.getProperty(CONSENSUS_MODULE_ENABLE_CONTROL_ON_LOG_CHANNEL_PROP_NAME, "true"));
+        }
     }
 
     /**
@@ -1251,22 +1603,33 @@ public final class ConsensusModule implements AutoCloseable
      */
     public static final class Context implements Cloneable
     {
-        /**
-         * Using an integer because there is no support for boolean. 1 is concluded, 0 is not concluded.
-         */
-        private static final AtomicIntegerFieldUpdater<Context> IS_CONCLUDED_UPDATER = newUpdater(
-            Context.class, "isConcluded");
-        private volatile int isConcluded;
+        private static final VarHandle IS_CONCLUDED_VH;
 
+        static
+        {
+            try
+            {
+                IS_CONCLUDED_VH = MethodHandles.lookup().findVarHandle(Context.class, "isConcluded", boolean.class);
+            }
+            catch (final ReflectiveOperationException ex)
+            {
+                throw new ExceptionInInitializerError(ex);
+            }
+        }
+
+        private volatile boolean isConcluded;
         private boolean ownsAeronClient = false;
         private String aeronDirectoryName = CommonContext.getAeronDirectoryName();
         private Aeron aeron;
 
         private boolean deleteDirOnStart = false;
         private String clusterDirectoryName = ClusteredServiceContainer.Configuration.clusterDirName();
+        private String clusterServicesDirectoryName = ClusteredServiceContainer.Configuration.clusterServicesDirName();
         private File clusterDir;
+        private File markFileDir;
         private RecordingLog recordingLog;
         private ClusterMarkFile markFile;
+        private NodeStateFile nodeStateFile;
         private int fileSyncLevel = Archive.Configuration.fileSyncLevel();
 
         private int appVersion = SemanticVersion.compose(0, 0, 1);
@@ -1274,8 +1637,6 @@ public final class ConsensusModule implements AutoCloseable
         private int clusterMemberId = Configuration.clusterMemberId();
         private int appointedLeaderId = Configuration.appointedLeaderId();
         private String clusterMembers = Configuration.clusterMembers();
-        private String clusterConsensusEndpoints = Configuration.clusterConsensusEndpoints();
-        private boolean clusterMembersIgnoreSnapshot = Configuration.clusterMembersIgnoreSnapshot();
         private String ingressChannel = AeronCluster.Configuration.ingressChannel();
         private int ingressStreamId = AeronCluster.Configuration.ingressStreamId();
         private boolean isIpcIngressAllowed = Configuration.isIpcIngressAllowed();
@@ -1309,9 +1670,11 @@ public final class ConsensusModule implements AutoCloseable
         private long startupCanvassTimeoutNs = Configuration.startupCanvassTimeoutNs();
         private long electionTimeoutNs = Configuration.electionTimeoutNs();
         private long electionStatusIntervalNs = Configuration.electionStatusIntervalNs();
-        private long dynamicJoinIntervalNs = Configuration.dynamicJoinIntervalNs();
         private long terminationTimeoutNs = Configuration.terminationTimeoutNs();
         private long cycleThresholdNs = Configuration.cycleThresholdNs();
+        private long totalSnapshotDurationThresholdNs = Configuration.totalSnapshotDurationThresholdNs();
+        private long standbySnapshotNotificationProcessingDelayNs =
+            Configuration.standbySnapshotNotificationProcessingDelayNs();
 
         private String agentRoleName = Configuration.agentRoleName();
         private ThreadFactory threadFactory;
@@ -1321,7 +1684,7 @@ public final class ConsensusModule implements AutoCloseable
         private Random random;
         private TimerServiceSupplier timerServiceSupplier;
         private Function<Context, LongConsumer> clusterTimeConsumerSupplier;
-
+        private ConsensusModuleExtension consensusModuleExtension;
         private DistinctErrorLog errorLog;
         private ErrorHandler errorHandler;
         private AtomicCounter errorCounter;
@@ -1331,11 +1694,15 @@ public final class ConsensusModule implements AutoCloseable
         private Counter electionStateCounter;
         private Counter clusterNodeRoleCounter;
         private Counter commitPosition;
-        private Counter controlToggle;
+        private Counter clusterControlToggle;
+        private Counter nodeControlToggle;
         private Counter snapshotCounter;
         private Counter timedOutClientCounter;
-        private ShutdownSignalBarrier shutdownSignalBarrier;
+        private Counter standbySnapshotCounter;
+        private Counter electionCounter;
+        private Counter leadershipTermId;
         private Runnable terminationHook;
+        private ExtendedTerminationHook extendedTerminationHook;
 
         private AeronArchive.Context archiveContext;
         private AuthenticatorSupplier authenticatorSupplier;
@@ -1343,10 +1710,23 @@ public final class ConsensusModule implements AutoCloseable
         private LogPublisher logPublisher;
         private EgressPublisher egressPublisher;
         private DutyCycleTracker dutyCycleTracker;
-        private AppVersionValidator appVersionValidator;
+        private SnapshotDurationTracker totalSnapshotDurationTracker;
+        private VersionValidator appVersionValidator;
         private boolean isLogMdc;
         private boolean useAgentInvoker = false;
-        private ConsensusModuleStateExport boostrapState = null;
+        private int clusterCpuAffinity = Configuration.cpuAffinity();
+        private AffinityRegistry affinityRegistry;
+        private ConsensusModuleStateExport bootstrapState = null;
+        private boolean acceptStandbySnapshots = Configuration.acceptStandbySnapshots();
+        private boolean enableControlOnConsensusChannel = Configuration.enableControlOnConsensusChannel();
+        private boolean enableControlOnLogChannel = Configuration.enableControlOnLogChannel();
+
+        /**
+         * Construct a Context using default values and loading from system properties.
+         */
+        public Context()
+        {
+        }
 
         /**
          * Perform a shallow copy of the object.
@@ -1371,18 +1751,47 @@ public final class ConsensusModule implements AutoCloseable
         @SuppressWarnings("MethodLength")
         public void conclude()
         {
-            final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer();
-
-            if (0 != IS_CONCLUDED_UPDATER.getAndSet(this, 1))
+            if ((boolean)IS_CONCLUDED_VH.getAndSet(this, true))
             {
                 throw new ConcurrentConcludeException();
             }
 
             validateLogChannel();
 
+            if (serviceCount < 0 || serviceCount > MAX_SERVICE_COUNT)
+            {
+                throw new ClusterException("service count of range [0, " + MAX_SERVICE_COUNT + "]: " + serviceCount);
+            }
+
             if (null == clusterDir)
             {
                 clusterDir = new File(clusterDirectoryName);
+            }
+
+            if (null == markFileDir)
+            {
+                final String dir = ClusteredServiceContainer.Configuration.markFileDir();
+                markFileDir = Strings.isEmpty(dir) ? clusterDir : new File(dir);
+            }
+
+            try
+            {
+                clusterDir = clusterDir.getCanonicalFile();
+                clusterDirectoryName = clusterDir.getAbsolutePath();
+                markFileDir = markFileDir.getCanonicalFile();
+
+                if (Strings.isEmpty(clusterServicesDirectoryName))
+                {
+                    clusterServicesDirectoryName = clusterDirectoryName;
+                }
+                else
+                {
+                    clusterServicesDirectoryName = new File(clusterServicesDirectoryName).getCanonicalPath();
+                }
+            }
+            catch (final IOException ex)
+            {
+                throw new UncheckedIOException(ex);
             }
 
             if (null == clusterMembers)
@@ -1395,14 +1804,28 @@ public final class ConsensusModule implements AutoCloseable
                 IoUtil.delete(clusterDir, false);
             }
 
-            if (!clusterDir.exists() && !clusterDir.mkdirs())
+            IoUtil.ensureDirectoryExists(clusterDir, "cluster");
+            IoUtil.ensureDirectoryExists(markFileDir, "mark file");
+
+            if (startupCanvassTimeoutNs / leaderHeartbeatTimeoutNs < 2)
             {
-                throw new ClusterException("failed to create cluster dir: " + clusterDir.getAbsolutePath());
+                throw new ClusterException(
+                    "startupCanvassTimeoutNs=" + startupCanvassTimeoutNs +
+                    " must be a multiple of leaderHeartbeatTimeoutNs=" + leaderHeartbeatTimeoutNs);
             }
 
             if (null == clusterClock)
             {
-                clusterClock = new MillisecondClusterClock();
+                final String clockClassName = System.getProperty(
+                    CLUSTER_CLOCK_PROP_NAME, MillisecondClusterClock.class.getName());
+                try
+                {
+                    clusterClock = (ClusterClock)Class.forName(clockClassName).getConstructor().newInstance();
+                }
+                catch (final Exception e)
+                {
+                    throw new ClusterException("failed to instantiate ClusterClock " + clockClassName, e);
+                }
             }
 
             if (null == epochClock)
@@ -1422,17 +1845,43 @@ public final class ConsensusModule implements AutoCloseable
 
             if (null == markFile)
             {
+                final int filePageSize = null != aeron ? aeron.context().filePageSize() :
+                    driverFilePageSize(new File(aeronDirectoryName), epochClock, new CommonContext().driverTimeoutMs());
                 markFile = new ClusterMarkFile(
-                    new File(clusterDir, ClusterMarkFile.FILENAME),
+                    new File(markFileDir, ClusterMarkFile.FILENAME),
                     ClusterComponentType.CONSENSUS_MODULE,
                     errorBufferLength,
                     epochClock,
-                    LIVENESS_TIMEOUT_MS);
+                    ClusteredServiceContainer.Configuration.LIVENESS_TIMEOUT_MS,
+                    filePageSize);
+            }
+
+            MarkFile.ensureMarkFileLink(
+                clusterDir,
+                new File(markFile.parentDirectory(), ClusterMarkFile.FILENAME),
+                ClusterMarkFile.LINK_FILENAME);
+
+            if (null == nodeStateFile)
+            {
+                try
+                {
+                    nodeStateFile = new NodeStateFile(clusterDir, true, fileSyncLevel());
+                }
+                catch (final IOException ex)
+                {
+                    throw new ClusterException("unable to create node-state file", ex);
+                }
+            }
+
+            if (Aeron.NULL_VALUE == nodeStateFile.candidateTerm().candidateTermId() &&
+                Aeron.NULL_VALUE != markFile.candidateTermId())
+            {
+                nodeStateFile.updateCandidateTermId(markFile.candidateTermId(), Aeron.NULL_VALUE, epochClock.time());
             }
 
             if (null == errorLog)
             {
-                errorLog = new DistinctErrorLog(markFile.errorBuffer(), epochClock, US_ASCII);
+                errorLog = new DistinctErrorLog(markFile.errorBuffer(), epochClock, StandardCharsets.US_ASCII);
             }
 
             errorHandler = CommonContext.setupErrorHandler(errorHandler, errorLog);
@@ -1442,6 +1891,14 @@ public final class ConsensusModule implements AutoCloseable
                 recordingLog = new RecordingLog(clusterDir, true);
             }
 
+            if (Strings.isEmpty(agentRoleName))
+            {
+                agentRoleName = threadName(
+                    AERON_CLUSTER_CONSENSUS_THREAD_NAME, "consensus-module-" + clusterId + "-" + clusterMemberId);
+            }
+
+            final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer();
+
             if (null == aeron)
             {
                 ownsAeronClient = true;
@@ -1450,24 +1907,23 @@ public final class ConsensusModule implements AutoCloseable
                     new Aeron.Context()
                         .aeronDirectoryName(aeronDirectoryName)
                         .errorHandler(errorHandler)
+                        .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE)
                         .epochClock(epochClock)
                         .useConductorAgentInvoker(true)
-                        .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE)
                         .awaitingIdleStrategy(YieldingIdleStrategy.INSTANCE)
-                        .clientLock(NoOpLock.INSTANCE));
+                        .clientLock(NoOpLock.INSTANCE)
+                        .clientName(agentRoleName));
 
                 if (null == errorCounter)
                 {
-                    errorCounter = aeron.addCounter(
-                        CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID, "Cluster Errors - clusterId=" + clusterId);
-                }
-            }
-            else
-            {
-                if (!aeron.context().useConductorAgentInvoker())
-                {
-                    throw new ClusterException(
-                        "Supplied Aeron client instance must set Aeron.Context.useConductorInvoker(true)");
+                    errorCounter = ClusterCounters.allocateVersioned(
+                        aeron,
+                        buffer,
+                        "Cluster Errors",
+                        CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID,
+                        clusterId,
+                        ConsensusModuleVersion.VERSION,
+                        ConsensusModuleVersion.GIT_SHA);
                 }
             }
 
@@ -1481,7 +1937,7 @@ public final class ConsensusModule implements AutoCloseable
                 throw new ClusterException("Aeron client must use a RethrowingErrorHandler");
             }
 
-            if (null == aeron.conductorAgentInvoker())
+            if (!aeron.context().useConductorAgentInvoker())
             {
                 throw new ClusterException("Aeron client must use conductor agent invoker");
             }
@@ -1521,6 +1977,19 @@ public final class ConsensusModule implements AutoCloseable
             }
             validateCounterTypeId(aeron, electionStateCounter, ELECTION_STATE_TYPE_ID);
 
+            if (null == electionCounter)
+            {
+                electionCounter = ClusterCounters.allocate(
+                    aeron, buffer, "Cluster election count", CLUSTER_ELECTION_COUNT_TYPE_ID, clusterId);
+            }
+            validateCounterTypeId(aeron, electionCounter, CLUSTER_ELECTION_COUNT_TYPE_ID);
+
+            if (null == leadershipTermId)
+            {
+                leadershipTermId = ClusterCounters.allocate(
+                    aeron, buffer, "Cluster leadership term id", CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID, clusterId);
+            }
+            validateCounterTypeId(aeron, leadershipTermId, CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID);
 
             if (null == clusterNodeRoleCounter)
             {
@@ -1529,7 +1998,6 @@ public final class ConsensusModule implements AutoCloseable
             }
             validateCounterTypeId(aeron, clusterNodeRoleCounter, CLUSTER_NODE_ROLE_TYPE_ID);
 
-
             if (null == commitPosition)
             {
                 commitPosition = ClusterCounters.allocate(
@@ -1537,12 +2005,19 @@ public final class ConsensusModule implements AutoCloseable
             }
             validateCounterTypeId(aeron, commitPosition, COMMIT_POSITION_TYPE_ID);
 
-            if (null == controlToggle)
+            if (null == clusterControlToggle)
             {
-                controlToggle = ClusterCounters.allocate(
+                clusterControlToggle = ClusterCounters.allocate(
                     aeron, buffer, "Cluster control toggle", CONTROL_TOGGLE_TYPE_ID, clusterId);
             }
-            validateCounterTypeId(aeron, controlToggle, CONTROL_TOGGLE_TYPE_ID);
+            validateCounterTypeId(aeron, clusterControlToggle, CONTROL_TOGGLE_TYPE_ID);
+
+            if (null == nodeControlToggle)
+            {
+                nodeControlToggle = ClusterCounters.allocate(
+                    aeron, buffer, "Node control toggle", NODE_CONTROL_TOGGLE_TYPE_ID, clusterId);
+            }
+            validateCounterTypeId(aeron, nodeControlToggle, NODE_CONTROL_TOGGLE_TYPE_ID);
 
             if (null == snapshotCounter)
             {
@@ -1558,6 +2033,21 @@ public final class ConsensusModule implements AutoCloseable
             }
             validateCounterTypeId(aeron, timedOutClientCounter, CLUSTER_CLIENT_TIMEOUT_COUNT_TYPE_ID);
 
+            // TODO: Disable with configuration... (Mike)
+            if (acceptStandbySnapshots)
+            {
+                if (null == standbySnapshotCounter)
+                {
+                    standbySnapshotCounter = ClusterCounters.allocate(
+                        aeron,
+                        buffer,
+                        "Cluster standby snapshots received",
+                        CLUSTER_STANDBY_SNAPSHOT_COUNTER_TYPE_ID,
+                        clusterId);
+                }
+                validateCounterTypeId(aeron, standbySnapshotCounter, CLUSTER_STANDBY_SNAPSHOT_COUNTER_TYPE_ID);
+            }
+
             if (null == dutyCycleTracker)
             {
                 dutyCycleTracker = new DutyCycleStallTracker(
@@ -1565,15 +2055,43 @@ public final class ConsensusModule implements AutoCloseable
                         aeron, buffer, "Cluster max cycle time in ns",
                         AeronCounters.CLUSTER_MAX_CYCLE_TIME_TYPE_ID, clusterId),
                     ClusterCounters.allocate(
-                        aeron, buffer, "Cluster work cycle time exceeded count: threshold=" + cycleThresholdNs + "ns",
+                        aeron, buffer, "Cluster work cycle time exceeded count: threshold=" +
+                            SystemUtil.formatDuration(cycleThresholdNs),
                         AeronCounters.CLUSTER_CYCLE_TIME_THRESHOLD_EXCEEDED_TYPE_ID, clusterId),
                     cycleThresholdNs);
+            }
+
+            if (null == totalSnapshotDurationTracker)
+            {
+                totalSnapshotDurationTracker = new SnapshotDurationTracker(
+                    ClusterCounters.allocate(
+                        aeron,
+                        buffer,
+                        "Total max snapshot duration in ns",
+                        AeronCounters.CLUSTER_TOTAL_MAX_SNAPSHOT_DURATION_TYPE_ID,
+                        clusterId),
+                    ClusterCounters.allocate(
+                        aeron,
+                        buffer,
+                        "Total max snapshot duration exceeded count: threshold=" +
+                            SystemUtil.formatDuration(totalSnapshotDurationThresholdNs),
+                        AeronCounters.CLUSTER_TOTAL_SNAPSHOT_DURATION_THRESHOLD_EXCEEDED_TYPE_ID,
+                        clusterId),
+                    totalSnapshotDurationThresholdNs);
             }
 
             if (null == threadFactory)
             {
                 threadFactory = Thread::new;
             }
+
+            affinityRegistry = new AffinityRegistry(
+                CommonContext.threadAffinityUseCpusetOffsets(), CommonContext.threadAffinityFailOnValidationErrors());
+            if (!useAgentInvoker)
+            {
+                affinityRegistry.addAffinity(CLUSTER_CPU_AFFINITY_PROP_NAME, clusterCpuAffinity);
+            }
+            affinityRegistry.conclude();
 
             if (null == idleStrategySupplier)
             {
@@ -1590,7 +2108,9 @@ public final class ConsensusModule implements AutoCloseable
                 archiveContext = new AeronArchive.Context()
                     .controlRequestChannel(AeronArchive.Configuration.localControlChannel())
                     .controlResponseChannel(AeronArchive.Configuration.localControlChannel())
-                    .controlRequestStreamId(AeronArchive.Configuration.localControlStreamId());
+                    .controlRequestStreamId(AeronArchive.Configuration.localControlStreamId())
+                    .controlResponseStreamId(
+                        clusterId * 100 + 100 + AeronArchive.Configuration.controlResponseStreamId());
             }
 
             if (!archiveContext.controlRequestChannel().startsWith(CommonContext.IPC_CHANNEL))
@@ -1610,18 +2130,25 @@ public final class ConsensusModule implements AutoCloseable
 
             archiveContext
                 .aeron(aeron)
-                .errorHandler(countedErrorHandler)
+                .errorHandler(null) // ensure that exceptions are re-thrown
                 .ownsAeronClient(false)
-                .lock(NoOpLock.INSTANCE);
-
-            if (null == shutdownSignalBarrier)
-            {
-                shutdownSignalBarrier = new ShutdownSignalBarrier();
-            }
+                .lock(NoOpLock.INSTANCE)
+                .controlRequestChannel(addAliasIfAbsent(
+                archiveContext.controlRequestChannel(),
+                "cm-archive-ctrl-req-cluster-" + clusterId + "-member-" + clusterMemberId))
+                .controlResponseChannel(addAliasIfAbsent(
+                archiveContext.controlResponseChannel(),
+                "cm-archive-ctrl-resp-cluster-" + clusterId + "-member-" + clusterMemberId))
+                .clientName(agentRoleName);
 
             if (null == terminationHook)
             {
-                terminationHook = () -> shutdownSignalBarrier.signalAll();
+                terminationHook = () -> {};
+            }
+
+            if (null == extendedTerminationHook)
+            {
+                extendedTerminationHook = cause -> {};
             }
 
             if (null == authenticatorSupplier)
@@ -1646,13 +2173,42 @@ public final class ConsensusModule implements AutoCloseable
 
             if (null == egressPublisher)
             {
-                egressPublisher = new EgressPublisher();
+                egressPublisher = new EgressPublisher(leaderHeartbeatTimeoutNs);
             }
 
-            final ChannelUri channelUri = ChannelUri.parse(logChannel());
+            final ChannelUri channelUri = parse(logChannel());
             isLogMdc = channelUri.isUdp() && null == channelUri.get(ENDPOINT_PARAM_NAME);
 
+            if (null == consensusModuleExtension)
+            {
+                consensusModuleExtension = Configuration.newConsensusModuleExtension();
+            }
+
+            if (null != consensusModuleExtension && 0 != serviceCount)
+            {
+                throw new ClusterException("service count must be zero when ConsensusModuleExtension is enabled");
+            }
+            else if (null == consensusModuleExtension && 0 == serviceCount)
+            {
+                throw new ClusterException("zero services are only supported when ConsensusModuleExtension is enabled");
+            }
+
             concludeMarkFile();
+
+            if (CommonContext.shouldPrintConfigurationOnStart())
+            {
+                System.out.println(this);
+            }
+        }
+
+        /**
+         * Has the context had the {@link #conclude()} method called.
+         *
+         * @return true of the {@link #conclude()} method has been called.
+         */
+        public boolean isConcluded()
+        {
+            return isConcluded;
         }
 
         /**
@@ -1702,6 +2258,36 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
+         * Set the directory used by clustered service containers. By default, the cluster services will share a
+         * directory with the consensus module. However, sometimes it will be useful for these values to be different.
+         * Setting this value allows that location to be tracked in the ClusterMarkFile to allow for the ClusterTool to
+         * resolve their location when using action like <code>describe</code> or <code>errors</code>. There is an
+         * expectation that all clustered service containers will use the same directory.
+         *
+         * @param clusterServicesDirectoryName to use.
+         * @return this for a fluent API.
+         * @see io.aeron.cluster.service.ClusteredServiceContainer.Configuration#CLUSTER_SERVICES_DIR_PROP_NAME
+         */
+        public Context clusterServicesDirectoryName(final String clusterServicesDirectoryName)
+        {
+            this.clusterServicesDirectoryName = clusterServicesDirectoryName;
+            return this;
+        }
+
+        /**
+         * The directory used by the clustered service containers.
+         *
+         * @return directory used by the clustered service containers.
+         * @see io.aeron.cluster.service.ClusteredServiceContainer.Configuration#CLUSTER_SERVICES_DIR_PROP_NAME
+         * @see #clusterServicesDirectoryName(String)
+         */
+        @Config(id = "CLUSTER_SERVICES_DIR")
+        public String clusterServicesDirectoryName()
+        {
+            return clusterServicesDirectoryName;
+        }
+
+        /**
          * Set the directory to use for the consensus module directory.
          *
          * @param clusterDir to use.
@@ -1723,6 +2309,32 @@ public final class ConsensusModule implements AutoCloseable
         public File clusterDir()
         {
             return clusterDir;
+        }
+
+        /**
+         * Get the directory in which the ConsensusModule will store mark file (i.e. {@code cluster-mark.dat}). It
+         * defaults to {@link #clusterDir()} if it is not set explicitly via the
+         * {@link io.aeron.cluster.service.ClusteredServiceContainer.Configuration#MARK_FILE_DIR_PROP_NAME}.
+         *
+         * @return the directory in which the ConsensusModule will store mark file (i.e. {@code cluster-mark.dat}).
+         * @see io.aeron.cluster.service.ClusteredServiceContainer.Configuration#MARK_FILE_DIR_PROP_NAME
+         * @see #clusterDir()
+         */
+        public File markFileDir()
+        {
+            return markFileDir;
+        }
+
+        /**
+         * Set the directory in which the ConsensusModule will store mark file (i.e. {@code cluster-mark.dat}).
+         *
+         * @param markFileDir the directory in which the Archive will store mark file (i.e. {@code cluster-mark.dat}).
+         * @return this for a fluent API.
+         */
+        public ConsensusModule.Context markFileDir(final File markFileDir)
+        {
+            this.markFileDir = markFileDir;
+            return this;
         }
 
         /**
@@ -1783,7 +2395,7 @@ public final class ConsensusModule implements AutoCloseable
          * @param appVersionValidator for user application.
          * @return this for fluent API.
          */
-        public Context appVersionValidator(final AppVersionValidator appVersionValidator)
+        public Context appVersionValidator(final VersionValidator appVersionValidator)
         {
             this.appVersionValidator = appVersionValidator;
             return this;
@@ -1794,9 +2406,9 @@ public final class ConsensusModule implements AutoCloseable
          * <p>
          * The default is to use {@link org.agrona.SemanticVersion} major version for checking compatibility.
          *
-         * @return AppVersionValidator in use.
+         * @return VersionValidator in use.
          */
-        public AppVersionValidator appVersionValidator()
+        public VersionValidator appVersionValidator()
         {
             return appVersionValidator;
         }
@@ -1812,7 +2424,8 @@ public final class ConsensusModule implements AutoCloseable
          * @return the level to be applied for file write.
          * @see Configuration#FILE_SYNC_LEVEL_PROP_NAME
          */
-        int fileSyncLevel()
+        @Config
+        public int fileSyncLevel()
         {
             return fileSyncLevel;
         }
@@ -1878,6 +2491,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return this cluster member identity.
          * @see Configuration#CLUSTER_MEMBER_ID_PROP_NAME
          */
+        @Config
         public int clusterMemberId()
         {
             return clusterMemberId;
@@ -1887,6 +2501,8 @@ public final class ConsensusModule implements AutoCloseable
          * The cluster member id of the appointed cluster leader.
          * <p>
          * -1 means no leader has been appointed and an automated leader election should occur.
+         * <p>
+         * This feature is for testing and not recommended for production usage.
          *
          * @param appointedLeaderId for the cluster.
          * @return this for a fluent API.
@@ -1906,6 +2522,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return cluster member id of the appointed cluster leader.
          * @see Configuration#APPOINTED_LEADER_ID_PROP_NAME
          */
+        @Config
         public int appointedLeaderId()
         {
             return appointedLeaderId;
@@ -1919,10 +2536,25 @@ public final class ConsensusModule implements AutoCloseable
          * 1,ingress:port,consensus:port,log:port,catchup:port,archive:port| ...
          * </code>
          * <p>
-         * The ingress endpoints will be used as the endpoint substituted into the {@link #ingressChannel()}
-         * if the endpoint is not provided unless it is multicast.
+         * Where:
+         * <ul>
+         *     <li><em><strong>ingress:port</strong></em> - an externally advertised endpoint on which a particular
+         *     Cluster node listens for the ingress traffic. This endpoint information is sent to {@code AeronCluster}
+         *     clients upon a redirect and on leadership change.
+         *     <p>
+         *     On the current Cluster node itself, this endpoint information will be used as the {@code endpoint}
+         *     substituted into the {@link #ingressChannel()} if that does not have an {@code endpoint} parameter
+         *     defined.
+         *     </li>
+         *     <li><em><strong>consensus:port</strong></em> - a Cluster-internal endpoint for consensus traffic.</li>
+         *     <li><em><strong>log:port</strong></em> - a Cluster-internal endpoint for Raft log.</li>
+         *     <li><em><strong>catchup:port</strong></em> - a Cluster-internal endpoint for follower catch up during
+         *     election.</li>
+         *     <li><em><strong>archive:port</strong></em> - an externally advertised endpoint on which node's Archive
+         *     is reachable. Used by other Cluster nodes, {@link ClusterBackup} and {@code ClusterStandby}.</li>
+         * </ul>
          *
-         * @param clusterMembers which are all candidates to be leader.
+         * @param clusterMembers info for all nodes.
          * @return this for a fluent API.
          * @see Configuration#CLUSTER_MEMBERS_PROP_NAME
          */
@@ -1933,76 +2565,29 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * The endpoints representing members of the cluster which are all candidates to be leader.
-         * <p>
-         * The ingress endpoints will be used as the endpoint in {@link #ingressChannel()} if the endpoint is
-         * not provided in that when it is not multicast.
+         * String representing the cluster members. See {@link #clusterMembers(String)} for details.
          *
-         * @return members of the cluster which are all candidates to be leader.
+         * @return info for all nodes.
          * @see Configuration#CLUSTER_MEMBERS_PROP_NAME
+         * @see #clusterMembers(String)
          */
+        @Config
         public String clusterMembers()
         {
             return clusterMembers;
         }
 
         /**
-         * String representing the cluster members consensus endpoints used to request to join the cluster.
+         * Set the ingress channel URI, i.e. where this Cluster node listens for the ingress traffic.
          * <p>
-         * {@code "endpoint,endpoint,endpoint"}
-         * <p>
-         *
-         * @param endpoints which are to be contacted for joining the cluster.
-         * @return this for a fluent API.
-         * @see Configuration#CLUSTER_CONSENSUS_ENDPOINTS_PROP_NAME
-         */
-        public Context clusterConsensusEndpoints(final String endpoints)
-        {
-            this.clusterConsensusEndpoints = endpoints;
-            return this;
-        }
-
-        /**
-         * The endpoints representing cluster members of the cluster to attempt to contact to join the cluster.
-         *
-         * @return members of the cluster to attempt to request to join from.
-         * @see Configuration#CLUSTER_CONSENSUS_ENDPOINTS_PROP_NAME
-         */
-        public String clusterConsensusEndpoints()
-        {
-            return clusterConsensusEndpoints;
-        }
-
-        /**
-         * Whether the cluster members in the snapshot should be ignored or not.
-         *
-         * @param ignore or not the cluster members in the snapshot.
-         * @return this for a fluent API.
-         * @see Configuration#CLUSTER_MEMBERS_IGNORE_SNAPSHOT_PROP_NAME
-         */
-        public Context clusterMembersIgnoreSnapshot(final boolean ignore)
-        {
-            this.clusterMembersIgnoreSnapshot = ignore;
-            return this;
-        }
-
-        /**
-         * Whether the cluster members in the snapshot should be ignored or not.
-         *
-         * @return ignore or not the cluster members in the snapshot.
-         * @see Configuration#CLUSTER_MEMBERS_IGNORE_SNAPSHOT_PROP_NAME
-         */
-        public boolean clusterMembersIgnoreSnapshot()
-        {
-            return clusterMembersIgnoreSnapshot;
-        }
-
-        /**
-         * Set the channel parameter for the ingress channel.
+         * <em><strong>Note:</strong> if UDP media is used (i.e. {@code aeron:udp}) and the channel
+         * <strong>does not</strong> specify an {@code endpoint} parameter then it will be set using an ingress endpoint
+         * from the {@link #clusterMembers()} list.</em>
          *
          * @param channel parameter for the ingress channel.
          * @return this for a fluent API.
          * @see io.aeron.cluster.client.AeronCluster.Configuration#INGRESS_CHANNEL_PROP_NAME
+         * @see #clusterMembers(String)
          */
         public Context ingressChannel(final String channel)
         {
@@ -2064,19 +2649,22 @@ public final class ConsensusModule implements AutoCloseable
          * @return the limit for fragments to be consumed on each poll of ingress.
          * @see Configuration#CLUSTER_INGRESS_FRAGMENT_LIMIT_PROP_NAME
          */
+        @Config(id = "CLUSTER_INGRESS_FRAGMENT_LIMIT")
         public int ingressFragmentLimit()
         {
             return ingressFragmentLimit;
         }
 
         /**
-         * Set the channel parameter for the egress channel that is used as template to define a response
-         * channel for a client:
-         * <ul>
-         *     <li></li>
-         * </ul>
+         * Set the template channel that is used to refine the response channels for a Cluster, i.e. egress channel,
+         * backup query response channel, heartbeat response channel etc. Defaults to {@code null} in which case the
+         * provided response channel will be used. The main use-case is the ability to define the `interface` parameter
+         * to steer the response traffic via a specific network interface.
          *
-         * @param channel parameter for the egress channel.
+         * <p><em><strong>Note:</strong> each URI parameter that is defined on this channel template will
+         * <strong>override</strong> the corresponding URI parameter in the provided response channel!</em>
+         *
+         * @param channel the channel template for response channels.
          * @return this for a fluent API.
          * @see io.aeron.cluster.client.AeronCluster.Configuration#EGRESS_CHANNEL_PROP_NAME
          */
@@ -2087,9 +2675,15 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Get the channel parameter for the egress channel.
+         * Get the template channel that is used to refine the response channels for a Cluster, i.e. egress channel,
+         * backup query response channel, heartbeat response channel etc. Defaults to {@code null} in which case the
+         * provided response channel will be used. The main use-case is the ability to define the `interface` parameter
+         * to steer the response traffic via a specific network interface.
          *
-         * @return the channel parameter for the egress channel.
+         * <p><em><strong>Note:</strong> each URI parameter that is defined on this channel template will
+         * <strong>override</strong> the corresponding URI parameter in the provided response channel!</em>
+         *
+         * @return the channel template for response channels.
          * @see io.aeron.cluster.client.AeronCluster.Configuration#EGRESS_CHANNEL_PROP_NAME
          */
         public String egressChannel()
@@ -2116,6 +2710,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return whether IPC ingress is allowed or not.
          * @see Configuration#CLUSTER_INGRESS_IPC_ALLOWED_PROP_NAME
          */
+        @Config(id = "CLUSTER_INGRESS_IPC_ALLOWED")
         public boolean isIpcIngressAllowed()
         {
             return isIpcIngressAllowed;
@@ -2140,6 +2735,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the channel parameter for the cluster channel.
          * @see Configuration#LOG_CHANNEL_PROP_NAME
          */
+        @Config
         public String logChannel()
         {
             return logChannel;
@@ -2188,6 +2784,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the endpoints for the cluster node.
          * @see Configuration#MEMBER_ENDPOINTS_PROP_NAME
          */
+        @Config
         public String memberEndpoints()
         {
             return memberEndpoints;
@@ -2380,6 +2977,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the channel parameter for the consensus communication channel.
          * @see Configuration#CONSENSUS_CHANNEL_PROP_NAME
          */
+        @Config
         public String consensusChannel()
         {
             return consensusChannel;
@@ -2404,6 +3002,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the stream id for the consensus channel.
          * @see Configuration#CONSENSUS_STREAM_ID_PROP_NAME
          */
+        @Config
         public int consensusStreamId()
         {
             return consensusStreamId;
@@ -2432,6 +3031,7 @@ public final class ConsensusModule implements AutoCloseable
          * replication  to catch up.
          * @see Configuration#REPLICATION_CHANNEL_PROP_NAME
          */
+        @Config
         public String replicationChannel()
         {
             return replicationChannel;
@@ -2458,6 +3058,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return channel used for replaying older data during a catchup phase.
          * @see Configuration#FOLLOWER_CATCHUP_CHANNEL_PROP_NAME
          */
+        @Config
         public String followerCatchupChannel()
         {
             return followerCatchupChannel;
@@ -2484,6 +3085,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return channel used for replaying older data during a catchup phase.
          * @see Configuration#LEADER_ARCHIVE_CONTROL_CHANNEL_PROP_NAME
          */
+        @Config
         public String leaderArchiveControlChannel()
         {
             return leaderArchiveControlChannel;
@@ -2532,6 +3134,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the resolution in nanoseconds for each tick on the timer wheel.
          * @see Configuration#WHEEL_TICK_RESOLUTION_PROP_NAME
          */
+        @Config
         public long wheelTickResolutionNs()
         {
             return wheelTickResolutionNs;
@@ -2558,6 +3161,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the number of ticks on the timer wheel.
          * @see Configuration#TICKS_PER_WHEEL_PROP_NAME
          */
+        @Config
         public int ticksPerWheel()
         {
             return ticksPerWheel;
@@ -2584,9 +3188,36 @@ public final class ConsensusModule implements AutoCloseable
          * @see Configuration#SERVICE_COUNT_PROP_NAME
          * @see io.aeron.cluster.service.ClusteredServiceContainer.Configuration#SERVICE_ID_PROP_NAME
          */
+        @Config
         public int serviceCount()
         {
             return serviceCount;
+        }
+
+        /**
+         * Set the delay before recording a standby snapshot notification.
+         * The delay starts after the commit position passes the snapshot's log position.
+         *
+         * @param standbySnapshotNotificationProcessingDelayNs the delay, in nanoseconds.
+         * @return this for a fluent API
+         */
+        public Context standbySnapshotNotificationProcessingDelayNs(
+            final long standbySnapshotNotificationProcessingDelayNs)
+        {
+            this.standbySnapshotNotificationProcessingDelayNs = standbySnapshotNotificationProcessingDelayNs;
+            return this;
+        }
+
+        /**
+         * Get the delay before recording a standby snapshot notification.
+         * The delay starts after the commit position passes the snapshot's log position.
+         *
+         * @return the delay, in nanoseconds.
+         */
+        @Config
+        public long standbySnapshotNotificationProcessingDelayNs()
+        {
+            return standbySnapshotNotificationProcessingDelayNs;
         }
 
         /**
@@ -2608,6 +3239,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the limit for the maximum number of concurrent cluster sessions.
          * @see Configuration#MAX_CONCURRENT_SESSIONS_PROP_NAME
          */
+        @Config
         public int maxConcurrentSessions()
         {
             return maxConcurrentSessions;
@@ -2632,6 +3264,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the timeout for a session if no activity is observed.
          * @see Configuration#SESSION_TIMEOUT_PROP_NAME
          */
+        @Config
         public long sessionTimeoutNs()
         {
             return CommonContext.checkDebugTimeout(sessionTimeoutNs, TimeUnit.NANOSECONDS);
@@ -2656,6 +3289,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the timeout for a leader if no heartbeat is received by another member.
          * @see Configuration#LEADER_HEARTBEAT_TIMEOUT_PROP_NAME
          */
+        @Config
         public long leaderHeartbeatTimeoutNs()
         {
             return leaderHeartbeatTimeoutNs;
@@ -2668,6 +3302,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return this for a fluent API.
          * @see Configuration#LEADER_HEARTBEAT_INTERVAL_PROP_NAME
          */
+        @Config
         public Context leaderHeartbeatIntervalNs(final long heartbeatIntervalNs)
         {
             this.leaderHeartbeatIntervalNs = heartbeatIntervalNs;
@@ -2706,6 +3341,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the timeout to wait on startup after recovery before commencing an election.
          * @see Configuration#STARTUP_CANVASS_TIMEOUT_PROP_NAME
          */
+        @Config
         public long startupCanvassTimeoutNs()
         {
             return startupCanvassTimeoutNs;
@@ -2730,6 +3366,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return the timeout to wait for votes in an elections.
          * @see Configuration#ELECTION_TIMEOUT_PROP_NAME
          */
+        @Config
         public long electionTimeoutNs()
         {
             return electionTimeoutNs;
@@ -2756,36 +3393,10 @@ public final class ConsensusModule implements AutoCloseable
          * @see Configuration#ELECTION_STATUS_INTERVAL_PROP_NAME
          * @see Configuration#ELECTION_STATUS_INTERVAL_DEFAULT_NS
          */
+        @Config
         public long electionStatusIntervalNs()
         {
             return electionStatusIntervalNs;
-        }
-
-        /**
-         * Interval at which a dynamic joining member will send add cluster member and snapshot recording queries.
-         *
-         * @param dynamicJoinIntervalNs between add cluster members and snapshot recording queries.
-         * @return this for a fluent API.
-         * @see Configuration#DYNAMIC_JOIN_INTERVAL_PROP_NAME
-         * @see Configuration#DYNAMIC_JOIN_INTERVAL_DEFAULT_NS
-         */
-        public Context dynamicJoinIntervalNs(final long dynamicJoinIntervalNs)
-        {
-            this.dynamicJoinIntervalNs = dynamicJoinIntervalNs;
-            return this;
-        }
-
-        /**
-         * Interval at which a dynamic joining member will send add cluster member and snapshot recording queries.
-         *
-         * @return the interval at which a dynamic joining member will send add cluster member and snapshot recording
-         * queries.
-         * @see Configuration#DYNAMIC_JOIN_INTERVAL_PROP_NAME
-         * @see Configuration#DYNAMIC_JOIN_INTERVAL_DEFAULT_NS
-         */
-        public long dynamicJoinIntervalNs()
-        {
-            return dynamicJoinIntervalNs;
         }
 
         /**
@@ -2809,6 +3420,7 @@ public final class ConsensusModule implements AutoCloseable
          * @see Configuration#TERMINATION_TIMEOUT_PROP_NAME
          * @see Configuration#TERMINATION_TIMEOUT_DEFAULT_NS
          */
+        @Config
         public long terminationTimeoutNs()
         {
             return terminationTimeoutNs;
@@ -2835,6 +3447,7 @@ public final class ConsensusModule implements AutoCloseable
          *
          * @return threshold to track for the consensus module agent work cycle time.
          */
+        @Config
         public long cycleThresholdNs()
         {
             return cycleThresholdNs;
@@ -2863,11 +3476,59 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
+         * Set a threshold for total snapshot duration which when exceeded will result in a counter increment.
+         *
+         * @param thresholdNs value in nanoseconds
+         * @return this for fluent API.
+         * @see ConsensusModule.Configuration#TOTAL_SNAPSHOT_DURATION_THRESHOLD_PROP_NAME
+         * @see ConsensusModule.Configuration#TOTAL_SNAPSHOT_DURATION_THRESHOLD_DEFAULT_NS
+         */
+        public Context totalSnapshotDurationThresholdNs(final long thresholdNs)
+        {
+            this.totalSnapshotDurationThresholdNs = thresholdNs;
+            return this;
+        }
+
+        /**
+         * Threshold for total snapshot duration which when exceeded it will increment the counter.
+         *
+         * @return threshold value in nanoseconds.
+         */
+        @Config
+        public long totalSnapshotDurationThresholdNs()
+        {
+            return totalSnapshotDurationThresholdNs;
+        }
+
+        /**
+         * Set snapshot duration tracker used for monitoring total snapshot duration.
+         *
+         * @param snapshotDurationTracker snapshot duration tracker.
+         * @return this for fluent API.
+         */
+        public Context totalSnapshotDurationTracker(final SnapshotDurationTracker snapshotDurationTracker)
+        {
+            this.totalSnapshotDurationTracker = snapshotDurationTracker;
+            return this;
+        }
+
+        /**
+         * Get snapshot duration tracker used for monitoring total snapshot duration.
+         *
+         * @return snapshot duration tracker
+         */
+        public SnapshotDurationTracker totalSnapshotDurationTracker()
+        {
+            return totalSnapshotDurationTracker;
+        }
+
+        /**
          * Get the {@link Agent#roleName()} to be used for the consensus module agent. If {@code null} then one will
          * be generated.
          *
          * @return the {@link Agent#roleName()} to be used for the consensus module agent.
          */
+        @Config(id = "CLUSTER_CONSENSUS_MODULE_AGENT_ROLE_NAME")
         public String agentRoleName()
         {
             return agentRoleName;
@@ -2946,6 +3607,7 @@ public final class ConsensusModule implements AutoCloseable
          *
          * @return the {@link ClusterClock} to used for timestamping messages and timers.
          */
+        @Config
         public ClusterClock clusterClock()
         {
             return clusterClock;
@@ -3091,7 +3753,7 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Get the counter for the current state of an election
+         * Get the counter for the current state of an election.
          *
          * @return the counter for the current state of an election.
          * @see ElectionState
@@ -3165,18 +3827,18 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Get the counter for the control toggle for triggering actions on the cluster node.
+         * Get the counter for the control toggle for triggering actions for the cluster.
          *
          * @return the counter for triggering cluster node actions.
          * @see ClusterControl
          */
         public Counter controlToggleCounter()
         {
-            return controlToggle;
+            return clusterControlToggle;
         }
 
         /**
-         * Set the counter for the control toggle for triggering actions on the cluster node.
+         * Set the counter for the control toggle for triggering actions for the cluster.
          *
          * @param controlToggle the counter for triggering cluster node actions.
          * @return this for a fluent API.
@@ -3184,7 +3846,31 @@ public final class ConsensusModule implements AutoCloseable
          */
         public Context controlToggleCounter(final Counter controlToggle)
         {
-            this.controlToggle = controlToggle;
+            this.clusterControlToggle = controlToggle;
+            return this;
+        }
+
+        /**
+         * Get the counter for the control toggle for triggering actions on the cluster node.
+         *
+         * @return the counter for triggering cluster node actions.
+         * @see ClusterControl
+         */
+        public Counter nodeControlToggleCounter()
+        {
+            return nodeControlToggle;
+        }
+
+        /**
+         * Set the counter for the control toggle for triggering actions on the cluster node.
+         *
+         * @param nodeControlToggle the counter for triggering cluster node actions.
+         * @return this for a fluent API.
+         * @see ClusterControl
+         */
+        public Context nodeControlToggleCounter(final Counter nodeControlToggle)
+        {
+            this.nodeControlToggle = nodeControlToggle;
             return this;
         }
 
@@ -3342,6 +4028,7 @@ public final class ConsensusModule implements AutoCloseable
          *
          * @return the {@link AuthenticatorSupplier} to be used for the consensus module.
          */
+        @Config
         public AuthenticatorSupplier authenticatorSupplier()
         {
             return authenticatorSupplier;
@@ -3364,13 +4051,49 @@ public final class ConsensusModule implements AutoCloseable
          *
          * @return the {@link AuthorisationServiceSupplier} to be used for the consensus module.
          */
+        @Config
         public AuthorisationServiceSupplier authorisationServiceSupplier()
         {
             return authorisationServiceSupplier;
         }
 
         /**
-         * Set the {@link AuthorisationServiceSupplier} that will be used for the consensus module.
+         * <p>Set the {@link AuthorisationServiceSupplier} that will be used for the consensus module.</p>
+         *
+         * <p>When using an authorisation service for the ConsensusModule, then the following values for protocolId,
+         * actionId, and type should be considered.</p>
+         * <table>
+         *     <caption>Parameters for authorisation service queries from the Consensus Module</caption>
+         *     <thead>
+         *         <tr><td>Description</td><td>protocolId</td><td>actionId</td><td>type(s)</td></tr>
+         *     </thead>
+         *     <tbody>
+         *         <tr>
+         *             <td>Admin requests made through the client API</td>
+         *             <td>{@link MessageHeaderDecoder#SCHEMA_ID}</td>
+         *             <td>{@link AdminRequestDecoder#TEMPLATE_ID}</td>
+         *             <td>{@link AdminRequestType#SNAPSHOT}</td>
+         *         </tr>
+         *         <tr>
+         *             <td>Backup queries from Cluster Backup &amp; Standby</td>
+         *             <td></td>
+         *             <td>{@link BackupQueryDecoder#TEMPLATE_ID}</td>
+         *             <td><code>(null)</code></td>
+         *         </tr>
+         *         <tr>
+         *             <td>Heartbeat requests from Cluster Standby</td>
+         *             <td></td>
+         *             <td>{@link HeartbeatRequestDecoder#TEMPLATE_ID}</td>
+         *             <td><code>(null)</code></td>
+         *         </tr>
+         *         <tr>
+         *             <td>Standby snapshot notifications from Cluster Standby</td>
+         *             <td></td>
+         *             <td>{@link StandbySnapshotDecoder#TEMPLATE_ID}</td>
+         *             <td><code>(null)</code></td>
+         *         </tr>
+         *     </tbody>
+         * </table>
          *
          * @param authorisationServiceSupplier {@link AuthorisationServiceSupplier} to use for the consensus module.
          * @return this for a fluent API.
@@ -3406,31 +4129,39 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Set the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
+         * Get the CPU the consensus module thread is pinned to.
          *
-         * @param barrier that can be used to shut down a consensus module.
-         * @return this for a fluent API.
+         * @return CPU, or cpuset index if {@link CommonContext#THREAD_AFFINITY_USE_CPUSET_OFFSETS_PROP_NAME}, or
+         *         {@link ThreadAffinity#NO_AFFINITY}.
+         * @see Configuration#CLUSTER_CPU_AFFINITY_PROP_NAME
          */
-        public Context shutdownSignalBarrier(final ShutdownSignalBarrier barrier)
+        @Config
+        public int clusterCpuAffinity()
         {
-            shutdownSignalBarrier = barrier;
+            return clusterCpuAffinity;
+        }
+
+        /**
+         * Set the CPU the consensus module thread is pinned to.
+         *
+         * @param clusterCpuAffinity CPU, or cpuset index if
+         *                           {@link CommonContext#THREAD_AFFINITY_USE_CPUSET_OFFSETS_PROP_NAME}, or
+         *                           {@link ThreadAffinity#NO_AFFINITY}.
+         * @return this for a fluent API.
+         * @see Configuration#CLUSTER_CPU_AFFINITY_PROP_NAME
+         */
+        public Context clusterCpuAffinity(final int clusterCpuAffinity)
+        {
+            this.clusterCpuAffinity = clusterCpuAffinity;
             return this;
         }
 
         /**
-         * Get the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
-         *
-         * @return the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
-         */
-        public ShutdownSignalBarrier shutdownSignalBarrier()
-        {
-            return shutdownSignalBarrier;
-        }
-
-        /**
          * Set the {@link Runnable} that is called when the {@link ConsensusModule} processes a termination action.
+         * <p>
+         * Both {@link #extendedTerminationHook()} and {@link #terminationHook()} run on termination, in that order.
          *
-         * @param terminationHook that can be used to terminate a consensus module.
+         * @param terminationHook that is called when the {@link ConsensusModule} processes a termination action.
          * @return this for a fluent API.
          */
         public Context terminationHook(final Runnable terminationHook)
@@ -3442,13 +4173,47 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * Get the {@link Runnable} that is called when the {@link ConsensusModule} processes a termination action.
          * <p>
-         * The default action is to call signal on the {@link #shutdownSignalBarrier()}.
+         * Both {@link #extendedTerminationHook()} and {@link #terminationHook()} run on termination, in that order.
          *
-         * @return the {@link Runnable} that can be used to terminate a consensus module.
+         * @return the {@link Runnable} that is called when the {@link ConsensusModule} processes a termination action.
          */
         public Runnable terminationHook()
         {
             return terminationHook;
+        }
+
+        /**
+         * Set the {@link ExtendedTerminationHook} that is called when the {@link ConsensusModule} processes
+         * a termination action.
+         * <p>
+         * Identical to {@link #terminationHook(Runnable)}, but receives information about the termination cause.
+         * <p>
+         * Both {@link #extendedTerminationHook()} and {@link #terminationHook()} run on termination, in that order.
+         *
+         * @param extendedTerminationHook that is called when the {@link ConsensusModule} processes
+         *                                a termination action.
+         * @return this for a fluent API.
+         */
+        public Context extendedTerminationHook(final ExtendedTerminationHook extendedTerminationHook)
+        {
+            this.extendedTerminationHook = extendedTerminationHook;
+            return this;
+        }
+
+        /**
+         * Get the {@link ExtendedTerminationHook} that is called when the {@link ConsensusModule} processes
+         * a termination action.
+         * <p>
+         * Identical to {@link #terminationHook(Runnable)}, but receives information about the termination cause.
+         * <p>
+         * Both {@link #extendedTerminationHook()} and {@link #terminationHook()} run on termination, in that order.
+         *
+         * @return the {@link ExtendedTerminationHook} that is called when the {@link ConsensusModule} processes
+         * a termination action.
+         */
+        public ExtendedTerminationHook extendedTerminationHook()
+        {
+            return extendedTerminationHook;
         }
 
         /**
@@ -3473,6 +4238,22 @@ public final class ConsensusModule implements AutoCloseable
             return markFile;
         }
 
+        Context nodeStateFile(final NodeStateFile nodeStateFile)
+        {
+            this.nodeStateFile = nodeStateFile;
+            return this;
+        }
+
+        /**
+         * The {@link NodeStateFile} that is used by the consensus module.
+         *
+         * @return node state file.
+         */
+        public NodeStateFile nodeStateFile()
+        {
+            return nodeStateFile;
+        }
+
         /**
          * Set the error buffer length in bytes to use.
          *
@@ -3492,6 +4273,7 @@ public final class ConsensusModule implements AutoCloseable
          * @return error buffer length in bytes.
          * @see Configuration#ERROR_BUFFER_LENGTH_PROP_NAME
          */
+        @Config
         public int errorBufferLength()
         {
             return errorBufferLength;
@@ -3558,9 +4340,201 @@ public final class ConsensusModule implements AutoCloseable
          *
          * @return supplier of dynamically created {@link TimerService} instances.
          */
+        @Config
         public TimerServiceSupplier timerServiceSupplier()
         {
             return timerServiceSupplier;
+        }
+
+        /**
+         * Register a ConsensusModuleExtension to extend the behaviour of the
+         * consensus module instead of using ClusteredServices.
+         *
+         * @param consensusModuleExtension supplier for consensus module extension
+         * @return this for a fluent API.
+         */
+        public Context consensusModuleExtension(final ConsensusModuleExtension consensusModuleExtension)
+        {
+            this.consensusModuleExtension = consensusModuleExtension;
+            return this;
+        }
+
+        /**
+         * Registered consensus module extension.
+         *
+         * @return Registered consensus module extension or null.
+         */
+        public ConsensusModuleExtension consensusModuleExtension()
+        {
+            return consensusModuleExtension;
+        }
+
+        /**
+         * Deprecated for removal.
+         *
+         * @return {@code null}.
+         */
+        @Deprecated
+        public NameResolver nameResolver()
+        {
+            return null;
+        }
+
+        /**
+         * Deprecated for removal.
+         *
+         * @param ignore as deprecated.
+         * @return this for fluent API.
+         */
+        @Deprecated
+        public Context nameResolver(final NameResolver ignore)
+        {
+            return this;
+        }
+
+        /**
+         * Indicate whether this node should accept snapshots from standby nodes.
+         *
+         * @return <code>true</code> if this node should accept snapshots from standby nodes, <code>false</code>
+         * otherwise.
+         * @see Configuration#CLUSTER_ACCEPT_STANDBY_SNAPSHOTS_PROP_NAME
+         * @see Configuration#acceptStandbySnapshots()
+         */
+        @Config(id = "CLUSTER_ACCEPT_STANDBY_SNAPSHOTS")
+        public boolean acceptStandbySnapshots()
+        {
+            return acceptStandbySnapshots;
+        }
+
+        /**
+         * Indicate whether this node should accept snapshots from standby nodes.
+         *
+         * @param acceptStandbySnapshots <code>true</code> if this node should accept snapshots from standby nodes,
+         *                               <code>false</code> otherwise.
+         * @return this for a fluent API.
+         * @see Configuration#CLUSTER_ACCEPT_STANDBY_SNAPSHOTS_PROP_NAME
+         * @see Configuration#acceptStandbySnapshots()
+         */
+        public ConsensusModule.Context acceptStandbySnapshots(final boolean acceptStandbySnapshots)
+        {
+            this.acceptStandbySnapshots = acceptStandbySnapshots;
+            return this;
+        }
+
+        /**
+         * Get the counter used to track standby snapshots accepted by this node.
+         *
+         * @return the counter for standby snapshots.
+         */
+        public Counter standbySnapshotCounter()
+        {
+            return standbySnapshotCounter;
+        }
+
+        /**
+         * Set the counter used to track standby snapshots accepted by this node.
+         *
+         * @param standbySnapshotCounter the counter for standby snapshots.
+         * @return this for a fluentAPI.
+         */
+        public Context standbySnapshotCounter(final Counter standbySnapshotCounter)
+        {
+            this.standbySnapshotCounter = standbySnapshotCounter;
+            return this;
+        }
+
+        /**
+         * Get the counter used to track the number of elections on this node.
+         *
+         * @return the counter for elections.
+         * @since 1.44.0
+         */
+        public Counter electionCounter()
+        {
+            return electionCounter;
+        }
+
+        /**
+         * Set the counter used to track the number of elections on this node.
+         *
+         * @param electionCounter the counter for elections.
+         * @return this for a fluentAPI.
+         * @since 1.44.0
+         */
+        public Context electionCounter(final Counter electionCounter)
+        {
+            this.electionCounter = electionCounter;
+            return this;
+        }
+
+        /**
+         * Get the counter used to track the leadership term id.
+         *
+         * @return the counter containing the leadership term id.
+         * @since 1.44.0
+         */
+        public Counter leadershipTermIdCounter()
+        {
+            return leadershipTermId;
+        }
+
+        /**
+         * Set the counter used to track the number of elections on this node.
+         *
+         * @param leadershipTermId the counter for elections.
+         * @return this for a fluentAPI.
+         * @since 1.44.0
+         */
+        public Context leadershipTermIdCounter(final Counter leadershipTermId)
+        {
+            this.leadershipTermId = leadershipTermId;
+            return this;
+        }
+
+        /**
+         * If the ConsensusModule should set the control endpoint for the Consensus publication.
+         *
+         * @return <code>true</code> if the control endpoint should be set, <code>false</code> otherwise.
+         */
+        public boolean enableControlOnConsensusChannel()
+        {
+            return enableControlOnConsensusChannel;
+        }
+
+        /**
+         * If the ConsensusModule should bind the control endpoint for the Consensus publication.
+         *
+         * @param enableControlOnConsensusChannel <code>true</code> if the control endpoint should be set,
+         *                                        <code>false</code> otherwise.
+         * @return this for fluent API.
+         */
+        public Context enableControlOnConsensusChannel(final boolean enableControlOnConsensusChannel)
+        {
+            this.enableControlOnConsensusChannel = enableControlOnConsensusChannel;
+            return this;
+        }
+
+        /**
+         * If the ConsensusModule should set the control endpoint for the Consensus publication.
+         *
+         * @return <code>true</code> if the control endpoint should be bound, <code>false</code> otherwise.
+         */
+        public boolean enableControlOnLogControl()
+        {
+            return enableControlOnLogChannel;
+        }
+
+        /**
+         * If the LogModule should set the control endpoint for the Log publication.
+         *
+         * @param setControlOnLogChannel <code>true</code> if the control endpoint should be set, <code>false</code>
+         *                               otherwise.
+         * @return this for fluent API.
+         */
+        public Context enableControlOnLogControl(final boolean setControlOnLogChannel)
+        {
+            this.enableControlOnLogChannel = setControlOnLogChannel;
+            return this;
         }
 
         /**
@@ -3581,11 +4555,13 @@ public final class ConsensusModule implements AutoCloseable
          */
         public void close()
         {
+            CloseHelper.close(countedErrorHandler, affinityRegistry);
             CloseHelper.close(countedErrorHandler, recordingLog);
+            CloseHelper.close(countedErrorHandler, nodeStateFile);
             CloseHelper.close(countedErrorHandler, markFile);
-            if (errorHandler instanceof AutoCloseable)
+            if (errorHandler instanceof AutoCloseable handler)
             {
-                CloseHelper.quietClose((AutoCloseable)errorHandler); // Ignore error to ensure the rest will be closed
+                CloseHelper.quietClose(handler); // Ignore error to ensure the rest will be closed
             }
 
             if (ownsAeronClient)
@@ -3595,13 +4571,13 @@ public final class ConsensusModule implements AutoCloseable
             else if (!aeron.isClosed())
             {
                 CloseHelper.closeAll(
-                    moduleStateCounter,
-                    clusterNodeRoleCounter,
-                    electionStateCounter,
-                    commitPosition,
-                    controlToggle,
+                    timedOutClientCounter,
+                    clusterControlToggle,
                     snapshotCounter,
-                    timedOutClientCounter);
+                    moduleStateCounter,
+                    electionStateCounter,
+                    clusterNodeRoleCounter,
+                    commitPosition);
             }
         }
 
@@ -3633,20 +4609,20 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Start up the consensus module using presupplied state skipping the recovery process.  Internal use only.
+         * Start up the consensus module using pre-supplied state skipping the recovery process. Internal use only.
          *
          * @param bootstrapState to initialize the consensus module.
          * @return this for a fluent API.
          */
         ConsensusModule.Context bootstrapState(final ConsensusModuleStateExport bootstrapState)
         {
-            this.boostrapState = bootstrapState;
+            this.bootstrapState = bootstrapState;
             return this;
         }
 
-        ConsensusModuleStateExport boostrapState()
+        ConsensusModuleStateExport bootstrapState()
         {
-            return boostrapState;
+            return bootstrapState;
         }
 
         private void concludeMarkFile()
@@ -3654,11 +4630,7 @@ public final class ConsensusModule implements AutoCloseable
             final String aeronDirectory = aeron.context().aeronDirectoryName();
             final String authenticatorClassName = authenticatorSupplier.getClass().getName();
             ClusterMarkFile.checkHeaderLength(
-                aeronDirectory,
-                controlChannel(),
-                ingressChannel,
-                null,
-                authenticatorClassName);
+                aeronDirectory, controlChannel(), ingressChannel, null, authenticatorClassName);
 
             markFile.encoder()
                 .archiveStreamId(archiveContext.controlRequestStreamId())
@@ -3672,10 +4644,10 @@ public final class ConsensusModule implements AutoCloseable
                 .controlChannel(controlChannel)
                 .ingressChannel(ingressChannel)
                 .serviceName(null)
-                .authenticator(authenticatorClassName);
+                .authenticator(authenticatorClassName)
+                .servicesClusterDir(clusterServicesDirectoryName);
 
-            markFile.updateActivityTimestamp(epochClock.time());
-            markFile.signalReady();
+            markFile.signalReady(epochClock.time());
         }
 
         private TimerServiceSupplier getTimerServiceSupplierFromSystemProperty()
@@ -3700,28 +4672,30 @@ public final class ConsensusModule implements AutoCloseable
 
         private void validateLogChannel()
         {
-            final ChannelUri logChannelUri = ChannelUri.parse(logChannel);
-            verifyNotPresent(logChannelUri, "logChannel", INITIAL_TERM_ID_PARAM_NAME);
-            verifyNotPresent(logChannelUri, "logChannel", TERM_ID_PARAM_NAME);
-            verifyNotPresent(logChannelUri, "logChannel", TERM_OFFSET_PARAM_NAME);
-        }
-
-        private static void verifyNotPresent(final ChannelUri channelUri, final String name, final String paramName)
-        {
-            if (channelUri.containsKey(paramName))
+            final ChannelUri logChannelUri = parse(logChannel);
+            if (logChannelUri.containsKey(INITIAL_TERM_ID_PARAM_NAME))
             {
-                throw new ConfigurationException(name + " must not contain: " + paramName);
+                throw new ConfigurationException("logChannel must not contain: " + INITIAL_TERM_ID_PARAM_NAME);
+            }
+            if (logChannelUri.containsKey(TERM_ID_PARAM_NAME))
+            {
+                throw new ConfigurationException("logChannel must not contain: " + TERM_ID_PARAM_NAME);
+            }
+            if (logChannelUri.containsKey(TERM_OFFSET_PARAM_NAME))
+            {
+                throw new ConfigurationException("logChannel must not contain: " + TERM_OFFSET_PARAM_NAME);
             }
         }
 
         /**
          * {@inheritDoc}
          */
+        @Override
         public String toString()
         {
             return "ConsensusModule.Context" +
                 "\n{" +
-                "\n    isConcluded=" + (1 == isConcluded) +
+                "\n    isConcluded=" + isConcluded() +
                 "\n    ownsAeronClient=" + ownsAeronClient +
                 "\n    aeronDirectoryName='" + aeronDirectoryName + '\'' +
                 "\n    aeron=" + aeron +
@@ -3736,8 +4710,6 @@ public final class ConsensusModule implements AutoCloseable
                 "\n    clusterMemberId=" + clusterMemberId +
                 "\n    appointedLeaderId=" + appointedLeaderId +
                 "\n    clusterMembers='" + clusterMembers + '\'' +
-                "\n    clusterConsensusEndpoints='" + clusterConsensusEndpoints + '\'' +
-                "\n    clusterMembersIgnoreSnapshot=" + clusterMembersIgnoreSnapshot +
                 "\n    ingressChannel='" + ingressChannel + '\'' +
                 "\n    ingressStreamId=" + ingressStreamId +
                 "\n    ingressFragmentLimit=" + ingressFragmentLimit +
@@ -3767,7 +4739,6 @@ public final class ConsensusModule implements AutoCloseable
                 "\n    startupCanvassTimeoutNs=" + startupCanvassTimeoutNs +
                 "\n    electionTimeoutNs=" + electionTimeoutNs +
                 "\n    electionStatusIntervalNs=" + electionStatusIntervalNs +
-                "\n    dynamicJoinIntervalNs=" + dynamicJoinIntervalNs +
                 "\n    terminationTimeoutNs=" + terminationTimeoutNs +
                 "\n    threadFactory=" + threadFactory +
                 "\n    idleStrategySupplier=" + idleStrategySupplier +
@@ -3782,18 +4753,29 @@ public final class ConsensusModule implements AutoCloseable
                 "\n    electionStateCounter=" + electionStateCounter +
                 "\n    clusterNodeRoleCounter=" + clusterNodeRoleCounter +
                 "\n    commitPosition=" + commitPosition +
-                "\n    controlToggle=" + controlToggle +
+                "\n    controlToggle=" + clusterControlToggle +
+                "\n    nodeControlToggle=" + nodeControlToggle +
                 "\n    snapshotCounter=" + snapshotCounter +
                 "\n    timedOutClientCounter=" + timedOutClientCounter +
-                "\n    shutdownSignalBarrier=" + shutdownSignalBarrier +
+                "\n    standbySnapshotCounter=" + standbySnapshotCounter +
+                "\n    electionCounter=" + electionCounter +
+                "\n    leadershipTermId=" + leadershipTermId +
                 "\n    terminationHook=" + terminationHook +
+                "\n    extendedTerminationHook=" + extendedTerminationHook +
                 "\n    archiveContext=" + archiveContext +
                 "\n    authenticatorSupplier=" + authenticatorSupplier +
+                "\n    authorisationServiceSupplier=" + authorisationServiceSupplier +
                 "\n    logPublisher=" + logPublisher +
                 "\n    egressPublisher=" + egressPublisher +
                 "\n    isLogMdc=" + isLogMdc +
+                "\n    useAgentInvoker=" + useAgentInvoker +
+                "\n    clusterCpuAffinity=" + clusterCpuAffinity +
                 "\n    cycleThresholdNs=" + cycleThresholdNs +
-                "\n    dutyCyleTracker=" + dutyCycleTracker +
+                "\n    dutyCycleTracker=" + dutyCycleTracker +
+                "\n    totalSnapshotDurationThresholdNs=" + totalSnapshotDurationThresholdNs +
+                "\n    totalSnapshotDurationTracker=" + totalSnapshotDurationTracker +
+                "\n    acceptStandbySnapshots=" + acceptStandbySnapshots +
+                "\n    bootstrapState=" + bootstrapState +
                 "\n}";
         }
     }
@@ -3801,6 +4783,7 @@ public final class ConsensusModule implements AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "ConsensusModule{" +

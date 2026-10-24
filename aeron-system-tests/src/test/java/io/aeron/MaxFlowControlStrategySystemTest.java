@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@ import io.aeron.test.Tests;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
-import org.agrona.IoUtil;
 import org.agrona.SystemUtil;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -77,7 +76,6 @@ class MaxFlowControlStrategySystemTest
     void after()
     {
         CloseHelper.quietCloseAll(clientB, clientA, driverB, driverA);
-        IoUtil.delete(new File(ROOT_DIR), true);
     }
 
     @Test

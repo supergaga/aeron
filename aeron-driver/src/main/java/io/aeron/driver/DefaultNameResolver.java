@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,15 @@ import java.net.UnknownHostException;
 /**
  * Use the default host name resolver via {@link InetAddress}.
  */
-public class DefaultNameResolver implements NameResolver
+public class DefaultNameResolver implements NameResolverAgent
 {
+    /**
+     * Default constructor.
+     */
+    public DefaultNameResolver()
+    {
+    }
+
     /**
      * Singleton instance which can be used to avoid allocation.
      */
@@ -31,6 +38,7 @@ public class DefaultNameResolver implements NameResolver
     /**
      * {@inheritDoc}
      */
+    @Override
     public InetAddress resolve(final String name, final String uriParamName, final boolean isReResolution)
     {
         InetAddress resolvedAddress = null;
@@ -42,18 +50,18 @@ public class DefaultNameResolver implements NameResolver
         {
         }
 
-        resolveHook(this.getClass().getSimpleName(), name, resolvedAddress);
-
         return resolvedAddress;
     }
 
     /**
      * Name resolution hook, useful for logging.
      *
-     * @param resolverName      used to handle the resolution.
-     * @param hostname          that was resolved.
-     * @param resolvedAddress   the resulting address or null if it can't be resolved.
+     * @param resolverName    used to handle the resolution.
+     * @param hostname        that was resolved.
+     * @param resolvedAddress the resulting address or null if it can't be resolved.
+     * @deprecated No longer used for logging.
      */
+    @Deprecated
     public void resolveHook(final String resolverName, final String hostname, final InetAddress resolvedAddress)
     {
     }

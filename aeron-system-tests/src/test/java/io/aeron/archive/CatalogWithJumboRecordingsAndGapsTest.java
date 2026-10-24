@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,12 +20,14 @@ import io.aeron.CommonContext;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.TestContexts;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
+import org.agrona.IoUtil;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.CachedEpochClock;
 import org.junit.jupiter.api.AfterEach;
@@ -45,6 +47,7 @@ import static io.aeron.archive.AbstractListRecordingsSession.MAX_SCANS_PER_WORK_
 import static io.aeron.archive.Catalog.PAGE_SIZE;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.client.AeronArchive.NULL_TIMESTAMP;
+import static io.aeron.archive.codecs.RecordingState.INVALID;
 import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
 import static io.aeron.test.Tests.generateStringWithSuffix;
 import static java.util.Arrays.asList;
@@ -52,7 +55,7 @@ import static org.agrona.BitUtil.next;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class CatalogWithJumboRecordingsAndGapsTest
 {
     private static final int MTU_LENGTH = PAGE_SIZE * 4;
@@ -109,10 +112,10 @@ class CatalogWithJumboRecordingsAndGapsTest
                 current = next(current, 3);
             }
 
-            invalidateRecordings(catalog, 0, 3);
-            invalidateRecordings(catalog, 20, 30);
-            invalidateRecordings(catalog, 100, 111);
-            invalidateRecordings(catalog, recordingIds.length - 5, recordingIds.length);
+            changeRecordingsState(catalog, 0, 3);
+            changeRecordingsState(catalog, 20, 30);
+            changeRecordingsState(catalog, 100, 111);
+            changeRecordingsState(catalog, recordingIds.length - 5, recordingIds.length);
         }
 
         final String aeronDirectoryName = CommonContext.generateRandomDirName();
@@ -124,7 +127,8 @@ class CatalogWithJumboRecordingsAndGapsTest
             .spiesSimulateConnection(false)
             .publicationTermBufferLength(TERM_MIN_LENGTH)
             .ipcTermBufferLength(TERM_MIN_LENGTH)
-            .dirDeleteOnStart(true);
+            .dirDeleteOnStart(true)
+            .dirDeleteOnShutdown(true);
 
         final Archive.Context archiveCtx = TestContexts.localhostArchive()
             .catalogCapacity(ArchiveSystemTests.CATALOG_CAPACITY)
@@ -133,16 +137,10 @@ class CatalogWithJumboRecordingsAndGapsTest
             .fileSyncLevel(0)
             .threadingMode(ArchiveThreadingMode.SHARED);
 
-        try
-        {
-            mediaDriver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
-            archive = Archive.launch(archiveCtx);
-        }
-        finally
-        {
-            systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
-            systemTestWatcher.dataCollector().add(archiveCtx.archiveDir());
-        }
+        mediaDriver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
+        systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
+        archive = Archive.launch(archiveCtx);
+        systemTestWatcher.dataCollector().add(archiveCtx.archiveDir());
 
         aeron = Aeron.connect(
             new Aeron.Context()
@@ -157,6 +155,7 @@ class CatalogWithJumboRecordingsAndGapsTest
     void after()
     {
         CloseHelper.closeAll(aeronArchive, aeron, archive, mediaDriver);
+        IoUtil.delete(archiveDir, false);
     }
 
     @Test
@@ -258,9 +257,9 @@ class CatalogWithJumboRecordingsAndGapsTest
         assertEquals(expectedRecordCount, callCount.get());
     }
 
-    private void invalidateRecordings(final Catalog catalog, final int from, final int to)
+    private void changeRecordingsState(final Catalog catalog, final int from, final int to)
     {
-        IntStream.range(from, to).forEach(i -> catalog.invalidateRecording(recordingIds[i]));
+        IntStream.range(from, to).forEach(i -> catalog.changeState(recordingIds[i], INVALID));
     }
 
     private static List<Arguments> listRecordingsArguments()
@@ -283,8 +282,8 @@ class CatalogWithJumboRecordingsAndGapsTest
             arguments(2, 10, ORIGINAL_CHANNELS[2], 2, 10),
             arguments(-1, 10, ORIGINAL_CHANNELS[2], 0, 0),
             arguments(-1, 10, ORIGINAL_CHANNELS[1], 2, 0),
-            arguments(5, MAX_SCANS_PER_WORK_CYCLE, ORIGINAL_CHANNELS[2], 2, 245),
-            arguments(10, MAX_SCANS_PER_WORK_CYCLE * 2, ORIGINAL_CHANNELS[2], 2, 243),
+            arguments(5, MAX_SCANS_PER_WORK_CYCLE, ORIGINAL_CHANNELS[2], 2, MAX_SCANS_PER_WORK_CYCLE - 11),
+            arguments(10, MAX_SCANS_PER_WORK_CYCLE * 2, ORIGINAL_CHANNELS[2], 2, MAX_SCANS_PER_WORK_CYCLE - 13),
             arguments(NUM_RECORDINGS - 10, MAX_SCANS_PER_WORK_CYCLE, ORIGINAL_CHANNELS[2], 2, 2));
     }
 }

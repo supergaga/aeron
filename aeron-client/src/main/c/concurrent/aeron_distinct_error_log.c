@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ int aeron_distinct_error_log_init(
     log->next_offset = 0;
     log->observation_list->num_observations = 0;
     log->observation_list->observations = NULL;
-    aeron_mutex_init(&log->mutex, NULL);
+    aeron_mutex_init(&log->mutex);
 
     return 0;
 }
@@ -125,7 +125,7 @@ static aeron_distinct_observation_t *aeron_distinct_error_log_new_observation(
     aeron_error_log_entry_t *entry = (aeron_error_log_entry_t *)(log->buffer + offset);
 
     if ((offset + length) > log->buffer_capacity ||
-        aeron_distinct_error_log_observation_list_alloc(&new_list, num_observations + 1) ||
+        aeron_distinct_error_log_observation_list_alloc(&new_list, num_observations + 1) < 0 ||
         aeron_alloc((void **)&new_description, description_length + 1) < 0)
     {
         return NULL;
@@ -153,7 +153,7 @@ static aeron_distinct_observation_t *aeron_distinct_error_log_new_observation(
     log->observation_list = new_list;
     aeron_free(list);
 
-    AERON_PUT_ORDERED(entry->length, (int32_t)length);
+    AERON_SET_RELEASE(entry->length, (int32_t)length);
 
     return &new_array[0];
 }
@@ -185,7 +185,7 @@ int aeron_distinct_error_log_record(aeron_distinct_error_log_t *log, int error_c
             char buffer[AERON_ERROR_MAX_TOTAL_LENGTH];
 
             aeron_format_date(buffer, sizeof(buffer), timestamp);
-            fprintf(stderr, "%s - unrecordable error %s\n", buffer, description);
+            AERON_FPRINTF(stderr, "%s - unrecordable error %s\n", buffer, description);
             aeron_set_errno(ENOMEM);
             return -1;
         }
@@ -198,8 +198,8 @@ int aeron_distinct_error_log_record(aeron_distinct_error_log_t *log, int error_c
 
     int32_t dest;
     AERON_GET_AND_ADD_INT32(dest, entry->observation_count, 1);
-    AERON_PUT_ORDERED(entry->last_observation_timestamp, timestamp);
-
+    AERON_SET_RELEASE(entry->last_observation_timestamp, timestamp);
+    (void)dest; // silence variable 'dest' set but not used
     return 0;
 }
 
@@ -208,7 +208,7 @@ bool aeron_error_log_exists(const uint8_t *buffer, size_t buffer_size)
     aeron_error_log_entry_t *entry = (aeron_error_log_entry_t *)buffer;
     int32_t length;
 
-    AERON_GET_VOLATILE(length, entry->length);
+    AERON_GET_ACQUIRE(length, entry->length);
 
     return 0 != length;
 }
@@ -228,14 +228,14 @@ size_t aeron_error_log_read(
         aeron_error_log_entry_t *entry = (aeron_error_log_entry_t *)(buffer + offset);
         int32_t length;
 
-        AERON_GET_VOLATILE(length, entry->length);
+        AERON_GET_ACQUIRE(length, entry->length);
         if (0 == length)
         {
             break;
         }
 
         int64_t last_observation_timestamp;
-        AERON_GET_VOLATILE(last_observation_timestamp, entry->last_observation_timestamp);
+        AERON_GET_ACQUIRE(last_observation_timestamp, entry->last_observation_timestamp);
 
         if (last_observation_timestamp >= since_timestamp)
         {

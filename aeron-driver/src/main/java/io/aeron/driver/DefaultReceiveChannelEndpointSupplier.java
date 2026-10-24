@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,16 @@ import org.agrona.concurrent.status.AtomicCounter;
 public class DefaultReceiveChannelEndpointSupplier implements ReceiveChannelEndpointSupplier
 {
     /**
+     * Default constructor.
+     */
+    public DefaultReceiveChannelEndpointSupplier()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public ReceiveChannelEndpoint newInstance(
         final UdpChannel udpChannel,
         final DataPacketDispatcher dispatcher,

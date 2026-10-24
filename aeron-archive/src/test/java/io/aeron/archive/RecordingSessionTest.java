@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.CloseHelper;
 import org.agrona.IoUtil;
 import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.NanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,6 +34,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.Archive.segmentFileName;
@@ -57,7 +60,7 @@ class RecordingSessionTest
     private static final int MTU_LENGTH = 1024;
     private static final long START_POSITION = TERM_OFFSET;
     private static final int INITIAL_TERM_ID = 0;
-    private static final ControlSession CONTROL_SESSION = null;
+    private static final ControlSession CONTROL_SESSION = mock(ControlSession.class);
 
     private final RecordingEventsProxy recordingEventsProxy = mock(RecordingEventsProxy.class);
     private final Counter mockPosition = mock(Counter.class);
@@ -65,15 +68,25 @@ class RecordingSessionTest
     private final File archiveDir = ArchiveTests.makeTestDirectory();
     private FileChannel mockLogBufferChannel;
     private UnsafeBuffer mockLogBufferMapped;
-    private File termFile;
+    private Path termFilePath;
     private final EpochClock epochClock = mock(EpochClock.class);
+    private final NanoClock nanoClock = new NanoClock()
+    {
+        private long timeNs = 1;
+
+        public long nanoTime()
+        {
+            timeNs = timeNs * 2;
+            return timeNs;
+        }
+    };
     private Archive.Context context;
     private long positionLong;
 
     @BeforeEach
     void before() throws Exception
     {
-        when(mockPosition.getWeak()).then((invocation) -> positionLong);
+        when(mockPosition.getPlain()).then((invocation) -> positionLong);
         when(mockPosition.get()).then((invocation) -> positionLong);
         doAnswer(
             (invocation) ->
@@ -81,11 +94,11 @@ class RecordingSessionTest
                 positionLong = invocation.getArgument(0);
                 return null;
             })
-            .when(mockPosition).setOrdered(anyLong());
+            .when(mockPosition).setRelease(anyLong());
 
-        termFile = File.createTempFile("test.rec", "sourceIdentity");
+        termFilePath = Files.createTempFile("test.rec", "sourceIdentity");
 
-        mockLogBufferChannel = FileChannel.open(termFile.toPath(), CREATE, READ, WRITE);
+        mockLogBufferChannel = FileChannel.open(termFilePath, CREATE, READ, WRITE);
         mockLogBufferMapped = new UnsafeBuffer(
             mockLogBufferChannel.map(FileChannel.MapMode.READ_WRITE, 0, TERM_BUFFER_LENGTH));
 
@@ -101,7 +114,10 @@ class RecordingSessionTest
         context = new Archive.Context()
             .segmentFileLength(SEGMENT_LENGTH)
             .archiveDir(archiveDir)
-            .epochClock(epochClock);
+            .epochClock(epochClock)
+            .nanoClock(nanoClock);
+
+        when(CONTROL_SESSION.sessionId()).thenReturn(123L);
     }
 
     @AfterEach
@@ -110,7 +126,7 @@ class RecordingSessionTest
         IoUtil.unmap(mockLogBufferMapped.byteBuffer());
         CloseHelper.close(mockLogBufferChannel);
         IoUtil.delete(archiveDir, false);
-        IoUtil.delete(termFile, false);
+        IoUtil.delete(termFilePath.toFile(), false);
     }
 
     @Test
@@ -127,7 +143,8 @@ class RecordingSessionTest
             mockPosition,
             context,
             CONTROL_SESSION,
-            false);
+            false,
+            mock(ArchiveConductor.Recorder.class));
 
         assertEquals(RECORDING_ID, session.sessionId());
 
@@ -137,7 +154,7 @@ class RecordingSessionTest
             (invocation) ->
             {
                 final BlockHandler handle = invocation.getArgument(0);
-                if (handle == null)
+                if (null == handle)
                 {
                     return 0;
                 }
@@ -152,6 +169,7 @@ class RecordingSessionTest
                 return RECORDED_BLOCK_LENGTH;
             });
 
+        assertNotEquals(0, session.doWork(), "Expect some work");
         assertNotEquals(0, session.doWork(), "Expect some work");
 
         final File segmentFile = new File(archiveDir, segmentFileName(RECORDING_ID, 0));

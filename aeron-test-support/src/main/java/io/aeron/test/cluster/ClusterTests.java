@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import io.aeron.exceptions.AeronException;
 import org.agrona.ErrorHandler;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.collections.MutableInteger;
-import org.agrona.concurrent.AgentTerminationException;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.YieldingIdleStrategy;
 
@@ -39,10 +38,14 @@ public class ClusterTests
     public static final String NO_OP_MSG = "No op!           ";
     public static final String REGISTER_TIMER_MSG = "Register a timer!";
     public static final String ECHO_SERVICE_IPC_INGRESS_MSG = "Echo as Service IPC ingress";
+    public static final String ECHO_SERVICE_IPC_INGRESS_MSG_SKIP_FOLLOWER =
+        "Echo as Service IPC ingress (skip follower)";
     public static final String UNEXPECTED_MSG =
         "Should never get this message because it is not going to be committed!";
+    public static final String ERROR_MSG = "This message will cause an error";
     public static final String LARGE_MSG;
     public static final String TERMINATE_MSG = "Please terminate the clustered service";
+    public static final String PAUSE = "Please pause when processing message";
 
     static
     {
@@ -67,11 +70,7 @@ public class ClusterTests
                     {
                         hasTerminated.set(true);
                     }
-
-                    throw new ClusterTerminationException();
                 }
-
-                throw new AgentTerminationException();
             };
     }
 
@@ -159,7 +158,7 @@ public class ClusterTests
             if (null != warning)
             {
                 System.err.println("\n*** Warning captured with error ***");
-                warning.printStackTrace();
+                warning.printStackTrace(System.err);
             }
 
             throw new RuntimeException("Cluster node received error", error);
@@ -168,23 +167,29 @@ public class ClusterTests
         if (Thread.currentThread().isInterrupted() && null != warning)
         {
             System.err.println("\n*** Warning captured with interrupt ***");
-            warning.printStackTrace();
+            warning.printStackTrace(System.err);
         }
+    }
+
+    public static void resetClusterError()
+    {
+        ERROR.set(null);
+        WARNING.set(null);
     }
 
     private static boolean shouldDownScaleToWarning(final Throwable error)
     {
+        int depthLimit = 10;
         Throwable maybeWarning = error;
-        do
+        while (null != maybeWarning && 0 < --depthLimit)
         {
-            if (null == error || maybeWarning instanceof UnknownHostException)
+            if (maybeWarning instanceof UnknownHostException)
             {
                 return true;
             }
 
-            maybeWarning = error.getCause();
+            maybeWarning = maybeWarning.getCause();
         }
-        while (null != maybeWarning);
 
         return false;
     }
@@ -212,15 +217,15 @@ public class ClusterTests
                         {
                             break;
                         }
+                    }
 
-                        try
-                        {
-                            Thread.sleep(1);
-                        }
-                        catch (final InterruptedException ignore)
-                        {
-                            break;
-                        }
+                    try
+                    {
+                        Thread.sleep(1);
+                    }
+                    catch (final InterruptedException ignore)
+                    {
+                        break;
                     }
 
                     idleStrategy.idle(client.pollEgress());

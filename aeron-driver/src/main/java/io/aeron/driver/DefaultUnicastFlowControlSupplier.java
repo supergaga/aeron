@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,16 @@ import static io.aeron.driver.Configuration.UNICAST_FLOW_CONTROL_STRATEGY;
 public class DefaultUnicastFlowControlSupplier implements FlowControlSupplier
 {
     /**
+     * Default constructor.
+     */
+    public DefaultUnicastFlowControlSupplier()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public FlowControl newInstance(final UdpChannel udpChannel, final int streamId, final long registrationId)
     {
         final String fcStr = udpChannel.channelUri().get(CommonContext.FLOW_CONTROL_PARAM_NAME);
@@ -42,7 +50,7 @@ public class DefaultUnicastFlowControlSupplier implements FlowControlSupplier
 
         if (UnicastFlowControl.class.getName().equals(UNICAST_FLOW_CONTROL_STRATEGY))
         {
-            return UnicastFlowControl.INSTANCE;
+            return new UnicastFlowControl();
         }
 
         try
@@ -62,6 +70,7 @@ public class DefaultUnicastFlowControlSupplier implements FlowControlSupplier
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "DefaultUnicastFlowControlSupplier{flowControlClass=" +

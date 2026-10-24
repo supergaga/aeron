@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2026 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,6 +52,8 @@ typedef struct aeron_exclusive_publication_stct
     void *on_close_complete_clientd;
 
     volatile bool is_closed;
+    volatile bool revoke_on_close;
+    volatile bool pending_close_action;
 
     uint8_t pre_fields_padding[AERON_CACHE_LINE_LENGTH];
     int64_t term_begin_position;
@@ -91,7 +93,7 @@ inline void aeron_exclusive_publication_rotate_term(aeron_exclusive_publication_
     publication->term_begin_position += publication->term_buffer_length;
 
     publication->log_meta_data->term_tail_counters[next_index] = (int64_t)((uint64_t)next_term_id << 32);
-    AERON_PUT_ORDERED(publication->log_meta_data->active_term_count, next_term_count);
+    AERON_SET_RELEASE(publication->log_meta_data->active_term_count, next_term_count);
 }
 
 inline int64_t aeron_exclusive_publication_new_position(
@@ -103,7 +105,7 @@ inline int64_t aeron_exclusive_publication_new_position(
         return publication->term_begin_position + resulting_offset;
     }
 
-    if ((publication->term_begin_position + publication->term_buffer_length) > publication->max_possible_position)
+    if ((publication->term_begin_position + publication->term_buffer_length) >= publication->max_possible_position)
     {
         return AERON_PUBLICATION_MAX_POSITION_EXCEEDED;
     }
@@ -116,13 +118,15 @@ inline int64_t aeron_exclusive_publication_new_position(
 inline int64_t aeron_exclusive_publication_back_pressure_status(
     aeron_exclusive_publication_t *publication, int64_t current_position, int32_t message_length)
 {
-    if ((current_position + message_length) >= publication->max_possible_position)
+    if ((current_position +
+        (int32_t)AERON_ALIGN(message_length + AERON_DATA_HEADER_LENGTH, AERON_LOGBUFFER_FRAME_ALIGNMENT)) >=
+        publication->max_possible_position)
     {
         return AERON_PUBLICATION_MAX_POSITION_EXCEEDED;
     }
 
     int32_t is_connected;
-    AERON_GET_VOLATILE(is_connected, publication->log_meta_data->is_connected);
+    AERON_GET_ACQUIRE(is_connected, publication->log_meta_data->is_connected);
     if (1 == is_connected)
     {
         return AERON_PUBLICATION_BACK_PRESSURED;

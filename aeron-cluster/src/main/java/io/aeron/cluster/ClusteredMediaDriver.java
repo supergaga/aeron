@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import static org.agrona.SystemUtil.loadPropertiesFiles;
@@ -46,13 +47,18 @@ public class ClusteredMediaDriver implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        try (ClusteredMediaDriver driver = launch())
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ClusteredMediaDriver ignore = launch(
+                new MediaDriver.Context().terminationHook(barrier::signalAll),
+                new Archive.Context(),
+                new ConsensusModule.Context().terminationHook(barrier::signalAll)))
         {
-            driver.consensusModule().context().shutdownSignalBarrier().await();
+            barrier.await();
             System.out.println("Shutdown ClusteredMediaDriver...");
         }
     }
@@ -145,6 +151,7 @@ public class ClusteredMediaDriver implements AutoCloseable
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         CloseHelper.closeAll(consensusModule, archive, driver);

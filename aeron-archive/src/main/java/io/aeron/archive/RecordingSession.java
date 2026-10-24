@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.aeron.archive;
 
 import io.aeron.*;
 import io.aeron.archive.client.ArchiveException;
+import io.aeron.archive.logging.ArchiveTracing;
 import org.agrona.CloseHelper;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.CountedErrorHandler;
@@ -28,6 +29,7 @@ import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
  */
 class RecordingSession implements Session
 {
+    @SuppressWarnings("JavadocVariable")
     enum State
     {
         INIT, RECORDING, INACTIVE, STOPPED
@@ -47,7 +49,8 @@ class RecordingSession implements Session
     private final ControlSession controlSession;
     private final CountedErrorHandler countedErrorHandler;
     private State state = State.INIT;
-    private String errorMessage = null;
+    private String errorMessage;
+    private String abortReason;
     private int errorCode = ArchiveException.GENERIC;
 
     RecordingSession(
@@ -61,7 +64,8 @@ class RecordingSession implements Session
         final Counter position,
         final Archive.Context ctx,
         final ControlSession controlSession,
-        final boolean isAutoStop)
+        final boolean isAutoStop,
+        final ArchiveConductor.Recorder recorder)
     {
         this.correlationId = correlationId;
         this.recordingId = recordingId;
@@ -75,12 +79,13 @@ class RecordingSession implements Session
         this.progressEventPosition = image.joinPosition();
 
         blockLengthLimit = Math.min(image.termBufferLength(), ctx.fileIoMaxLength());
-        recordingWriter = new RecordingWriter(recordingId, startPosition, segmentLength, image, ctx);
+        recordingWriter = new RecordingWriter(recordingId, startPosition, segmentLength, image, ctx, recorder);
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public long sessionId()
     {
         return recordingId;
@@ -89,6 +94,7 @@ class RecordingSession implements Session
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean isDone()
     {
         return state == State.STOPPED;
@@ -97,14 +103,17 @@ class RecordingSession implements Session
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    @Override
+    public void abort(final String reason)
     {
+        abortReason = reason;
         isAborted = true;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         recordingWriter.close();
@@ -114,13 +123,14 @@ class RecordingSession implements Session
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
         int workCount = 0;
 
         if (isAborted)
         {
-            state = State.INACTIVE;
+            state(State.INACTIVE, abortReason);
         }
 
         if (State.INIT == state)
@@ -135,22 +145,17 @@ class RecordingSession implements Session
 
         if (State.INACTIVE == state)
         {
+            state(State.STOPPED, "");
             recordingWriter.close();
-            state(State.STOPPED);
             workCount++;
 
             if (null != recordingEventsProxy)
             {
-                recordingEventsProxy.stopped(recordingId, image.joinPosition(), position.getWeak());
+                recordingEventsProxy.stopped(recordingId, image.joinPosition(), position.getPlain());
             }
         }
 
         return workCount;
-    }
-
-    void abortClose()
-    {
-        recordingWriter.close();
     }
 
     long correlationId()
@@ -188,11 +193,11 @@ class RecordingSession implements Session
         return isAutoStop;
     }
 
-    void sendPendingError(final ControlResponseProxy controlResponseProxy)
+    void sendPendingError()
     {
-        if (null != errorMessage && !controlSession.isDone())
+        if (null != errorMessage)
         {
-            controlSession.attemptErrorResponse(correlationId, errorCode, errorMessage, controlResponseProxy);
+            controlSession.sendErrorResponse(correlationId, errorCode, errorMessage);
         }
     }
 
@@ -206,7 +211,7 @@ class RecordingSession implements Session
         {
             errorMessage = ex.getClass().getName() + ": " + ex.getMessage();
             recordingWriter.close();
-            state(State.STOPPED);
+            state(State.STOPPED, errorMessage);
             LangUtil.rethrowUnchecked(ex);
         }
 
@@ -220,8 +225,7 @@ class RecordingSession implements Session
                 originalChannel,
                 image.sourceIdentity());
         }
-
-        state(State.RECORDING);
+        state(State.RECORDING, "");
 
         return 1;
     }
@@ -233,11 +237,13 @@ class RecordingSession implements Session
             final int workCount = image.blockPoll(recordingWriter, blockLengthLimit);
             if (workCount > 0)
             {
-                this.position.setOrdered(recordingWriter.position());
+                this.position.setRelease(recordingWriter.position());
             }
             else if (image.isEndOfStream() || image.isClosed())
             {
-                state(State.INACTIVE);
+                state(
+                    State.INACTIVE,
+                    "image.isEndOfStream=" + image.isEndOfStream() + ", image.isClosed=" + image.isClosed());
             }
 
             if (null != recordingEventsProxy)
@@ -259,21 +265,37 @@ class RecordingSession implements Session
             countedErrorHandler.onError(ex);
             errorMessage = ex.getMessage();
             errorCode = ex.errorCode();
-            state(State.INACTIVE);
+            state(State.INACTIVE, errorMessage);
         }
         catch (final Exception ex)
         {
             countedErrorHandler.onError(ex);
             errorMessage = ex.getClass().getName() + ": " + ex.getMessage();
-            state(State.INACTIVE);
+            state(State.INACTIVE, errorMessage);
         }
 
         return 1;
     }
 
-    private void state(final State newState)
+    private void state(final State newState, final String reason)
     {
-        //System.out.println("RecordingSession: " + state + " -> " + newState);
+        logStateChange(
+            state,
+            newState,
+            recordingId,
+            null != image ? image.position() : NULL_POSITION,
+            null == reason ? "" : reason);
         state = newState;
+    }
+
+    @SuppressWarnings("unused")
+    private void logStateChange(
+        final State oldState,
+        final State newState,
+        final long recordingId,
+        final long position,
+        final String reason)
+    {
+        ArchiveTracing.traceRecordingSessionStateChange(oldState, newState, recordingId, position, reason);
     }
 }

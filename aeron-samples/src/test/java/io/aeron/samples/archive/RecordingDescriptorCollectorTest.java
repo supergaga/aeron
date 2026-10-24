@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,17 @@
 package io.aeron.samples.archive;
 
 import io.aeron.Aeron;
+import io.aeron.CommonContext;
 import io.aeron.Publication;
 import io.aeron.archive.Archive;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.test.*;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -38,11 +41,15 @@ import static org.junit.jupiter.api.Assertions.*;
 @SuppressWarnings("try")
 public class RecordingDescriptorCollectorTest
 {
+    @RegisterExtension
+    final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
+
     @Test
     @InterruptAfter(10)
     void shouldCollectPagesOfRecordingDescriptors(@TempDir final Path tempDir)
     {
-        try (MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().dirDeleteOnStart(true));
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(
+            new MediaDriver.Context().aeronDirectoryName(CommonContext.generateRandomDirName()), systemTestWatcher);
             Archive ignore = Archive.launch(TestContexts.localhostArchive()
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                 .archiveDir(tempDir.resolve("archive").toFile())
@@ -76,9 +83,11 @@ public class RecordingDescriptorCollectorTest
     }
 
     @Test
+    @InterruptAfter(10)
     void shouldAllowUserToRetainDescriptorsToPreventReuse(@TempDir final Path tempDir)
     {
-        try (MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().dirDeleteOnStart(true));
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(
+            new MediaDriver.Context().aeronDirectoryName(CommonContext.generateRandomDirName()), systemTestWatcher);
             Archive ignore = Archive.launch(TestContexts.localhostArchive()
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                 .archiveDir(tempDir.resolve("archive").toFile())
@@ -117,9 +126,11 @@ public class RecordingDescriptorCollectorTest
     }
 
     @Test
+    @InterruptAfter(10)
     void shouldShouldNotReuseDescriptorIfPoolSizeIsZero(@TempDir final Path tempDir)
     {
-        try (MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().dirDeleteOnStart(true));
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(
+            new MediaDriver.Context().aeronDirectoryName(CommonContext.generateRandomDirName()), systemTestWatcher);
             Archive ignore = Archive.launch(TestContexts.localhostArchive()
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                 .archiveDir(tempDir.resolve("archive").toFile())

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,28 +52,24 @@ volatile bool running = true;
 
 void sigint_handler(int signal)
 {
-    AERON_PUT_ORDERED(running, false);
+    AERON_SET_RELEASE(running, false);
 }
 
 inline bool is_running(void)
 {
     bool result;
-    AERON_GET_VOLATILE(result, running);
+    AERON_GET_ACQUIRE(result, running);
     return result;
 }
 
 void ping_poll_handler(void *clientd, const uint8_t *buffer, size_t length, aeron_header_t *header)
 {
     aeron_exclusive_publication_t *publication = (aeron_exclusive_publication_t *)clientd;
-    aeron_buffer_claim_t buffer_claim;
 
-    while (aeron_exclusive_publication_try_claim(publication, length, &buffer_claim) < 0)
+    while (aeron_exclusive_publication_offer(publication, buffer, length, NULL, NULL) < 0)
     {
         aeron_idle_strategy_busy_spinning_idle(NULL, 0);
     }
-
-    memcpy(buffer_claim.data, buffer, length);
-    aeron_buffer_claim_commit(&buffer_claim);
 }
 
 int main(int argc, char **argv)
@@ -93,7 +89,7 @@ int main(int argc, char **argv)
     int32_t pong_stream_id = DEFAULT_PONG_STREAM_ID;
     int32_t ping_stream_id = DEFAULT_PING_STREAM_ID;
 
-    while ((opt = getopt(argc, argv, "hvC:c:p:C:s:")) != -1)
+    while ((opt = getopt(argc, argv, "hvC:c:p:S:s:")) != -1)
     {
         switch (opt)
         {
@@ -129,8 +125,14 @@ int main(int argc, char **argv)
 
             case 'v':
             {
-                printf("%s <%s> major %d minor %d patch %d\n",
-                    argv[0], aeron_version_full(), aeron_version_major(), aeron_version_minor(), aeron_version_patch());
+                printf(
+                    "%s <%s> major %d minor %d patch %d git %s\n",
+                    argv[0],
+                    aeron_version_full(),
+                    aeron_version_major(),
+                    aeron_version_minor(),
+                    aeron_version_patch(),
+                    aeron_version_gitsha());
                 exit(EXIT_SUCCESS);
             }
 

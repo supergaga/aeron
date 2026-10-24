@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,12 @@ import static org.agrona.concurrent.status.CountersReader.MAX_LABEL_LENGTH;
 /**
  * Status of the Aeron media channel for a {@link io.aeron.Publication} or {@link io.aeron.Subscription}.
  */
-public class ChannelEndpointStatus
+public final class ChannelEndpointStatus
 {
+    private ChannelEndpointStatus()
+    {
+    }
+
     /**
      * Channel is being initialized.
      */
@@ -114,9 +118,11 @@ public class ChannelEndpointStatus
         final long registrationId,
         final String channel)
     {
-        final int keyLength = tempBuffer.putStringWithoutLengthAscii(
+        final int channelLength = tempBuffer.putStringWithoutLengthAscii(
             CHANNEL_OFFSET + SIZE_OF_INT, channel, 0, MAX_CHANNEL_LENGTH);
-        tempBuffer.putInt(CHANNEL_OFFSET, keyLength);
+        tempBuffer.putInt(CHANNEL_OFFSET, channelLength);
+
+        final int keyLength = channelLength + SIZE_OF_INT;
 
         int labelLength = 0;
         labelLength += tempBuffer.putStringWithoutLengthAscii(keyLength + labelLength, name);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,16 +19,18 @@
 #define _GNU_SOURCE
 #endif
 
-#include "errno.h"
-#include "inttypes.h"
+#include <errno.h>
+#include <inttypes.h>
+#include <stdlib.h>
 #include "aeron_alloc.h"
 #include "concurrent/aeron_thread.h"
+#include "util/aeron_bitutil.h"
 #include "util/aeron_error.h"
 
 #if !defined(_WIN32)
 #include <unistd.h>
 #else
-#include <windows.h>
+#include <Windows.h>
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
@@ -90,17 +92,42 @@ void aeron_micro_sleep(unsigned int microseconds)
 #endif
 }
 
-int aeron_thread_set_affinity(const char *role_name, uint8_t cpu_affinity_no)
+int aeron_thread_set_affinity(const char *name, uint8_t cpu_affinity_no)
 {
 #if defined(__linux__)
     cpu_set_t mask;
-    const size_t size = sizeof(mask);
     CPU_ZERO(&mask);
     CPU_SET(cpu_affinity_no, &mask);
-    if (sched_setaffinity(0, size, &mask) < 0)
+    if (sched_setaffinity(0, sizeof(mask), &mask) < 0)
     {
-        AERON_SET_ERR(errno, "failed to set thread affinity role_name=%s, cpu_affinity_no=%" PRIu8, role_name, cpu_affinity_no);
+        AERON_SET_ERR(errno, "failed to set thread affinity name=%s, cpu_affinity_no=%" PRIu8, name, cpu_affinity_no);
         return -1;
+    }
+    return 0;
+#else
+    AERON_SET_ERR(EINVAL, "%s", "thread affinity not supported");
+    return -1;
+#endif
+}
+
+int aeron_thread_get_affinity(uint8_t *cpu_affinity)
+{
+#if defined(__linux__)
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (sched_getaffinity(0, sizeof(mask), &mask) < 0)
+    {
+        AERON_SET_ERR(errno, "%s", "failed to get thread affinity");
+        return -1;
+    }
+
+    for (uint8_t i = 0; i < UINT8_MAX; i++)
+    {
+        if (CPU_ISSET(i, &mask))
+        {
+            *cpu_affinity = i;
+            break;
+        }
     }
     return 0;
 #else
@@ -111,15 +138,90 @@ int aeron_thread_set_affinity(const char *role_name, uint8_t cpu_affinity_no)
 
 #if defined(AERON_COMPILER_GCC)
 
-void aeron_thread_set_name(const char *role_name)
+int aeron_thread_set_name(const char *name)
 {
-#if defined(Darwin)
-    pthread_setname_np(role_name);
+    char thread_name[AERON_THREAD_NAME_MAX_LENGTH + 1];
+    size_t copy_len = AERON_MIN(strlen(name), AERON_THREAD_NAME_MAX_LENGTH);
+    memcpy(thread_name, name, copy_len);
+    thread_name[copy_len] = '\0';
+
+    int rc;
+#if defined(__APPLE__)
+    rc = pthread_setname_np(thread_name);
 #else
-    pthread_setname_np(pthread_self(), role_name);
+    rc = pthread_setname_np(pthread_self(), thread_name);
 #endif
+    if (0 != rc)
+    {
+        AERON_SET_ERR(-rc, "%s", "pthread_setname_np failed");
+        return -1;
+    }
+    return 0;
 }
 
+int aeron_thread_get_name(char *name_buf, size_t name_buf_size)
+{
+    if (NULL == name_buf)
+    {
+        AERON_SET_ERR(EINVAL, "%s", "name_buf is NULL");
+        return -1;
+    }
+
+    if (name_buf_size <= AERON_THREAD_NAME_MAX_LENGTH)
+    {
+        AERON_SET_ERR(EINVAL, "name_buf is too small: %" PRIu64, (uint64_t)name_buf_size);
+        return -1;
+    }
+
+    return pthread_getname_np(pthread_self(), name_buf, name_buf_size);
+}
+
+int aeron_mutex_init(aeron_mutex_t *mutex)
+{
+    pthread_mutexattr_t mutex_attr;
+    int rc = pthread_mutexattr_init(&mutex_attr);
+    if (0 != rc)
+    {
+        AERON_SET_ERR(rc, "%s", "pthread_mutexattr_init failed");
+        return -1;
+    }
+
+    rc = pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    if (0 != rc)
+    {
+        AERON_SET_ERR(rc, "%s", "pthread_mutexattr_settype failed");
+        goto error;
+    }
+
+    rc = pthread_mutex_init(mutex, &mutex_attr);
+    if (0 != rc)
+    {
+        AERON_SET_ERR(rc, "%s", "failed to create mutex");
+        goto error;
+    }
+
+    pthread_mutexattr_destroy(&mutex_attr);
+    return 0;
+
+error:
+    pthread_mutexattr_destroy(&mutex_attr);
+    return -1;
+}
+
+int aeron_mutex_destroy(aeron_mutex_t *mutex)
+{
+    return pthread_mutex_destroy(mutex);
+}
+
+int aeron_mutex_lock(aeron_mutex_t *mutex)
+{
+    return pthread_mutex_lock(mutex);
+}
+
+int aeron_mutex_unlock(aeron_mutex_t *mutex)
+{
+    return pthread_mutex_unlock(mutex);
+}
 
 #elif defined(AERON_COMPILER_MSVC)
 
@@ -134,35 +236,35 @@ void aeron_thread_once(AERON_INIT_ONCE *s_init_once, void *callback)
     InitOnceExecuteOnce((PINIT_ONCE)s_init_once, (PINIT_ONCE_FN)aeron_thread_once_callback, callback, NULL);
 }
 
-int aeron_mutex_init(aeron_mutex_t *mutex, void *attr)
+int aeron_mutex_init(aeron_mutex_t *mutex)
 {
-    *mutex = CreateMutexA(NULL, FALSE, NULL);
-    return *mutex ? 0 : -1;
+    InitializeCriticalSection(mutex);
+    return 0;
 }
 
 int aeron_mutex_lock(aeron_mutex_t *mutex)
 {
-    return WaitForSingleObject(*mutex, INFINITE) == WAIT_OBJECT_0 ? 0 : EINVAL;
+    EnterCriticalSection(mutex);
+    return 0;
 }
 
 int aeron_mutex_unlock(aeron_mutex_t *mutex)
 {
-    return ReleaseMutex(*mutex) ? 0 : EINVAL;
+    LeaveCriticalSection(mutex);
+    return 0;
 }
 
 int aeron_mutex_destroy(aeron_mutex_t *mutex)
 {
-    if (*mutex)
+    if (mutex)
     {
-        CloseHandle(*mutex);
-        *mutex = 0;
-        return 0;
+        DeleteCriticalSection(mutex);
     }
 
-    return EINVAL;
+    return 0;
 }
 
-int aeron_thread_attr_init(pthread_attr_t *attr)
+int aeron_thread_attr_init(aeron_thread_attr_t *attr)
 {
     return 0;
 }
@@ -179,11 +281,13 @@ int aeron_thread_create(aeron_thread_t *thread_ptr, void *attr, void *(*callback
 {
     if (NULL == thread_ptr)
     {
+        AERON_SET_ERR_WIN(EINVAL, "%s", "aeron_thread_t is NULL");
         return -1;
     }
 
     if (aeron_alloc((void **)thread_ptr, sizeof(struct aeron_thread_stct)) < 0)
     {
+        AERON_APPEND_ERR("%s", "Failed to allocate memory for aeron_thread_t");
         return -1;
     }
 
@@ -192,15 +296,16 @@ int aeron_thread_create(aeron_thread_t *thread_ptr, void *attr, void *(*callback
     DWORD id;
 
     (*thread_ptr)->handle = CreateThread(
-        NULL,  // default security attributes
-        0,         // use default stack size
+        NULL,                 // default security attributes
+        0,                    // use default stack size
         aeron_thread_proc,    // thread function name
         thread_ptr,           // argument to thread function
-        0,      // use default creation flags
+        0,                    // use default creation flags
         &id);                 // returns the thread identifier
 
     if (!(*thread_ptr)->handle)
     {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "CreateThread failed");
         aeron_free(*thread_ptr);
         return -1;
     }
@@ -208,19 +313,80 @@ int aeron_thread_create(aeron_thread_t *thread_ptr, void *attr, void *(*callback
     return 0;
 }
 
-void aeron_thread_set_name(const char *role_name)
+int aeron_thread_set_name(const char *name)
 {
-    size_t wchar_count = mbstowcs(NULL, role_name, 0);
+    char thread_name[AERON_THREAD_NAME_MAX_LENGTH + 1];
+    size_t copy_len = AERON_MIN(strlen(name), AERON_THREAD_NAME_MAX_LENGTH);
+    memcpy(thread_name, name, copy_len);
+    thread_name[copy_len] = '\0';
+
+    size_t wchar_count;
+    if (0 != mbstowcs_s(&wchar_count, NULL, 0, thread_name, 0))
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "mbstowcs_s failed");
+        return -1;
+    }
+
     wchar_t *buf;
     if (aeron_alloc((void **)&buf, sizeof(wchar_t) * (wchar_count + 1)) < 0)  // value-initialize to 0 (see below)
     {
-        return;
+        AERON_APPEND_ERR("%s", "Failed to allocate wchar_t buffer");
+        return -1;
     }
 
-    mbstowcs(buf, role_name, wchar_count + 1);
-    SetThreadDescription(GetCurrentThread(), buf);
+    if (0 != mbstowcs_s(NULL, buf, wchar_count + 1, thread_name, copy_len))
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "mbstowcs_s failed");
+        goto error;
+    }
+
+    HRESULT hr = SetThreadDescription(GetCurrentThread(), buf);
+    if (FAILED(hr))
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "SetThreadDescription failed");
+        goto error;
+    }
 
     aeron_free(buf);
+    return 0;
+
+error:
+    aeron_free(buf);
+    return -1;
+}
+
+int aeron_thread_get_name(char *name_buf, size_t name_buf_size)
+{
+    if (NULL == name_buf)
+    {
+        AERON_SET_ERR(EINVAL, "%s", "name_buf is NULL");
+        return -1;
+    }
+
+    if (name_buf_size <= AERON_THREAD_NAME_MAX_LENGTH)
+    {
+        AERON_SET_ERR(EINVAL, "name_buf is too small: %" PRIu64, (uint64_t)name_buf_size);
+        return -1;
+    }
+
+    wchar_t *buf;
+    HRESULT hr = GetThreadDescription(GetCurrentThread(), &buf);
+    if (FAILED(hr))
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "GetThreadDescription failed");
+        return -1;
+    }
+
+    size_t size;
+    if (0 != wcstombs_s(&size, name_buf, name_buf_size, buf, _TRUNCATE))
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "%s", "wcstombs_s failed");
+        LocalFree(buf);
+        return -1;
+    }
+
+    LocalFree(buf);
+    return 0;
 }
 
 int aeron_thread_join(aeron_thread_t thread, void **value_ptr)
@@ -250,30 +416,180 @@ int aeron_thread_join(aeron_thread_t thread, void **value_ptr)
     return result;
 }
 
+/* Note on TLS destructor support on Windows:
+ *
+ * Win32's TlsAlloc/TlsGetValue/TlsSetValue do not support destructors.
+ * Windows' Fiber Local Storage does, but FlsGetValue is much slower
+ * than TlsGetValue.
+ *
+ * So to add support for pthreads-style destructors to TlsAlloc, we maintain
+ * a registry of (key, destructor) pairs and hook into the Windows loader's
+ * TLS directory via a custom PIMAGE_TLS_CALLBACK (see:
+ * https://iangrunert.com/2025/08/04/fiber-local-storage-slow)
+ * The loader calls this callback for every thread attach/detach event; on
+ * DLL_THREAD_DETACH (and DLL_PROCESS_DETACH) we snapshot the registry and
+ * invoke each registered destructor for that thread's TLS value.
+ */
+
+#define AERON_TLS_DESTRUCTOR_ITERATIONS 4
+
+typedef struct aeron_tls_destructor_entry_stct
+{
+    DWORD key;
+    void (*destr_func)(void *);
+    struct aeron_tls_destructor_entry_stct *next;
+}
+aeron_tls_destructor_entry_t;
+
+static aeron_tls_destructor_entry_t *s_aeron_tls_destructor_head = NULL;
+static SRWLOCK s_aeron_tls_destructor_lock = SRWLOCK_INIT;
+
+typedef struct aeron_tls_destructor_call_stct
+{
+    void (*destr)(void *);
+    void *value;
+}
+aeron_tls_destructor_call_t;
+
+static size_t aeron_tls_run_pending_destructors(void)
+{
+    AcquireSRWLockShared(&s_aeron_tls_destructor_lock);
+
+    size_t count = 0;
+    for (aeron_tls_destructor_entry_t *entry = s_aeron_tls_destructor_head;
+         NULL != entry;
+         entry = entry->next)
+    {
+        if (NULL != TlsGetValue(entry->key))
+        {
+            count++;
+        }
+    }
+
+    if (0 == count)
+    {
+        ReleaseSRWLockShared(&s_aeron_tls_destructor_lock);
+        return 0;
+    }
+
+    /* Snapshot (destr_func, value) tuples onto the stack and clear each TLS
+     * slot under the lock. */
+    aeron_tls_destructor_call_t *calls =
+        (aeron_tls_destructor_call_t *)_alloca(count * sizeof(aeron_tls_destructor_call_t));
+    size_t n = 0;
+    for (aeron_tls_destructor_entry_t *entry = s_aeron_tls_destructor_head;
+         NULL != entry;
+         entry = entry->next)
+    {
+        void *value = TlsGetValue(entry->key);
+        if (NULL != value)
+        {
+            TlsSetValue(entry->key, NULL);
+            calls[n].destr = entry->destr_func;
+            calls[n].value = value;
+            n++;
+        }
+    }
+    ReleaseSRWLockShared(&s_aeron_tls_destructor_lock);
+
+    /* Call destructors with the lock released. A destructor may safely call
+     * any aeron_thread_* API. If it sets new TLS values for this thread,
+     * those will be picked up on the next iteration of the outer loop. */
+    for (size_t i = 0; i < n; i++)
+    {
+        calls[i].destr(calls[i].value);
+    }
+    return n;
+}
+
+static VOID NTAPI aeron_tls_thread_callback(PVOID hModule, DWORD reason, PVOID pvReserved)
+{
+    (void)hModule;
+    (void)pvReserved;
+
+    if (DLL_THREAD_DETACH != reason && DLL_PROCESS_DETACH != reason)
+    {
+        return;
+    }
+
+    for (int iter = 0; iter < AERON_TLS_DESTRUCTOR_ITERATIONS; iter++)
+    {
+        if (0 == aeron_tls_run_pending_destructors())
+        {
+            break;
+        }
+    }
+}
+
+/* Register the callback in the PE image's TLS directory. /INCLUDE prevents the
+ * linker from stripping the symbol; placing the pointer in .CRT$XLB causes the
+ * CRT's TLS directory builder to pick it up. */
+#ifdef _WIN64
+#pragma comment(linker, "/INCLUDE:_tls_used")
+#pragma comment(linker, "/INCLUDE:p_aeron_tls_thread_callback")
+#else
+#pragma comment(linker, "/INCLUDE:__tls_used")
+#pragma comment(linker, "/INCLUDE:_p_aeron_tls_thread_callback")
+#endif
+
+#pragma section(".CRT$XLB", long, read)
+__declspec(allocate(".CRT$XLB"))
+const PIMAGE_TLS_CALLBACK p_aeron_tls_thread_callback = aeron_tls_thread_callback;
+
 int aeron_thread_key_create(pthread_key_t *key_ptr, void (*destr_func)(void *))
 {
     DWORD dkey = TlsAlloc();
-    if (dkey != TLS_OUT_OF_INDEXES)
-    {
-        *key_ptr = dkey;
-        return 0;
-    }
-    else
+    if (TLS_OUT_OF_INDEXES == dkey)
     {
         return EAGAIN;
     }
+
+    if (NULL != destr_func)
+    {
+        aeron_tls_destructor_entry_t *entry = NULL;
+        if (aeron_alloc((void **)&entry, sizeof(aeron_tls_destructor_entry_t)) < 0)
+        {
+            TlsFree(dkey);
+            return ENOMEM;
+        }
+        entry->key = dkey;
+        entry->destr_func = destr_func;
+
+        AcquireSRWLockExclusive(&s_aeron_tls_destructor_lock);
+        entry->next = s_aeron_tls_destructor_head;
+        s_aeron_tls_destructor_head = entry;
+        ReleaseSRWLockExclusive(&s_aeron_tls_destructor_lock);
+    }
+
+    *key_ptr = dkey;
+    return 0;
 }
 
 int aeron_thread_key_delete(pthread_key_t key)
 {
-    if (TlsFree(key))
+    aeron_tls_destructor_entry_t *to_free = NULL;
+
+    AcquireSRWLockExclusive(&s_aeron_tls_destructor_lock);
+    aeron_tls_destructor_entry_t **link = &s_aeron_tls_destructor_head;
+    while (NULL != *link)
     {
-        return 0;
+        if ((*link)->key == key)
+        {
+            to_free = *link;
+            *link = (*link)->next;
+            break;
+        }
+        link = &(*link)->next;
     }
-    else
+    ReleaseSRWLockExclusive(&s_aeron_tls_destructor_lock);
+
+    aeron_free(to_free);
+
+    if (!TlsFree(key))
     {
         return EINVAL;
     }
+    return 0;
 }
 
 int aeron_thread_set_specific(pthread_key_t key, const void *pointer)
@@ -299,6 +615,30 @@ int sched_yield(void)
     return 0;
 }
 
+int aeron_cond_init(aeron_cond_t *cv, void *attr)
+{
+    InitializeConditionVariable(cv);
+    return 0;
+}
+
+int aeron_cond_destroy(aeron_cond_t *cv)
+{
+    // there's no delete for windows condition variables
+    return 0;
+}
+
+int aeron_cond_wait(aeron_cond_t *cv, aeron_mutex_t *mutex)
+{
+    SleepConditionVariableCS(cv, mutex, INFINITE);
+    return 0;
+}
+
+int aeron_cond_signal(aeron_cond_t *cv)
+{
+    WakeConditionVariable(cv);
+    return 0;
+}
+
 #else
 #error Unsupported platform!
 #endif
@@ -311,8 +651,8 @@ int sched_yield(void)
 
 void proc_yield(void)
 {
-#if !defined(AERON_CPU_ARM)
-    __asm__ volatile("pause\n": : : "memory");
+#if !defined(AERON_CPU_ARM) && !defined(AERON_CPU_PPC64)
+    __asm__ __volatile__("pause\n": : : "memory");
 #endif
 }
 

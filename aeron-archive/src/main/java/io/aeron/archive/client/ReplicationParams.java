@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,9 @@
 package io.aeron.archive.client;
 
 import io.aeron.Aeron;
+import io.aeron.security.NullCredentialsSupplier;
+
+import java.util.Objects;
 
 /**
  * Contains the optional parameters that can be passed to a Replication Request. Controls the behaviour of the
@@ -31,10 +34,14 @@ public class ReplicationParams
     private long channelTagId;
     private long subscriptionTagId;
     private int fileIoMaxLength;
+    private int replicationSessionId;
+    private byte[] encodedCredentials;
+    private String srcResponseChannel;
 
     /**
      * Initialise all parameters to defaults.
      */
+    @SuppressWarnings("this-escape")
     public ReplicationParams()
     {
         reset();
@@ -54,6 +61,10 @@ public class ReplicationParams
         channelTagId = Aeron.NULL_VALUE;
         subscriptionTagId = Aeron.NULL_VALUE;
         fileIoMaxLength = Aeron.NULL_VALUE;
+        replicationSessionId = Aeron.NULL_VALUE;
+        encodedCredentials = NullCredentialsSupplier.NULL_CREDENTIAL;
+        srcResponseChannel = null;
+
         return this;
     }
 
@@ -215,5 +226,124 @@ public class ReplicationParams
     public int fileIoMaxLength()
     {
         return this.fileIoMaxLength;
+    }
+
+    /**
+     * Sets the session-id to be used for the replicated file instead of the session id from the source archive. This
+     * is useful in cases where we are replicating the same recording in multiple stages.
+     *
+     * @param replicationSessionId the session-id to be set for the received recording.
+     * @return this for fluent API
+     */
+    public ReplicationParams replicationSessionId(final int replicationSessionId)
+    {
+        this.replicationSessionId = replicationSessionId;
+        return this;
+    }
+
+    /**
+     * The session-id to be used for the replicated recording.
+     *
+     * @return session-id to be useful for the replicated recording.
+     */
+    public int replicationSessionId()
+    {
+        return this.replicationSessionId;
+    }
+
+    /**
+     * Sets the encoded credentials that will be passed to the source archive for authentication. Currently only simple
+     * authentication (i.e. not challenge/response) is supported for replication.
+     *
+     * @param encodedCredentials credentials to be passed to the source archive.
+     * @return this for a fluent API.
+     */
+    public ReplicationParams encodedCredentials(final byte[] encodedCredentials)
+    {
+        this.encodedCredentials = encodedCredentials;
+        return this;
+    }
+
+    /**
+     * Gets the encoded credentials that will be used to authenticate against the source archive.
+     *
+     * @return encoded credentials used for authentication.
+     */
+    public byte[] encodedCredentials()
+    {
+        return encodedCredentials;
+    }
+
+    /**
+     * Control address of the source archive to use response channels during replication.
+     *
+     * @param responseChannel control address of the response publication for the source archive.
+     * @return this for a fluent API.
+     */
+    public ReplicationParams srcResponseChannel(final String responseChannel)
+    {
+        this.srcResponseChannel = responseChannel;
+        return this;
+    }
+
+    /**
+     * Control address of the source archive to use response channels during replication.
+     *
+     * @return control address of the response publication for the source archive.
+     */
+    public String srcResponseChannel()
+    {
+        return srcResponseChannel;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean equals(final Object o)
+    {
+        if (this == o)
+        {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass())
+        {
+            return false;
+        }
+        final ReplicationParams that = (ReplicationParams)o;
+        return stopPosition == that.stopPosition && dstRecordingId == that.dstRecordingId &&
+            channelTagId == that.channelTagId && subscriptionTagId == that.subscriptionTagId &&
+            fileIoMaxLength == that.fileIoMaxLength && replicationSessionId == that.replicationSessionId &&
+            Objects.equals(liveDestination, that.liveDestination) &&
+            Objects.equals(replicationChannel, that.replicationChannel);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(
+            stopPosition, dstRecordingId, liveDestination, replicationChannel, channelTagId, subscriptionTagId,
+            fileIoMaxLength, replicationSessionId);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "ReplicationParams{" +
+            "stopPosition=" + stopPosition +
+            ", dstRecordingId=" + dstRecordingId +
+            ", liveDestination='" + liveDestination + '\'' +
+            ", replicationChannel='" + replicationChannel + '\'' +
+            ", channelTagId=" + channelTagId +
+            ", subscriptionTagId=" + subscriptionTagId +
+            ", fileIoMaxLength=" + fileIoMaxLength +
+            ", replicationSessionId=" + replicationSessionId +
+            '}';
     }
 }

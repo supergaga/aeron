@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ArchiveDeleteAndRestartTest
 {
     private static final int SYNC_LEVEL = 0;
@@ -85,16 +85,11 @@ class ArchiveDeleteAndRestartTest
             .threadingMode(ArchiveThreadingMode.SHARED)
             .idleStrategySupplier(YieldingIdleStrategy::new);
 
-        try
-        {
-            driver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
-            archive = Archive.launch(archiveContext.clone());
-        }
-        finally
-        {
-            systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
-            systemTestWatcher.dataCollector().add(archiveContext.archiveDir());
-        }
+        driver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
+        systemTestWatcher.dataCollector().add(driverCtx.aeronDirectory());
+        archive = Archive.launch(archiveContext.clone());
+        systemTestWatcher.dataCollector().add(archiveContext.archiveDir());
+
         client = Aeron.connect();
     }
 

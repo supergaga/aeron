@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.codecs.CatalogHeaderEncoder;
 import io.aeron.archive.codecs.RecordingDescriptorDecoder;
 import io.aeron.archive.codecs.RecordingDescriptorHeaderDecoder;
+import io.aeron.archive.codecs.RecordingState;
 import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.BufferUtil;
 import org.agrona.IoUtil;
@@ -38,6 +39,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.util.stream.Stream;
@@ -49,8 +51,7 @@ import static io.aeron.archive.Catalog.*;
 import static io.aeron.archive.checksum.Checksums.crc32;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.client.AeronArchive.NULL_TIMESTAMP;
-import static io.aeron.archive.codecs.RecordingState.INVALID;
-import static io.aeron.archive.codecs.RecordingState.VALID;
+import static io.aeron.archive.codecs.RecordingState.*;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static java.nio.ByteBuffer.allocate;
 import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
@@ -109,6 +110,56 @@ class CatalogTest
     void after()
     {
         IoUtil.delete(archiveDir, false);
+    }
+
+    @Test
+    void shouldCloseAndRemainReadableWhenTheClosingThreadIsInterrupted()
+    {
+        final Catalog catalog = new Catalog(archiveDir, null, 0, CAPACITY, clock, null, segmentFileBuffer);
+        try
+        {
+            Thread.currentThread().interrupt();
+
+            assertDoesNotThrow(catalog::close);
+            assertTrue(Thread.currentThread().isInterrupted());
+        }
+        finally
+        {
+            Thread.interrupted();
+            catalog.close();
+        }
+
+        try (Catalog reopened = new Catalog(archiveDir, clock))
+        {
+            assertEquals(3, reopened.entryCount());
+            assertTrue(reopened.wrapDescriptor(recordingThreeId, new UnsafeBuffer()));
+        }
+    }
+
+    @Test
+    void shouldCloseAfterAnInterruptClosedTheChannelDuringAnEarlierWrite()
+    {
+        final Catalog catalog = new Catalog(archiveDir, null, 1, CAPACITY, clock, null, segmentFileBuffer);
+        try
+        {
+            Thread.currentThread().interrupt();
+            assertThrows(
+                ClosedByInterruptException.class, () -> catalog.recordingStopped(recordingTwoId, 4096, 42));
+            Thread.interrupted();
+
+            assertDoesNotThrow(catalog::close);
+            assertFalse(Thread.currentThread().isInterrupted());
+        }
+        finally
+        {
+            Thread.interrupted();
+            catalog.close();
+        }
+
+        try (Catalog reopened = new Catalog(archiveDir, clock))
+        {
+            assertEquals(4096, reopened.stopPosition(recordingTwoId));
+        }
     }
 
     @Test
@@ -377,15 +428,14 @@ class CatalogTest
         }
     }
 
-    @SuppressWarnings("ResultOfMethodCallIgnored")
     @Test
     void shouldFixTimestampAndPositionAfterFailureSamePage() throws Exception
     {
         final long newRecordingId = newRecording();
 
-        new File(archiveDir, segmentFileName(newRecordingId, 0)).createNewFile();
-        new File(archiveDir, segmentFileName(newRecordingId, SEGMENT_LENGTH)).createNewFile();
-        new File(archiveDir, segmentFileName(newRecordingId, 2 * SEGMENT_LENGTH)).createNewFile();
+        assertTrue(new File(archiveDir, segmentFileName(newRecordingId, 0)).createNewFile());
+        assertTrue(new File(archiveDir, segmentFileName(newRecordingId, SEGMENT_LENGTH)).createNewFile());
+        assertTrue(new File(archiveDir, segmentFileName(newRecordingId, 2 * SEGMENT_LENGTH)).createNewFile());
         final File segmentFile = new File(archiveDir, segmentFileName(newRecordingId, 3 * SEGMENT_LENGTH));
 
         try (FileChannel log = FileChannel.open(segmentFile.toPath(), READ, WRITE, CREATE))
@@ -494,6 +544,79 @@ class CatalogTest
                     assertEquals(PAGE_SIZE + 128, descriptorDecoder.stopPosition());
                 }));
         }
+    }
+
+    @Test
+    void shouldVerifyLastFragmentWhenZeroLengthFrameIsReadIntoNextBuffer() throws Exception
+    {
+        final long newRecordingId = newRecording();
+        final File segmentFile = new File(archiveDir, segmentFileName(newRecordingId, 0));
+        try (FileChannel log = FileChannel.open(segmentFile.toPath(), READ, WRITE, CREATE))
+        {
+            final ByteBuffer bb = allocate(HEADER_LENGTH);
+            final DataHeaderFlyweight flyweight = new DataHeaderFlyweight(bb);
+            flyweight.frameLength(PAGE_SIZE - 128);
+            log.write(bb);
+
+            bb.clear();
+            flyweight.frameLength(256);
+            flyweight.sessionId(1025596259);
+            log.write(bb, PAGE_SIZE - 128);
+
+            bb.clear();
+            bb.put(0, (byte)0).limit(1).position(0);
+            log.write(bb, SEGMENT_LENGTH - 1);
+        }
+
+        currentTimeMs = 42L;
+        // Final fragment ends at the buffer limit, forcing the zero-length frame into the next read.
+        final UnsafeBuffer recoveryBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAGE_SIZE + 128));
+
+        try (Catalog catalog = new Catalog(archiveDir, null, 0, CAPACITY, clock, crc32(), recoveryBuffer))
+        {
+            assertTrue(catalog.forEntry(
+                newRecordingId,
+                (recordingDescriptorOffset, headerEncoder, headerDecoder, descriptorEncoder, descriptorDecoder) ->
+                {
+                    assertEquals(42L, descriptorDecoder.stopTimestamp());
+                    assertEquals(PAGE_SIZE + 128, descriptorDecoder.stopPosition());
+                }));
+        }
+    }
+
+    @Test
+    void shouldNotComputeChecksumWhenFragmentExceedsRecoveryBuffer() throws Exception
+    {
+        final long newRecordingId = newRecording();
+        final File segmentFile = new File(archiveDir, segmentFileName(newRecordingId, 0));
+        try (FileChannel log = FileChannel.open(segmentFile.toPath(), READ, WRITE, CREATE))
+        {
+            final ByteBuffer bb = allocate(HEADER_LENGTH);
+            final DataHeaderFlyweight flyweight = new DataHeaderFlyweight(bb);
+            flyweight.frameLength(PAGE_SIZE * 2);
+            log.write(bb);
+
+            bb.clear();
+            bb.put(0, (byte)0).limit(1).position(0);
+            log.write(bb, SEGMENT_LENGTH - 1);
+        }
+
+        final Checksum checksum = (address, offset, length) ->
+        {
+            throw new AssertionError("checksum must not read outside recovery buffer");
+        };
+        final UnsafeBuffer recoveryBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAGE_SIZE));
+
+        final ArchiveException exception = assertThrows(
+            ArchiveException.class,
+            () ->
+            {
+                final Catalog catalog =
+                    new Catalog(archiveDir, null, 0, CAPACITY, clock, checksum, recoveryBuffer);
+                catalog.close();
+            });
+
+        assertThat(exception.getMessage(), containsString(segmentFile.getAbsolutePath()));
     }
 
     private long newRecording()
@@ -804,7 +927,7 @@ class CatalogTest
     {
         try (Catalog catalog = new Catalog(archiveDir, null, 0, CAPACITY, clock, null, segmentFileBuffer))
         {
-            assertTrue(catalog.invalidateRecording(recordingOneId));
+            assertTrue(catalog.changeState(recordingOneId, INVALID));
 
             assertEquals(NULL_RECORD_ID, catalog.findLast(0, 6, 1, "channelG?tag=f".getBytes(US_ASCII)));
         }
@@ -812,30 +935,30 @@ class CatalogTest
 
     @ParameterizedTest
     @ValueSource(longs = { -1, Long.MAX_VALUE })
-    void invalidRecordingIsANoOpIfUnknownRecordingIdIsSpecified(final long recordingId)
+    void changeStateIsANoOpIfUnknownRecordingStateIdIsSpecified(final long recordingId)
     {
         try (Catalog catalog = new Catalog(archiveDir, null, 0, CAPACITY, clock, null, segmentFileBuffer))
         {
-            assertFalse(catalog.invalidateRecording(recordingId));
+            assertFalse(catalog.changeState(recordingId, NULL_VAL));
         }
     }
 
     @Test
-    void invalidRecordingMarksRecordingAsInvalidAndRemovesItFromTheIndexFirstEntry()
+    void changeStateOfTheIndexFirstEntry()
     {
-        testInvalidateRecording(recordingOneId);
+        testChangeState(recordingOneId, DELETED);
     }
 
     @Test
-    void invalidRecordingMarksRecordingAsInvalidAndRemovesItFromTheIndexMiddleEntry()
+    void changeStateOfTheIndexMiddleEntry()
     {
-        testInvalidateRecording(recordingTwoId);
+        testChangeState(recordingTwoId, NULL_VAL);
     }
 
     @Test
-    void invalidRecordingMarksRecordingAsInvalidAndRemovesItFromTheIndexLastEntry()
+    void changeStateOfTheIndexLastEntry()
     {
-        testInvalidateRecording(recordingThreeId);
+        testChangeState(recordingThreeId, INVALID);
     }
 
     @Test
@@ -1296,7 +1419,7 @@ class CatalogTest
             });
     }
 
-    private void testInvalidateRecording(final long recordingId)
+    private void testChangeState(final long recordingId, final RecordingState newState)
     {
         try (Catalog catalog = new Catalog(archiveDir, null, 0, CAPACITY, clock, null, segmentFileBuffer))
         {
@@ -1310,9 +1433,9 @@ class CatalogTest
                 RecordingDescriptorHeaderDecoder.BLOCK_LENGTH,
                 RecordingDescriptorHeaderDecoder.SCHEMA_VERSION);
 
-            assertTrue(catalog.invalidateRecording(recordingId));
+            assertTrue(catalog.changeState(recordingId, newState));
 
-            assertEquals(INVALID, recordingDescriptorHeaderDecoder.state());
+            assertEquals(newState, recordingDescriptorHeaderDecoder.state());
             assertEquals(entries - 1, catalog.entryCount());
             assertFalse(catalog.hasRecording(recordingId));
         }
@@ -1407,10 +1530,12 @@ class CatalogTest
     {
         final StringBuilder buff = new StringBuilder(prefix.length() + suffix.length() * times);
         buff.append(prefix);
+
         for (int i = 0; i < times; i++)
         {
             buff.append(suffix);
         }
+
         return buff.toString();
     }
 }

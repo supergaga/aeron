@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import io.aeron.ExclusivePublication;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.codecs.RecordingSignal;
 import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.driver.MediaDriver;
@@ -54,6 +55,7 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
     private final Aeron aeron;
     private final AeronArchive aeronArchive;
     private final UnsafeBuffer buffer = new UnsafeBuffer(allocateDirectAligned(MESSAGE_LENGTH, CACHE_LINE_LENGTH));
+    private final RecordingSignalCapture recordingSignalCapture;
 
     /**
      * Main method for launching the process.
@@ -99,14 +101,18 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
 
         aeron = Aeron.connect();
 
+        recordingSignalCapture = new RecordingSignalCapture();
+
         aeronArchive = AeronArchive.connect(
             new AeronArchive.Context()
-                .aeron(aeron));
+                .aeron(aeron)
+                .recordingSignalConsumer(recordingSignalCapture));
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         CloseHelper.closeAll(
@@ -143,7 +149,8 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
 
             final long stopPosition = publication.position();
             final CountersReader counters = aeron.countersReader();
-            final int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId());
+            final int counterId =
+                RecordingPos.findCounterIdBySession(counters, publication.sessionId(), aeronArchive.archiveId());
 
             idleStrategy.reset();
             while (counters.getCounterValue(counterId) < stopPosition)
@@ -171,6 +178,9 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
 
     private void truncateRecording(final long previousRecordingId)
     {
+        recordingSignalCapture.reset();
         aeronArchive.truncateRecording(previousRecordingId, 0L);
+
+        recordingSignalCapture.awaitSignalForRecordingId(aeronArchive, previousRecordingId, RecordingSignal.DELETE);
     }
 }

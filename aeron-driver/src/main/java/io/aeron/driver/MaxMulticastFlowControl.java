@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.aeron.driver;
 
 import io.aeron.driver.media.UdpChannel;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.concurrent.status.CountersManager;
@@ -38,13 +39,21 @@ public class MaxMulticastFlowControl implements FlowControl
     public static final String FC_PARAM_VALUE = "max";
 
     /**
-     * Singleton instance which can be used to avoid allocation.
+     * Multiple of receiver window to allow for a retransmit action.
      */
-    public static final MaxMulticastFlowControl INSTANCE = new MaxMulticastFlowControl();
+    private int retransmitReceiverWindowMultiple;
+
+    /**
+     * Default constructor.
+     */
+    public MaxMulticastFlowControl()
+    {
+    }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void initialize(
         final MediaDriver.Context context,
         final CountersManager countersManager,
@@ -55,11 +64,16 @@ public class MaxMulticastFlowControl implements FlowControl
         final int initialTermId,
         final int termBufferLength)
     {
+        retransmitReceiverWindowMultiple = FlowControl.retransmitReceiverWindowMultiple(
+            udpChannel,
+            context.multicastFlowControlRetransmitReceiverWindowMultiple()
+        );
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
     }
@@ -67,6 +81,7 @@ public class MaxMulticastFlowControl implements FlowControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onStatusMessage(
         final StatusMessageFlyweight flyweight,
         final InetSocketAddress receiverAddress,
@@ -87,6 +102,18 @@ public class MaxMulticastFlowControl implements FlowControl
     /**
      * {@inheritDoc}
      */
+    @Override
+    public void onTriggerSendSetup(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs)
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long onSetup(
         final SetupFlyweight flyweight,
         final long senderLimit,
@@ -100,17 +127,40 @@ public class MaxMulticastFlowControl implements FlowControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onIdle(final long timeNs, final long senderLimit, final long senderPosition, final boolean isEos)
     {
         return senderLimit;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void onError(final ErrorFlyweight errorFlyweight, final InetSocketAddress receiverAddress, final long timeNs)
+    {
+    }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean hasRequiredReceivers()
     {
         return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int maxRetransmissionLength(
+        final int termOffset,
+        final int resendLength,
+        final int termBufferLength,
+        final int mtuLength)
+    {
+        return FlowControl.calculateRetransmissionLength(
+            resendLength, termBufferLength, termOffset, retransmitReceiverWindowMultiple);
     }
 }

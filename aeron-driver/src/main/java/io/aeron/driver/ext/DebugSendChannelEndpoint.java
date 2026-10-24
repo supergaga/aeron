@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver.ext;
 
+import io.aeron.driver.DriverConductorProxy;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.media.UdpChannel;
 import io.aeron.driver.media.SendChannelEndpoint;
@@ -79,6 +80,7 @@ public class DebugSendChannelEndpoint extends SendChannelEndpoint
     /**
      * {@inheritDoc}
      */
+    @Override
     public int send(final ByteBuffer buffer)
     {
         int count = buffer.remaining();
@@ -95,28 +97,30 @@ public class DebugSendChannelEndpoint extends SendChannelEndpoint
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onStatusMessage(
         final StatusMessageFlyweight msg,
         final UnsafeBuffer buffer,
         final int length,
-        final InetSocketAddress srcAddress)
+        final InetSocketAddress srcAddress, final DriverConductorProxy conductorProxy)
     {
-        if (!controlLossGenerator.shouldDropFrame(srcAddress, msg, msg.frameLength()))
+        if (!controlLossGenerator.shouldDropFrame(srcAddress, msg, length))
         {
-            super.onStatusMessage(msg, buffer, length, srcAddress);
+            super.onStatusMessage(msg, buffer, length, srcAddress, conductorProxy);
         }
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onNakMessage(
         final NakFlyweight msg,
         final UnsafeBuffer buffer,
         final int length,
         final InetSocketAddress srcAddress)
     {
-        if (!controlLossGenerator.shouldDropFrame(srcAddress, msg, msg.frameLength()))
+        if (!controlLossGenerator.shouldDropFrame(srcAddress, msg, length))
         {
             super.onNakMessage(msg, buffer, length, srcAddress);
         }
@@ -125,13 +129,14 @@ public class DebugSendChannelEndpoint extends SendChannelEndpoint
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onRttMeasurement(
         final RttMeasurementFlyweight msg,
         final UnsafeBuffer buffer,
         final int length,
         final InetSocketAddress srcAddress)
     {
-        if (!controlLossGenerator.shouldDropFrame(srcAddress, msg, msg.frameLength()))
+        if (!controlLossGenerator.shouldDropFrame(srcAddress, msg, length))
         {
             super.onRttMeasurement(msg, buffer, length, srcAddress);
         }

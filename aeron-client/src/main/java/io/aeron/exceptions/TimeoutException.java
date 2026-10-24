@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ public class TimeoutException extends AeronException
     }
 
     /**
-     * AerTimeouton exception with cause and provided {@link AeronException.Category}.
+     * Timeout exception with cause and provided {@link AeronException.Category}.
      *
      * @param cause    of the error.
      * @param category of the exception.

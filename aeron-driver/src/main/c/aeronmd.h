@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,6 +64,16 @@ aeron_threading_mode_t;
 
 int aeron_driver_context_set_threading_mode(aeron_driver_context_t *context, aeron_threading_mode_t mode);
 aeron_threading_mode_t aeron_driver_context_get_threading_mode(aeron_driver_context_t *context);
+
+#define AERON_THREAD_NAMING_ENV_VAR "AERON_THREAD_NAMING"
+typedef enum aeron_thread_naming_enum
+{
+    AERON_THREAD_NAMING_CLASSIC,
+    AERON_THREAD_NAMING_NEW
+}
+aeron_thread_naming_t;
+int aeron_driver_context_set_thread_naming(aeron_driver_context_t *context, aeron_thread_naming_t naming);
+aeron_thread_naming_t aeron_driver_context_get_thread_naming(aeron_driver_context_t *context);
 
 /**
  * Attempt to delete directories on start if they exist.
@@ -154,6 +164,14 @@ int aeron_driver_context_set_perform_storage_checks(aeron_driver_context_t *cont
 bool aeron_driver_context_get_perform_storage_checks(aeron_driver_context_t *context);
 
 /**
+ * Specify the interval which checks for re-resolutions of names occurs.
+ */
+#define AERON_LOW_FILE_STORE_WARNING_THRESHOLD_ENV_VAR "AERON_LOW_FILE_STORE_WARNING_THRESHOLD"
+
+int aeron_driver_context_set_low_file_store_warning_threshold(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_low_file_store_warning_threshold(aeron_driver_context_t *context);
+
+/**
  * Should a spy subscription simulate a connection to a network publication.
  */
 #define AERON_SPIES_SIMULATE_CONNECTION_ENV_VAR "AERON_SPIES_SIMULATE_CONNECTION"
@@ -234,12 +252,37 @@ int aeron_driver_context_set_socket_multicast_ttl(aeron_driver_context_t *contex
 uint8_t aeron_driver_context_get_socket_multicast_ttl(aeron_driver_context_t *context);
 
 /**
+ * IP_TOS setting on outgoing UDP sockets. A value of -1 uses the OS default.
+ */
+#define AERON_SOCKET_TOS_ENV_VAR "AERON_SOCKET_TOS"
+
+int aeron_driver_context_set_socket_tos(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_socket_tos(aeron_driver_context_t *context);
+
+/**
  * Ratio of sending data to polling status messages in the Sender.
  */
 #define AERON_SEND_TO_STATUS_POLL_RATIO_ENV_VAR "AERON_SEND_TO_STATUS_POLL_RATIO"
 
 int aeron_driver_context_set_send_to_status_poll_ratio(aeron_driver_context_t *context, size_t value);
 size_t aeron_driver_context_get_send_to_status_poll_ratio(aeron_driver_context_t *context);
+
+/**
+ * Ratio of receiving data to slow work (e.g. draining command queue, sending pending status messages etc.) in the
+ * Receiver.
+ */
+#define AERON_RECEIVER_POLL_TO_SLOW_WORK_RATIO_ENV_VAR "AERON_RECEIVER_POLL_TO_SLOW_WORK_RATIO"
+
+int aeron_driver_context_set_receiver_poll_to_slow_work_ratio(aeron_driver_context_t *context, size_t value);
+size_t aeron_driver_context_get_receiver_poll_to_slow_work_ratio(aeron_driver_context_t *context);
+
+/**
+ * Limit the number of images that the Receiver can process in a single duty cycle.
+ */
+#define AERON_RECEIVER_IMAGES_PER_DUTY_CYCLE_LIMIT_ENV_VAR "AERON_RECEIVER_IMAGES_PER_DUTY_CYCLE_LIMIT"
+
+int aeron_driver_context_set_receiver_images_per_duty_cycle_limit(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_receiver_images_per_duty_cycle_limit(aeron_driver_context_t *context);
 
 /**
  * Status Message timeout in nanoseconds.
@@ -474,6 +517,22 @@ int aeron_driver_context_set_shared_idle_strategy_init_args(aeron_driver_context
 const char *aeron_driver_context_get_shared_idle_strategy_init_args(aeron_driver_context_t *context);
 
 /**
+ * Idle strategy to be employed by AsyncExecutor when enabled.
+ */
+#define AERON_DRIVER_NATIVE_RESOURCE_AGENT_IDLE_STRATEGY_ENV_VAR "AERON_DRIVER_NATIVE_RESOURCE_AGENT_IDLE_STRATEGY"
+
+int aeron_driver_context_set_native_resource_agent_idle_strategy(aeron_driver_context_t *context, const char *value);
+const char *aeron_driver_context_get_native_resource_agent_idle_strategy(aeron_driver_context_t *context);
+
+/**
+ * Idle strategy init args to be employed AsyncExecutor when enabled.
+ */
+#define AERON_DRIVER_NATIVE_RESOURCE_AGENT_IDLE_STRATEGY_INIT_ARGS_ENV_VAR "AERON_DRIVER_NATIVE_RESOURCE_AGENT_IDLE_STRATEGY_INIT_ARGS"
+
+int aeron_driver_context_set_native_resource_agent_idle_strategy_init_args(aeron_driver_context_t *context, const char *value);
+const char *aeron_driver_context_get_native_resource_agent_idle_strategy_init_args(aeron_driver_context_t *context);
+
+/**
  * Function name to call on start of each agent.
  */
 #define AERON_AGENT_ON_START_FUNCTION_ENV_VAR "AERON_AGENT_ON_START_FUNCTION"
@@ -496,7 +555,7 @@ uint64_t aeron_driver_context_get_counters_free_to_reuse_timeout_ns(aeron_driver
 /**
  * Timeout for a receiver to be tracked.
  */
-#define AERON_MIN_MULTICAST_FLOW_CONTROL_RECEIVER_TIMEOUT_ENV_VAR "AERON_MIN_MULTICAST_FLOW_CONTROL_RECEIVER_TIMEOUT"
+#define AERON_FLOW_CONTROL_RECEIVER_TIMEOUT_ENV_VAR "AERON_FLOW_CONTROL_RECEIVER_TIMEOUT"
 
 int aeron_driver_context_set_flow_control_receiver_timeout_ns(aeron_driver_context_t *context, uint64_t value);
 
@@ -581,6 +640,15 @@ int aeron_driver_context_set_untethered_window_limit_timeout_ns(aeron_driver_con
 uint64_t aeron_driver_context_get_untethered_window_limit_timeout_ns(aeron_driver_context_t *context);
 
 /**
+ * Timeout for an untethered subscriptions to stay in the linger state.
+ */
+#define AERON_UNTETHERED_LINGER_TIMEOUT_ENV_VAR "AERON_UNTETHERED_LINGER_TIMEOUT"
+
+
+int aeron_driver_context_set_untethered_linger_timeout_ns(aeron_driver_context_t *context, uint64_t value);
+int64_t aeron_driver_context_get_untethered_linger_timeout_ns(aeron_driver_context_t *context);
+
+/**
  * Untethered subscriptions resting timeout before they are allowed to re join an active stream.
  */
 #define AERON_UNTETHERED_RESTING_TIMEOUT_ENV_VAR "AERON_UNTETHERED_RESTING_TIMEOUT"
@@ -613,12 +681,28 @@ int aeron_driver_context_set_nak_multicast_max_backoff_ns(aeron_driver_context_t
 uint64_t aeron_driver_context_get_nak_multicast_max_backoff_ns(aeron_driver_context_t *context);
 
 /**
- * How long to delay before resending a NAK.
+ * How long to delay before sending an initial NAK.
  */
 #define AERON_NAK_UNICAST_DELAY_ENV_VAR "AERON_NAK_UNICAST_DELAY"
 
 int aeron_driver_context_set_nak_unicast_delay_ns(aeron_driver_context_t *context, uint64_t value);
 uint64_t aeron_driver_context_get_nak_unicast_delay_ns(aeron_driver_context_t *context);
+
+/**
+ * A ratio to apply to the nak unicast delay to calculate the resend delay. Used as a multipler.
+ */
+#define AERON_NAK_UNICAST_RETRY_DELAY_RATIO_ENV_VAR "AERON_NAK_UNICAST_RETRY_DELAY_RATIO"
+
+int aeron_driver_context_set_nak_unicast_retry_delay_ratio(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_nak_unicast_retry_delay_ratio(aeron_driver_context_t *context);
+
+/**
+ * Max number of active retransmissions tracked for udp streams with group semantics.
+ */
+#define AERON_MAX_RESEND_ENV_VAR "AERON_MAX_RESEND"
+
+int aeron_driver_context_set_max_resend(aeron_driver_context_t *context, uint32_t value);
+uint32_t aeron_driver_context_get_max_resend(aeron_driver_context_t *context);
 
 /**
  * How long to delay before sending a retransmit following a NAK.
@@ -666,11 +750,6 @@ bool aeron_driver_context_get_rejoin_stream(aeron_driver_context_t *context);
 int aeron_driver_context_set_connect_enabled(aeron_driver_context_t *context, bool value);
 int aeron_driver_context_get_connect_enabled(aeron_driver_context_t *context);
 
-#define AERON_IPC_CHANNEL "aeron:ipc"
-#define AERON_IPC_CHANNEL_LEN strlen(AERON_IPC_CHANNEL)
-#define AERON_SPY_PREFIX "aeron-spy:"
-#define AERON_SPY_PREFIX_LEN strlen(AERON_SPY_PREFIX)
-
 /**
  * Bindings for UDP Channel Transports.
  */
@@ -687,6 +766,23 @@ int aeron_driver_context_set_udp_channel_transport_bindings(
     aeron_driver_context_t *context, aeron_udp_channel_transport_bindings_t *value);
 aeron_udp_channel_transport_bindings_t *aeron_driver_context_get_udp_channel_transport_bindings(
     aeron_driver_context_t *context);
+
+/**
+ * The threshold beyond which individual channel/socket polling will swap to using selectors.
+ */
+#define AERON_UDP_CHANNEL_TRANSPORT_POLLER_ITERATION_THRESHOLD_ENV_VAR "AERON_UDP_CHANNEL_TRANSPORT_POLLER_ITERATION_THRESHOLD"
+
+int aeron_driver_context_set_udp_channel_transport_poller_iteration_threshold(aeron_driver_context_t *context, size_t value);
+size_t aeron_driver_context_get_udp_channel_transport_poller_iteration_threshold(aeron_driver_context_t *context);
+
+/**
+ * The max number of loop iterations over a single socket before polling the next one. If a socket has data it will be
+ * polled up to the limit number of times.
+ */
+#define AERON_UDP_CHANNEL_TRANSPORT_POLLER_SOCKET_POLL_LIMIT_ENV_VAR "AERON_UDP_CHANNEL_TRANSPORT_POLLER_SOCKET_POLL_LIMIT"
+
+int aeron_driver_context_set_udp_channel_transport_poller_socket_poll_limit(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_udp_channel_transport_poller_socket_poll_limit(aeron_driver_context_t *context);
 
 #define AERON_UDP_CHANNEL_OUTGOING_INTERCEPTORS_ENV_VAR "AERON_UDP_CHANNEL_OUTGOING_INTERCEPTORS"
 #define AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR "AERON_UDP_CHANNEL_INCOMING_INTERCEPTORS"
@@ -731,7 +827,7 @@ const char *aeron_driver_context_get_resolver_name(aeron_driver_context_t *conte
 /**
 * The interface of the MediaDriver for name resolver purposes.
 *
-* The format is hostname:port and follows the URI format for the interface parameter.
+* The format is hostname:port.
 */
 #define AERON_DRIVER_RESOLVER_INTERFACE_ENV_VAR "AERON_DRIVER_RESOLVER_INTERFACE"
 
@@ -739,7 +835,7 @@ int aeron_driver_context_set_resolver_interface(aeron_driver_context_t *context,
 const char *aeron_driver_context_get_resolver_interface(aeron_driver_context_t *context);
 
 /**
- * Get the bootstrap neighbor of the {@link MediaDriver} for name resolver purposes.
+ * Get the bootstrap neighbor of the Media Driver for name resolver purposes.
  *
  * The format is comma separated list of hostname:port pairs and follows the URI format for the endpoint parameter.
  */
@@ -767,6 +863,32 @@ int aeron_driver_context_set_name_resolver_init_args(aeron_driver_context_t *con
 const char *aeron_driver_context_get_name_resolver_init_args(aeron_driver_context_t *context);
 
 /**
+ * Property name for time to wait before removing a neighbor entry from the cache if an update for that neighbor has
+ * not been received.
+ */
+#define AERON_DRIVER_RESOLVER_NEIGHBOR_TIMEOUT_ENV_VAR "AERON_DRIVER_RESOLVER_NEIGHBOR_TIMEOUT"
+int aeron_driver_context_set_resolver_neighbor_timeout_ns(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_resolver_neighbor_timeout_ns(aeron_driver_context_t *context);
+
+/**
+ * Property name for the interval between sending name to address messages for this driver to its neighbors.
+ */
+#define AERON_DRIVER_RESOLVER_SELF_RESOLUTION_INTERVAL_ENV_VAR "AERON_DRIVER_RESOLVER_SELF_RESOLUTION_INTERVAL"
+int aeron_driver_context_set_self_resolution_interval_ns(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_self_resolution_interval_ns(aeron_driver_context_t *context);
+
+/**
+ * Property name for the interval between sending name to address messages for all known neighbors.
+ */
+#define AERON_DRIVER_RESOLVER_NEIGHBOR_RESOLUTION_INTERVAL_ENV_VAR "AERON_DRIVER_RESOLVER_NEIGHBOR_RESOLUTION_INTERVAL"
+int aeron_driver_context_set_resolver_neighbor_resolution_interval_ns(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_resolver_neighbor_resolution_interval_ns(aeron_driver_context_t *context);
+
+#define AERON_DRIVER_RESOLVER_BOOTSTRAP_NEIGHBOR_RESOLUTION_INTERVAL_ENV_VAR "AERON_DRIVER_RESOLVER_BOOTSTRAP_NEIGHBOR_RESOLUTION_INTERVAL"
+int aeron_driver_context_set_resolver_bootstrap_neighbor_resolution_interval_ns(aeron_driver_context_t *context, uint64_t value);
+uint64_t aeron_driver_context_get_resolver_bootstrap_resolution_interval_ns(aeron_driver_context_t *context);
+
+/**
  * Specify the interval which checks for re-resolutions of names occurs.
  */
 #define AERON_DRIVER_RERESOLUTION_CHECK_INTERVAL_ENV_VAR "AERON_DRIVER_RERESOLUTION_CHECK_INTERVAL"
@@ -787,6 +909,40 @@ aeron_duty_cycle_tracker_t *aeron_driver_context_get_sender_duty_cycle_tracker(a
 int aeron_driver_context_set_receiver_duty_cycle_tracker(
     aeron_driver_context_t *context, aeron_duty_cycle_tracker_t *value);
 aeron_duty_cycle_tracker_t *aeron_driver_context_get_receiver_duty_cycle_tracker(aeron_driver_context_t *context);
+
+int aeron_driver_context_set_name_resolver_time_tracker(
+    aeron_driver_context_t *context, aeron_duty_cycle_tracker_t *value);
+aeron_duty_cycle_tracker_t *aeron_driver_context_get_name_resolver_time_tracker(aeron_driver_context_t *context);
+
+/**
+ * Specify the sender wildcard port range.
+ */
+#define AERON_DRIVER_SENDER_WILDCARD_PORT_RANGE_ENV_VAR "AERON_SENDER_WILDCARD_PORT_RANGE"
+
+int aeron_driver_context_set_sender_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t low_port, uint16_t high_port);
+int aeron_driver_context_get_sender_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t *low_port, uint16_t *high_port);
+
+/**
+ * Specify the receiver wildcard port range.
+ */
+#define AERON_DRIVER_RECEIVER_WILDCARD_PORT_RANGE_ENV_VAR "AERON_RECEIVER_WILDCARD_PORT_RANGE"
+
+int aeron_driver_context_set_receiver_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t low_port, uint16_t high_port);
+int aeron_driver_context_get_receiver_wildcard_port_range(
+    aeron_driver_context_t *context, uint16_t *low_port, uint16_t *high_port);
+
+typedef struct aeron_port_manager_stct aeron_port_manager_t;
+
+int aeron_driver_context_set_sender_port_manager(
+    aeron_driver_context_t *context, aeron_port_manager_t *value);
+aeron_port_manager_t *aeron_driver_context_get_sender_port_manager(aeron_driver_context_t *context);
+
+int aeron_driver_context_set_receiver_port_manager(
+    aeron_driver_context_t *context, aeron_port_manager_t *value);
+aeron_port_manager_t *aeron_driver_context_get_receiver_port_manager(aeron_driver_context_t *context);
 
 /**
  * Specify the duty cycle time threshold for the conductor.
@@ -812,6 +968,14 @@ int64_t aeron_driver_context_get_sender_cycle_threshold_ns(aeron_driver_context_
 int64_t aeron_driver_context_set_receiver_cycle_threshold_ns(aeron_driver_context_t *context, uint64_t value);
 int64_t aeron_driver_context_get_receiver_cycle_threshold_ns(aeron_driver_context_t *context);
 
+/**
+ * Specify the duty cycle time threshold for the name_resolver.
+ */
+#define AERON_DRIVER_NAME_RESOLVER_THRESHOLD_ENV_VAR "AERON_DRIVER_NAME_RESOLVER_THRESHOLD"
+
+int64_t aeron_driver_context_set_name_resolver_threshold_ns(aeron_driver_context_t *context, uint64_t value);
+int64_t aeron_driver_context_get_name_resolver_threshold_ns(aeron_driver_context_t *context);
+
 #define AERON_RECEIVER_IO_VECTOR_CAPACITY_ENV_VAR "AERON_RECEIVER_IO_VECTOR_CAPACITY"
 int aeron_driver_context_set_receiver_io_vector_capacity(aeron_driver_context_t *context, uint32_t value);
 uint32_t aeron_driver_context_get_receiver_io_vector_capacity(aeron_driver_context_t *context);
@@ -824,14 +988,51 @@ uint32_t aeron_driver_context_get_sender_io_vector_capacity(aeron_driver_context
 int aeron_driver_context_set_network_publication_max_messages_per_send(aeron_driver_context_t *context, uint32_t value);
 uint32_t aeron_driver_context_get_network_publication_max_messages_per_send(aeron_driver_context_t *context);
 
+#define AERON_DRIVER_RESOURCE_FREE_LIMIT_ENV_VAR "AERON_DRIVER_RESOURCE_FREE_LIMIT"
+int aeron_driver_context_set_resource_free_limit(aeron_driver_context_t *context, uint32_t value);
+uint32_t aeron_driver_context_get_resource_free_limit(aeron_driver_context_t *context);
+
 #define AERON_CONDUCTOR_CPU_AFFINITY_ENV_VAR "AERON_CONDUCTOR_CPU_AFFINITY"
+int aeron_driver_context_set_conductor_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_conductor_cpu_affinity(aeron_driver_context_t *context);
+
 #define AERON_RECEIVER_CPU_AFFINITY_ENV_VAR "AERON_RECEIVER_CPU_AFFINITY"
+int aeron_driver_context_set_receiver_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_receiver_cpu_affinity(aeron_driver_context_t *context);
+
 #define AERON_SENDER_CPU_AFFINITY_ENV_VAR "AERON_SENDER_CPU_AFFINITY"
+int aeron_driver_context_set_sender_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_sender_cpu_affinity(aeron_driver_context_t *context);
+
+#define AERON_DRIVER_NATIVE_RESOURCE_AGENT_CPU_AFFINITY_ENV_VAR "AERON_DRIVER_NATIVE_RESOURCE_AGENT_CPU_AFFINITY"
+int aeron_driver_context_set_native_resource_agent_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_native_resource_agent_cpu_affinity(aeron_driver_context_t *context);
+
+#define AERON_THREAD_AFFINITY_USE_CPUSET_OFFSETS_ENV_VAR "AERON_THREAD_AFFINITY_USE_CPUSET_OFFSETS"
+int aeron_driver_context_set_thread_affinity_use_cpuset_offsets(aeron_driver_context_t *context, bool value);
+bool aeron_driver_context_get_thread_affinity_use_cpuset_offsets(aeron_driver_context_t *context);
+
+#define AERON_THREAD_AFFINITY_FAIL_ON_VALIDATION_ERRORS_ENV_VAR "AERON_THREAD_AFFINITY_FAIL_ON_VALIDATION_ERRORS"
+int aeron_driver_context_set_thread_affinity_fail_on_validation_errors(aeron_driver_context_t *context, bool value);
+bool aeron_driver_context_get_thread_affinity_fail_on_validation_errors(aeron_driver_context_t *context);
 
 /**
  * Set the list of filenames to dynamic libraries to load upon context init.
  */
 #define AERON_DRIVER_DYNAMIC_LIBRARIES_ENV_VAR "AERON_DRIVER_DYNAMIC_LIBRARIES"
+
+#define AERON_ENABLE_EXPERIMENTAL_FEATURES_ENV_VAR "AERON_ENABLE_EXPERIMENTAL_FEATURES"
+int aeron_driver_context_set_enable_experimental_features(aeron_driver_context_t *context, bool value);
+int aeron_driver_context_get_enable_experimental_features(aeron_driver_context_t *context);
+
+/**
+ * Limit the number of sessions for a given stream that the driver will support
+ */
+#define AERON_DRIVER_STREAM_SESSION_LIMIT_ENV_VAR "AERON_DRIVER_STREAM_SESSION_LIMIT"
+
+int aeron_driver_context_set_stream_session_limit(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_stream_session_limit(aeron_driver_context_t *context);
+
 
 /**
  * Return full version and build string.
@@ -1030,8 +1231,8 @@ int aeron_default_path(char *path, size_t path_length);
 /**
  * Affinity setting function that complies with the aeron_agent_on_start_func_t structure that can
  * be used as an agent start function.  The state should be the aeron_driver_context_t* and the function
- * will match the values "conductor", "sender", "receiver" and use the respective configuration options from
- * the aeron_driver_context_t.
+ * will match the values conductor/sender/receiver/native resource agent thread names and use the respective
+ * configuration options from the aeron_driver_context_t.
  *
  * @param state client information passed to function, should be the aeron_driver_context_t*.
  * @param role_name name of the role specified on the agent.

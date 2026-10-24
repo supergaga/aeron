@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -72,6 +72,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
     }
@@ -79,6 +80,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean shouldMeasureRtt(final long nowNs)
     {
         return false;
@@ -87,6 +89,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onRttMeasurementSent(final long nowNs)
     {
     }
@@ -94,6 +97,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onRttMeasurement(final long nowNs, final long rttNs, final InetSocketAddress srcAddress)
     {
     }
@@ -101,6 +105,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onTrackRebuild(
         final long nowNs,
         final long newConsumptionPosition,
@@ -116,6 +121,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public int initialWindowLength()
     {
         return CongestionControl.receiverWindowLength(ccOutcome);
@@ -124,6 +130,7 @@ public class StaticWindowCongestionControl implements CongestionControl
     /**
      * {@inheritDoc}
      */
+    @Override
     public int maxWindowLength()
     {
         return CongestionControl.receiverWindowLength(ccOutcome);

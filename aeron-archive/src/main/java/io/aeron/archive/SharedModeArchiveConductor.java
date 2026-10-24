@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -19,6 +19,10 @@ import org.agrona.CloseHelper;
 import org.agrona.concurrent.AgentInvoker;
 import org.agrona.concurrent.CountedErrorHandler;
 
+import static io.aeron.CommonContext.threadName;
+import static io.aeron.archive.Archive.AERON_ARCHIVE_SHARED_THREAD_NAME;
+import static io.aeron.archive.Archive.AERON_ARCHIVE_SHARED_THREAD_NAME_CLASSIC;
+
 final class SharedModeArchiveConductor extends ArchiveConductor
 {
     private AgentInvoker replayerAgentInvoker;
@@ -26,7 +30,7 @@ final class SharedModeArchiveConductor extends ArchiveConductor
 
     SharedModeArchiveConductor(final Archive.Context ctx)
     {
-        super(ctx);
+        super(ctx, threadName(AERON_ARCHIVE_SHARED_THREAD_NAME, AERON_ARCHIVE_SHARED_THREAD_NAME_CLASSIC));
     }
 
     public void onStart()
@@ -40,14 +44,14 @@ final class SharedModeArchiveConductor extends ArchiveConductor
         recorderAgentInvoker.start();
     }
 
-    protected SessionWorker<RecordingSession> newRecorder()
+    Recorder newRecorder()
     {
-        return new SharedModeRecorder(errorHandler);
+        return new SharedModeRecorder(errorHandler, ctx);
     }
 
-    protected SessionWorker<ReplaySession> newReplayer()
+    Replayer newReplayer()
     {
-        return new SharedModeReplayer(errorHandler);
+        return new SharedModeReplayer(errorHandler, ctx);
     }
 
     public int doWork()
@@ -67,11 +71,11 @@ final class SharedModeArchiveConductor extends ArchiveConductor
         CloseHelper.close(ctx.countedErrorHandler(), replayerAgentInvoker);
     }
 
-    class SharedModeRecorder extends SessionWorker<RecordingSession>
+    class SharedModeRecorder extends Recorder
     {
-        SharedModeRecorder(final CountedErrorHandler errorHandler)
+        SharedModeRecorder(final CountedErrorHandler errorHandler, final Archive.Context context)
         {
-            super("archive-recorder", errorHandler);
+            super(errorHandler, context);
         }
 
         protected void closeSession(final RecordingSession session)
@@ -80,11 +84,11 @@ final class SharedModeArchiveConductor extends ArchiveConductor
         }
     }
 
-    class SharedModeReplayer extends SessionWorker<ReplaySession>
+    class SharedModeReplayer extends Replayer
     {
-        SharedModeReplayer(final CountedErrorHandler errorHandler)
+        SharedModeReplayer(final CountedErrorHandler errorHandler, final Archive.Context context)
         {
-            super("archive-replayer", errorHandler);
+            super(errorHandler, context);
         }
 
         protected void closeSession(final ReplaySession session)

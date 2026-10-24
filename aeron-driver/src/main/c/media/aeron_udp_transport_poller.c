@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#if defined(__linux__)
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include "util/aeron_platform.h"
 
@@ -40,6 +45,9 @@ int aeron_udp_transport_poller_init(
     poller->transports.array = NULL;
     poller->transports.length = 0;
     poller->transports.capacity = 0;
+
+    poller->iteration_threshold = context->udp_channel_transport_poller_iteration_threshold;
+    poller->socket_poll_limit = context->udp_channel_transport_poller_socket_poll_limit;
 
 #if defined(HAVE_EPOLL)
     if ((poller->fd = epoll_create1(0)) < 0)
@@ -143,6 +151,7 @@ int aeron_udp_transport_poller_remove(aeron_udp_transport_poller_t *poller, aero
             sizeof(aeron_udp_channel_transport_entry_t),
             (size_t)index,
             (size_t)last_index);
+        poller->transports.length--;
 
 #if defined(HAVE_EPOLL)
         aeron_array_fast_unordered_remove(
@@ -170,7 +179,6 @@ int aeron_udp_transport_poller_remove(aeron_udp_transport_poller_t *poller, aero
             (size_t)index,
             (size_t)last_index);
 #endif
-        poller->transports.length--;
     }
 
     return 0;
@@ -187,19 +195,27 @@ int aeron_udp_transport_poller_poll(
 {
     int work_count = 0;
 
-    if (poller->transports.length <= AERON_UDP_TRANSPORT_POLLER_ITERATION_THRESHOLD)
+    if (poller->transports.length <= poller->iteration_threshold)
     {
         for (size_t i = 0, length = poller->transports.length; i < length; i++)
         {
-            int recv_result = recvmmsg_func(
-                poller->transports.array[i].transport, msgvec, vlen, bytes_rcved, recv_func, clientd);
-            if (recv_result < 0)
+            aeron_udp_channel_transport_t *transport = poller->transports.array[i].transport;
+            for (int32_t j = 0; j < poller->socket_poll_limit; j++)
             {
-                AERON_APPEND_ERR("%s", "");
-                return recv_result;
-            }
+                int recv_result = recvmmsg_func(transport, msgvec, vlen, bytes_rcved, recv_func, clientd);
+                if (recv_result < 0)
+                {
+                    AERON_APPEND_ERR("%s", "aeron_udp_transport_poller_poll");
+                    aeron_udp_channel_transport_log_error(transport);
+                    break;
+                }
 
-            work_count += recv_result;
+                work_count += recv_result;
+                if (recv_result != (int)vlen)
+                {
+                    break;
+                }
+            }
         }
     }
     else
@@ -230,15 +246,23 @@ int aeron_udp_transport_poller_poll(
             {
                 if (epoll_events[i].events & EPOLLIN)
                 {
-                    int recv_result = recvmmsg_func(
-                        epoll_events[i].data.ptr, msgvec, vlen, bytes_rcved, recv_func, clientd);
-
-                    if (recv_result < 0)
+                    aeron_udp_channel_transport_t *transport = epoll_events[i].data.ptr;
+                    for (int32_t j = 0; j < poller->socket_poll_limit; j++)
                     {
-                        return recv_result;
-                    }
+                        int recv_result = recvmmsg_func(transport, msgvec, vlen, bytes_rcved, recv_func, clientd);
+                        if (recv_result < 0)
+                        {
+                            AERON_APPEND_ERR("%s", "aeron_udp_transport_poller_poll");
+                            aeron_udp_channel_transport_log_error(transport);
+                            break;
+                        }
 
-                    work_count += recv_result;
+                        work_count += recv_result;
+                        if (recv_result != (int)vlen)
+                        {
+                            break;
+                        }
+                    }
                 }
 
                 epoll_events[i].events = 0;
@@ -264,15 +288,23 @@ int aeron_udp_transport_poller_poll(
             {
                 if (pollfds[i].revents & POLLIN)
                 {
-                    int recv_result = recvmmsg_func(
-                        poller->transports.array[i].transport, msgvec, vlen, bytes_rcved, recv_func, clientd);
-
-                    if (recv_result < 0)
+                    aeron_udp_channel_transport_t *transport = poller->transports.array[i].transport;
+                    for (int32_t j = 0; j < poller->socket_poll_limit; j++)
                     {
-                        return recv_result;
-                    }
+                        int recv_result = recvmmsg_func(transport, msgvec, vlen, bytes_rcved, recv_func, clientd);
+                        if (recv_result < 0)
+                        {
+                            AERON_APPEND_ERR("%s", "aeron_udp_transport_poller_poll");
+                            aeron_udp_channel_transport_log_error(transport);
+                            break;
+                        }
 
-                    work_count += recv_result;
+                        work_count += recv_result;
+                        if (recv_result != (int)vlen)
+                        {
+                            break;
+                        }
+                    }
                 }
 
                 pollfds[i].revents = 0;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,11 @@ package io.aeron.cluster;
 
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.samples.archive.SampleAuthenticator;
+import io.aeron.samples.archive.SampleAuthorisationService;
 import io.aeron.security.AuthenticatorSupplier;
+import io.aeron.security.AuthorisationServiceSupplier;
+import io.aeron.security.NullCredentialsSupplier;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SlowTest;
@@ -34,15 +38,20 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
+
+import static io.aeron.cluster.ClusterBackup.Configuration.ReplayStart.LATEST_SNAPSHOT;
 import static io.aeron.test.SystemTestWatcher.UNKNOWN_HOST_FILTER;
 import static io.aeron.test.cluster.TestCluster.*;
+import static java.util.Collections.singletonList;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SlowTest
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ClusterBackupTest
 {
     @RegisterExtension
@@ -127,10 +136,10 @@ class ClusterBackupTest
     }
 
     @Test
-    @InterruptAfter(30)
+    @InterruptAfter(20)
     void shouldBackupClusterWithSnapshot()
     {
-        final TestCluster cluster = aCluster().withStaticNodes(3).start();
+        final TestCluster cluster = aCluster().withStaticNodes(3).useResponseChannels(true).start();
         systemTestWatcher.cluster(cluster);
 
         final TestNode leader = cluster.awaitLeader();
@@ -148,6 +157,7 @@ class ClusterBackupTest
 
         cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
         cluster.awaitBackupLiveLogPosition(logPosition);
+        cluster.awaitBackupSnapshotRetrievedCount(1);
         cluster.stopAllNodes();
 
         final TestNode node = cluster.startStaticNodeFromBackup();
@@ -235,10 +245,13 @@ class ClusterBackupTest
     void shouldBackupClusterWithSnapshotAndNonEmptyLogWithSimpleAuthentication()
     {
         final AuthenticatorSupplier authenticatorSupplier = SampleAuthenticator::new;
+        final AuthorisationServiceSupplier authorisationServiceSupplier =
+            () -> new SampleAuthorisationService(singletonList(SampleAuthenticator.PRINCIPAL));
 
         final TestCluster cluster = aCluster()
             .withStaticNodes(3)
             .withAuthenticationSupplier(authenticatorSupplier)
+            .withAuthorisationServiceSupplier(authorisationServiceSupplier)
             .start();
         systemTestWatcher.cluster(cluster);
 
@@ -387,6 +400,50 @@ class ClusterBackupTest
 
         cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
         cluster.awaitBackupLiveLogPosition(logPosition);
+        cluster.stopAllNodes();
+
+        final TestNode node = cluster.startStaticNodeFromBackup();
+        cluster.awaitLeader();
+        cluster.awaitServiceMessageCount(node, totalMessageCount);
+
+        assertEquals(totalMessageCount, node.service().messageCount());
+        assertTrue(node.service().wasSnapshotLoaded());
+    }
+
+    @Test
+    @InterruptAfter(30)
+    void shouldBackupClusterWithFromLatestSnapshotLogPosition()
+    {
+        final TestCluster cluster = aCluster()
+            .withStaticNodes(3)
+            .replayStart(LATEST_SNAPSHOT)
+            .start();
+        systemTestWatcher.cluster(cluster);
+
+        final TestNode leader = cluster.awaitLeader();
+
+        final int preSnapshotMessageCount = 10;
+        final int postSnapshotMessageCount = 7;
+        final int totalMessageCount = preSnapshotMessageCount + postSnapshotMessageCount;
+        cluster.connectClient();
+        cluster.sendAndAwaitMessages(preSnapshotMessageCount);
+
+        cluster.takeSnapshot(leader);
+        cluster.awaitSnapshotCount(1);
+        final long snapshotPosition = leader.service().cluster().logPosition();
+
+        cluster.sendMessages(postSnapshotMessageCount);
+        cluster.awaitResponseMessageCount(totalMessageCount);
+        cluster.awaitServiceMessageCount(leader, totalMessageCount);
+        final long logPosition = leader.service().cluster().logPosition();
+
+        final TestBackupNode testBackupNode = cluster.startClusterBackupNode(true);
+
+        cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
+        cluster.awaitBackupLiveLogPosition(logPosition);
+
+        assertEquals(snapshotPosition, testBackupNode.recordingLogStartPosition());
+
         cluster.stopAllNodes();
 
         final TestNode node = cluster.startStaticNodeFromBackup();
@@ -552,6 +609,112 @@ class ClusterBackupTest
         cluster.awaitBackupLiveLogPosition(logPosition);
     }
 
+    @Test
+    @InterruptAfter(60)
+    void shouldBackupClusterAndJoinLive()
+    {
+        final TestCluster cluster = aCluster().withStaticNodes(3).start();
+        systemTestWatcher.cluster(cluster);
+        final TestNode leader = cluster.awaitLeader();
+
+        cluster.connectClient();
+        cluster.sendMessages(100);
+
+        cluster.startClusterBackupNode(true);
+
+        cluster.sendMessages(100);
+        cluster.awaitServiceMessageCount(leader, 200);
+
+        cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
+        cluster.awaitBackupLiveLogPosition(leader.service().cluster().logPosition());
+        cluster.stopAllNodes();
+
+        final TestNode node = cluster.startStaticNodeFromBackup();
+        cluster.awaitLeader();
+        cluster.awaitServiceMessageCount(node, 200);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = { 0, 8833 })
+    @InterruptAfter(60)
+    void shouldResumeBackupIfStopped(final int catchupPort)
+    {
+        final TestCluster cluster = aCluster().withStaticNodes(3).start();
+        systemTestWatcher.cluster(cluster);
+        cluster.awaitLeader();
+
+        cluster.connectClient();
+        final int initialMessageCount = 100_000; // minimum number of messages to trigger the bug
+        cluster.sendAndAwaitMessages(initialMessageCount);
+
+        cluster.client().close();
+
+        final TestBackupNode backupNode = cluster.startClusterBackupNode(
+            true, new NullCredentialsSupplier(), ClusterBackup.SourceType.FOLLOWER, catchupPort);
+        cluster.awaitBackupLiveLogPosition(1);
+        backupNode.close();
+
+        final int delta = 1000;
+        cluster.reconnectClient();
+        cluster.sendAndAwaitMessages(delta, initialMessageCount + delta);
+
+        cluster.startClusterBackupNode(
+            false, new NullCredentialsSupplier(), ClusterBackup.SourceType.FOLLOWER, catchupPort);
+        cluster.awaitBackupState(ClusterBackup.State.BACKING_UP);
+        cluster.awaitBackupLiveLogPosition(cluster.findLeader().service().cluster().logPosition());
+    }
+
+    @Test
+    @InterruptAfter(30)
+    void shouldQueryForSnapshotsWithLogPosition()
+    {
+        final TestCluster cluster = aCluster().withStaticNodes(3).start();
+        systemTestWatcher.cluster(cluster);
+        final TestNode leader = cluster.awaitLeader();
+
+        cluster.connectClient();
+        final int messageCount = 20; // minimum number of messages to trigger the bug
+
+        cluster.sendAndAwaitMessages(messageCount);
+        cluster.takeSnapshot(leader);
+        cluster.awaitSnapshotCount(1);
+
+        cluster.sendAndAwaitMessages(messageCount, 2 * messageCount);
+        cluster.takeSnapshot(leader);
+        cluster.awaitSnapshotCount(2);
+
+        cluster.sendAndAwaitMessages(messageCount, 3 * messageCount);
+        cluster.takeSnapshot(leader);
+        cluster.awaitSnapshotCount(3);
+
+        cluster.sendAndAwaitMessages(messageCount, 4 * messageCount);
+        cluster.takeSnapshot(leader);
+        cluster.awaitSnapshotCount(4);
+
+        final List<SnapshotRecord> snapshots = cluster.snapshots(leader);
+
+        cluster.backupQueryContainsSnapshot(leader, 0, snapshots.get(0));
+
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(0).logPosition() - 1, snapshots.get(0));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(0).logPosition(), snapshots.get(0));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(0).logPosition() + 1, snapshots.get(0));
+
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(1).logPosition() - 1, snapshots.get(0));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(1).logPosition(), snapshots.get(1));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(1).logPosition() + 1, snapshots.get(1));
+
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(2).logPosition() - 1, snapshots.get(1));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(2).logPosition(), snapshots.get(2));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(2).logPosition() + 1, snapshots.get(2));
+
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(3).logPosition() - 1, snapshots.get(2));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(3).logPosition(), snapshots.get(3));
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(3).logPosition() + 1, snapshots.get(3));
+
+        cluster.backupQueryContainsSnapshot(leader, snapshots.get(3).logPosition() + 1_000_000, snapshots.get(3));
+        cluster.backupQueryContainsSnapshot(leader, Long.MAX_VALUE, snapshots.get(3));
+    }
+
     private static void awaitErrorLogged(final TestBackupNode testBackupNode, final String expectedErrorMessage)
     {
         final AtomicBuffer atomicBuffer = testBackupNode.clusterBackupErrorLog();
@@ -563,7 +726,7 @@ class ClusterBackupTest
                 atomicBuffer,
                 (observationCount, firstObservationTimestamp, lastObservationTimestamp, encodedException) ->
                 {
-                    if (encodedException.contains(expectedErrorMessage))
+                    if (0 != observationCount && encodedException.contains(expectedErrorMessage))
                     {
                         foundError.set(true);
                     }

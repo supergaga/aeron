@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,64 +15,90 @@
  */
 package io.aeron.archive;
 
-import io.aeron.Aeron;
 import io.aeron.archive.client.ArchiveEvent;
-import io.aeron.archive.codecs.RecordingSignal;
+import io.aeron.archive.client.ArchiveException;
 import org.agrona.ErrorHandler;
 
 import java.io.File;
 import java.util.ArrayDeque;
 
+import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.archive.ArchiveConductor.DELETE_SUFFIX;
+import static io.aeron.archive.codecs.RecordingSignal.DELETE;
+import static org.agrona.AsciiEncoding.digitCount;
+import static org.agrona.AsciiEncoding.parseLongAscii;
+
 class DeleteSegmentsSession implements Session
 {
     private final long recordingId;
     private final long correlationId;
+    private final long maxDeletePosition;
     private final ArrayDeque<File> files;
     private final ControlSession controlSession;
-    private final ControlResponseProxy controlResponseProxy;
     private final ErrorHandler errorHandler;
+
+    enum State
+    {
+        AWAIT_REPLAYS_STOP, DELETE_FILES, DONE
+    }
+
+    private State state;
 
     DeleteSegmentsSession(
         final long recordingId,
         final long correlationId,
         final ArrayDeque<File> files,
         final ControlSession controlSession,
-        final ControlResponseProxy controlResponseProxy,
-        final ErrorHandler errorHandler)
+        final ErrorHandler errorHandler,
+        final boolean awaitReplaysStop)
     {
         this.recordingId = recordingId;
         this.correlationId = correlationId;
         this.files = files;
         this.controlSession = controlSession;
-        this.controlResponseProxy = controlResponseProxy;
         this.errorHandler = errorHandler;
+
+        long maxSegmentPosition = Long.MIN_VALUE;
+        final int prefixLength = digitCount(recordingId) + 1;
+        for (final File file : files)
+        {
+            final String name = file.getName();
+            final int dotIndex = name.indexOf('.');
+            maxSegmentPosition = Math.max(
+                maxSegmentPosition, parseLongAscii(name, prefixLength, dotIndex - prefixLength));
+        }
+        maxDeletePosition = maxSegmentPosition;
+
+        state = awaitReplaysStop ? State.AWAIT_REPLAYS_STOP : State.DELETE_FILES;
+    }
+
+    long maxDeletePosition()
+    {
+        return maxDeletePosition;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
-        while (!files.isEmpty())
-        {
-            final File file = files.pollFirst();
-            if (null != file && file.exists() && !file.delete())
-            {
-                errorHandler.onError(new ArchiveEvent("segment delete failed for recording: " + recordingId));
-            }
-        }
+        controlSession.archiveConductor().removeDeleteSegmentsSession(this);
+        controlSession.sendSignal(correlationId, recordingId, NULL_VALUE, NULL_VALUE, DELETE);
     }
 
     /**
      * {@inheritDoc}
      */
-    public void abort()
+    @Override
+    public void abort(final String reason)
     {
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean isDone()
     {
         return files.isEmpty();
@@ -81,6 +107,7 @@ class DeleteSegmentsSession implements Session
     /**
      * {@inheritDoc}
      */
+    @Override
     public long sessionId()
     {
         return recordingId;
@@ -89,28 +116,62 @@ class DeleteSegmentsSession implements Session
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
+        return switch (state)
+        {
+            case AWAIT_REPLAYS_STOP -> doAwaitReplaysStop();
+            case DELETE_FILES -> doDeleteFiles();
+            case DONE -> 0;
+        };
+    }
+
+    private int doAwaitReplaysStop()
+    {
+        if (controlSession.archiveConductor().hasInProgressReplays(recordingId))
+        {
+            return 0;
+        }
+
+        state = State.DELETE_FILES;
+
+        return 1;
+    }
+
+    private int doDeleteFiles()
+    {
         int workCount = 0;
+
         final File file = files.pollFirst();
         if (null != file)
         {
-            if (file.exists() && !file.delete())
+            if (!file.delete())
             {
-                final String errorMessage = "unable to delete segment file: " + file;
-                controlSession.attemptErrorResponse(correlationId, errorMessage, controlResponseProxy);
-                errorHandler.onError(new ArchiveEvent("segment delete failed for recording: " + recordingId));
+                if (file.exists())
+                {
+                    onDeleteError(file);
+                }
+                else if (!file.getName().endsWith(DELETE_SUFFIX))
+                {
+                    final File renamedFile = new File(file.getParent(), file.getName() + DELETE_SUFFIX);
+                    if (!renamedFile.delete() && renamedFile.exists())
+                    {
+                        onDeleteError(renamedFile);
+                    }
+                }
             }
 
-            if (files.isEmpty())
-            {
-                controlSession.sendSignal(
-                    correlationId, recordingId, Aeron.NULL_VALUE, Aeron.NULL_VALUE, RecordingSignal.DELETE);
-            }
-
-            workCount += 1;
+            workCount = 1;
         }
 
         return workCount;
+    }
+
+    private void onDeleteError(final File file)
+    {
+        final String errorMessage = "unable to delete segment file: " + file;
+        controlSession.sendErrorResponse(correlationId, ArchiveException.GENERIC, errorMessage);
+        errorHandler.onError(new ArchiveEvent(errorMessage));
     }
 }

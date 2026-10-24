@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,24 @@
  */
 package io.aeron;
 
-import io.aeron.driver.*;
+import io.aeron.driver.FlowControlSupplier;
+import io.aeron.driver.MediaDriver;
+import io.aeron.driver.TaggedMulticastFlowControlSupplier;
+import io.aeron.driver.ThreadingMode;
 import io.aeron.driver.status.SenderLimit;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
-import io.aeron.test.*;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SlowTest;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
 import io.aeron.test.driver.TestMediaDriver;
-import org.agrona.*;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.SystemUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
@@ -93,8 +102,10 @@ class TaggedFlowControlSystemTest
             .threadingMode(ThreadingMode.SHARED);
 
         driverA = TestMediaDriver.launch(driverAContext, testWatcher);
+        testWatcher.dataCollector().add(driverA.context().aeronDirectory());
 
         driverB = TestMediaDriver.launch(driverBContext, testWatcher);
+        testWatcher.dataCollector().add(driverB.context().aeronDirectory());
 
         clientA = Aeron.connect(
             new Aeron.Context()
@@ -108,8 +119,7 @@ class TaggedFlowControlSystemTest
     @AfterEach
     void after()
     {
-        CloseHelper.closeAll(clientB, clientA, driverB, driverA);
-        IoUtil.delete(new File(ROOT_DIR), true);
+        CloseHelper.closeAll(subscriptionB, subscriptionA, publication, clientB, clientA, driverB, driverA);
     }
 
     private static Stream<Arguments> strategyConfigurations()
@@ -121,7 +131,7 @@ class TaggedFlowControlSystemTest
             Arguments.of(null, null, null, "|fc=tagged,g:123", "|gtag=123"));
     }
 
-    private static class State
+    private static final class State
     {
         private int numMessagesToSend;
         private int numMessagesLeftToSend;
@@ -449,10 +459,8 @@ class TaggedFlowControlSystemTest
 
         subscriptionA = clientA.addSubscription(uriWithGroupTag, STREAM_ID);
 
-        while (!publication.isConnected())
-        {
-            Tests.sleep(1);
-        }
+        Tests.awaitConnected(publication);
+        Tests.awaitConnected(subscriptionA);
     }
 
     @Test

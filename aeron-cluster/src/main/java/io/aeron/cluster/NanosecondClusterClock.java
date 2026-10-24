@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,8 +26,16 @@ import java.util.concurrent.TimeUnit;
 public class NanosecondClusterClock implements ClusterClock
 {
     /**
+     * Default constructor.
+     */
+    public NanosecondClusterClock()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public TimeUnit timeUnit()
     {
         return TimeUnit.NANOSECONDS;
@@ -36,6 +44,7 @@ public class NanosecondClusterClock implements ClusterClock
     /**
      * {@inheritDoc}
      */
+    @Override
     public long time()
     {
         return HighResolutionClock.epochNanos();
@@ -44,6 +53,7 @@ public class NanosecondClusterClock implements ClusterClock
     /**
      * {@inheritDoc}
      */
+    @Override
     public long timeMillis()
     {
         return System.currentTimeMillis();
@@ -52,6 +62,7 @@ public class NanosecondClusterClock implements ClusterClock
     /**
      * {@inheritDoc}
      */
+    @Override
     public long timeMicros()
     {
         return HighResolutionClock.epochMicros();
@@ -60,8 +71,18 @@ public class NanosecondClusterClock implements ClusterClock
     /**
      * {@inheritDoc}
      */
+    @Override
     public long timeNanos()
     {
         return HighResolutionClock.epochNanos();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long convertToNanos(final long time)
+    {
+        return time;
     }
 }

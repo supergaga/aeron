@@ -1,5 +1,5 @@
 ::
-:: Copyright 2014-2022 Real Logic Limited.
+:: Copyright 2014-2025 Real Logic Limited.
 ::
 :: Licensed under the Apache License, Version 2.0 (the "License");
 :: you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ call "%DIR%\java-common"
 
 "%JAVA_HOME%\bin\java" ^
   -cp "%DIR%\..\..\aeron-all\build\libs\aeron-all-%VERSION%.jar" ^
-  -javaagent:"%DIR%\..\..\aeron-agent\build\libs\aeron-agent-%VERSION%.jar" ^
   !JAVA_OPTIONS! ^
   !ADD_OPENS! ^
   %JVM_OPTS% ^

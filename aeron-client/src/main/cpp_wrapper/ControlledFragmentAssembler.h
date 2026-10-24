@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,13 +19,11 @@
 #include <unordered_map>
 
 #include "Aeron.h"
-#include "BufferBuilder.h"
-#include "concurrent/logbuffer/FrameDescriptor.h"
 
 namespace aeron
 {
 
-static const std::size_t DEFAULT_CONTROLLED_FRAGMENT_ASSEMBLY_BUFFER_LENGTH = 4096;
+static constexpr std::size_t DEFAULT_CONTROLLED_FRAGMENT_ASSEMBLY_BUFFER_LENGTH = 4096;
 
 /**
  * A handler that sits in a chain-of-responsibility pattern that reassembles fragmented messages
@@ -43,7 +41,6 @@ static const std::size_t DEFAULT_CONTROLLED_FRAGMENT_ASSEMBLY_BUFFER_LENGTH = 40
 class ControlledFragmentAssembler
 {
 public:
-
     /**
      * Construct an adapter to reassembly message fragments and delegate on only whole messages.
      *
@@ -53,10 +50,20 @@ public:
     explicit ControlledFragmentAssembler(
         const controlled_poll_fragment_handler_t &delegate,
         std::size_t initialBufferLength = DEFAULT_CONTROLLED_FRAGMENT_ASSEMBLY_BUFFER_LENGTH) :
-        m_initialBufferLength(initialBufferLength),
         m_delegate(delegate)
     {
+        aeron_controlled_fragment_assembler_create(&m_fragment_assembler, handlerCallback, reinterpret_cast<void *>(this));
     }
+
+    ~ControlledFragmentAssembler()
+    {
+        aeron_controlled_fragment_assembler_delete(m_fragment_assembler);
+    }
+
+    ControlledFragmentAssembler(ControlledFragmentAssembler& other) = delete;
+    ControlledFragmentAssembler(ControlledFragmentAssembler&& other) = delete;
+    ControlledFragmentAssembler& operator=(ControlledFragmentAssembler& other) = delete;
+    ControlledFragmentAssembler& operator=(ControlledFragmentAssembler&& other) = delete;
 
     /**
      * Compose a controlled_poll_fragment_handler_t that calls the this ControlledFragmentAssembler instance for
@@ -64,9 +71,9 @@ public:
      *
      * @return controlled_poll_fragment_handler_t composed with the ControlledFragmentAssembler instance
      */
-    controlled_poll_fragment_handler_t handler()
+    controlled_poll_fragment_handler_t handler() noexcept
     {
-        return [&](AtomicBuffer &buffer, util::index_t offset, util::index_t length, Header &header)
+        return [this](AtomicBuffer &buffer, util::index_t offset, util::index_t length, Header &header) noexcept
         {
             return this->onFragment(buffer, offset, length, header);
         };
@@ -77,93 +84,61 @@ public:
      * large messages are expected.
      *
      * @param sessionId to have its buffer freed
+     * @return true if a buffer has been freed otherwise false.
      */
-    void deleteSessionBuffer(std::int32_t sessionId)
+    bool deleteSessionBuffer(std::int32_t sessionId)
     {
-        m_builderBySessionIdMap.erase(sessionId);
+        return aeron_controlled_fragment_assembler_delete_session_buffer(m_fragment_assembler, sessionId);
     }
 
 private:
-    const std::size_t m_initialBufferLength;
     controlled_poll_fragment_handler_t m_delegate;
-    std::unordered_map<std::int32_t, BufferBuilder> m_builderBySessionIdMap;
+    aeron_controlled_fragment_assembler_t *m_fragment_assembler = nullptr;
 
-    ControlledPollAction onFragment(AtomicBuffer &buffer, util::index_t offset, util::index_t length, Header &header)
+    static aeron_controlled_fragment_handler_action_t handlerCallback(
+        void *clientd, const uint8_t *buffer, size_t length, aeron_header_t *header) noexcept
     {
-        const std::uint8_t flags = header.flags();
-        ControlledPollAction action = ControlledPollAction::CONTINUE;
+        auto *assembler = reinterpret_cast<ControlledFragmentAssembler *>(clientd);
+        Header headerWrapper{header};
+        AtomicBuffer bufferWrapper{const_cast<uint8_t *>(buffer), length};
+        ControlledPollAction action = assembler->m_delegate(bufferWrapper, 0, (util::index_t)length, headerWrapper);
 
-        if ((flags & FrameDescriptor::UNFRAGMENTED) == FrameDescriptor::UNFRAGMENTED)
+        switch (action)
         {
-            action = m_delegate(buffer, offset, length, header);
+            case ControlledPollAction::ABORT:
+                return AERON_ACTION_ABORT;
+            case ControlledPollAction::BREAK:
+                return AERON_ACTION_BREAK;
+            case ControlledPollAction::COMMIT:
+                return AERON_ACTION_COMMIT;
+            case ControlledPollAction::CONTINUE:
+                return AERON_ACTION_CONTINUE;
+            default:
+                return AERON_ACTION_ABORT;
         }
-        else if ((flags & FrameDescriptor::BEGIN_FRAG) == FrameDescriptor::BEGIN_FRAG)
-        {
-            BufferBuilder &builder = getBuffer(header.sessionId());
-            auto nextOffset = BitUtil::align(
-                offset + length + DataFrameHeader::LENGTH, FrameDescriptor::FRAME_ALIGNMENT);
-
-            builder.reset().append(buffer, offset, length, header).nextTermOffset(nextOffset);
-        }
-        else
-        {
-            auto result = m_builderBySessionIdMap.find(header.sessionId());
-
-            if (result != m_builderBySessionIdMap.end())
-            {
-                BufferBuilder &builder = result->second;
-                const std::uint32_t limit = builder.limit();
-
-                if (offset == builder.nextTermOffset())
-                {
-                    builder.append(buffer, offset, length, header);
-
-                    if ((flags & FrameDescriptor::END_FRAG) == FrameDescriptor::END_FRAG)
-                    {
-                        util::index_t msgLength =
-                            static_cast<util::index_t>(builder.limit()) - DataFrameHeader::LENGTH;
-                        AtomicBuffer msgBuffer(builder.buffer(), builder.limit());
-
-                        action = m_delegate(msgBuffer, DataFrameHeader::LENGTH, msgLength, header);
-
-                        if (ControlledPollAction::ABORT == action)
-                        {
-                            builder.limit(limit);
-                        }
-                        else
-                        {
-                            builder.reset();
-                        }
-                    }
-                    else
-                    {
-                        auto nextOffset = BitUtil::align(
-                            offset + length + DataFrameHeader::LENGTH, FrameDescriptor::FRAME_ALIGNMENT);
-                        builder.nextTermOffset(nextOffset);
-                    }
-                }
-                else
-                {
-                    builder.reset();
-                }
-            }
-        }
-
-        return action;
     }
 
-    inline BufferBuilder &getBuffer(std::int32_t sessionId)
+    ControlledPollAction onFragment(
+        AtomicBuffer &buffer, util::index_t offset, util::index_t length, Header &header) noexcept
     {
-        auto iter = m_builderBySessionIdMap.find(sessionId);
-        if (iter != m_builderBySessionIdMap.end())
+        aeron_controlled_fragment_handler_action_t action = aeron_controlled_fragment_assembler_handler(
+            m_fragment_assembler,
+            buffer.buffer() + offset,
+            length,
+            header.hdr());
+
+        switch (action)
         {
-            return iter->second;
-        }
-        else
-        {
-            auto pair = m_builderBySessionIdMap.emplace(
-                sessionId, BufferBuilder(static_cast<std::uint32_t>(m_initialBufferLength)));
-            return pair.first->second;
+            case AERON_ACTION_ABORT:
+                return ControlledPollAction::ABORT;
+            case AERON_ACTION_BREAK:
+                return ControlledPollAction::BREAK;
+            case AERON_ACTION_COMMIT:
+                return ControlledPollAction::COMMIT;
+            case AERON_ACTION_CONTINUE:
+                return ControlledPollAction::CONTINUE;
+            default:
+                return ControlledPollAction::ABORT;
         }
     }
 };

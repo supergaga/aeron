@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,29 @@
  */
 package io.aeron.cluster;
 
+import io.aeron.CommonContext;
+import io.aeron.cluster.codecs.mark.ClusterComponentType;
+import io.aeron.cluster.service.ClusterMarkFile;
+import io.aeron.driver.MediaDriver;
+import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.test.CapturingPrintStream;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SlowTest;
 import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.cluster.TestCluster;
 import io.aeron.test.cluster.TestNode;
+import io.aeron.test.driver.TestMediaDriver;
+import org.agrona.concurrent.SystemEpochClock;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
+import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -34,17 +45,23 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 import static io.aeron.test.cluster.TestCluster.aCluster;
-import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.WRITE;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.hamcrest.Matchers.matchesRegex;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 @SlowTest
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ClusterToolTest
 {
     @RegisterExtension
@@ -58,6 +75,7 @@ class ClusterToolTest
         systemTestWatcher.cluster(cluster);
 
         final TestNode leader = cluster.awaitLeader();
+        cluster.connectClient();
         final long initialSnapshotCount = leader.consensusModule().context().snapshotCounter().get();
         final CapturingPrintStream capturingPrintStream = new CapturingPrintStream();
 
@@ -98,9 +116,9 @@ class ClusterToolTest
             leader.consensusModule().context().clusterDir(),
             capturingPrintStream.resetAndGetPrintStream()));
 
-        ClusterTool.describeLatestConsensusModuleSnapshot(
+        assertTrue(ClusterTool.describeLatestConsensusModuleSnapshot(
             capturingPrintStream.resetAndGetPrintStream(),
-            leader.consensusModule().context().clusterDir());
+            leader.consensusModule().context().clusterDir()));
 
         assertThat(
             capturingPrintStream.flushAndGetContent(),
@@ -165,6 +183,7 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void shouldFailIfMarkFileUnavailable(final @TempDir Path emptyClusterDir)
     {
         final CapturingPrintStream capturingPrintStream = new CapturingPrintStream();
@@ -176,6 +195,33 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
+    void shouldBeAbleToAccessClusterMarkFilesInANonDefaultLocation(final @TempDir File markFileDir)
+    {
+        final TestCluster cluster = aCluster().withStaticNodes(3).markFileBaseDir(markFileDir).start();
+        systemTestWatcher.cluster(cluster);
+
+        final TestNode leader = cluster.awaitLeader();
+        cluster.connectClient();
+        cluster.sendErrorGeneratingMessages(1);
+        cluster.awaitResponseMessageCount(1);
+
+        final CapturingPrintStream stream = new CapturingPrintStream();
+        ClusterTool.errors(
+            stream.resetAndGetPrintStream(),
+            cluster.node(leader.index()).consensusModule().context().clusterDir());
+
+        final String errorContent = stream.flushAndGetContent();
+        assertThat(errorContent, containsString("This message will cause an error"));
+        assertThat(errorContent, containsString("mark file exists"));
+        final String path = markFileDir.getName();
+        final Pattern serviceMarkFileName = Pattern.compile(
+            ".*mark file exists:.*" + path + ".*cluster-mark-service-0.dat.*", Pattern.DOTALL);
+        assertThat("Tool output: " + errorContent, errorContent, matchesRegex(serviceMarkFileName));
+    }
+
+    @Test
+    @InterruptAfter(30)
     void sortRecordingLogIsANoOpIfRecordLogIsEmpty(final @TempDir Path emptyClusterDir) throws IOException
     {
         final File clusterDir = emptyClusterDir.toFile();
@@ -191,6 +237,7 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void sortRecordingLogIsANoOpIfRecordDoesNotExist(final @TempDir Path emptyClusterDir)
     {
         final File clusterDir = emptyClusterDir.toFile();
@@ -203,6 +250,7 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void sortRecordingLogIsANoOpIfRecordLogIsAlreadySorted(final @TempDir Path emptyClusterDir) throws IOException
     {
         final File clusterDir = emptyClusterDir.toFile();
@@ -210,7 +258,7 @@ class ClusterToolTest
         try (RecordingLog recordingLog = new RecordingLog(clusterDir, true))
         {
             recordingLog.appendTerm(21, 0, 100, 100);
-            recordingLog.appendSnapshot(0, 0, 0, 0, 200, 0);
+            recordingLog.appendSnapshot(0, 0, 100, 0, 200, 0);
             recordingLog.appendTerm(21, 1, 1024, 200);
         }
 
@@ -224,6 +272,7 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void sortRecordingLogShouldRearrangeDataOnDisc(final @TempDir Path emptyClusterDir) throws IOException
     {
         final File clusterDir = emptyClusterDir.toFile();
@@ -249,6 +298,7 @@ class ClusterToolTest
                     entry.timestamp,
                     entry.serviceId,
                     entry.type,
+                    null,
                     entry.isValid,
                     i));
             }
@@ -270,6 +320,7 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void seedRecordingLogFromSnapshotShouldDeleteOriginalRecordingLogFileIfThereAreNoValidSnapshots(
         final @TempDir Path emptyClusterDir) throws IOException
     {
@@ -299,6 +350,7 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void seedRecordingLogFromSnapshotShouldCreateANewRecordingLogFromALatestValidSnapshot(
         final @TempDir Path emptyClusterDir) throws IOException
     {
@@ -306,12 +358,70 @@ class ClusterToolTest
     }
 
     @Test
+    @InterruptAfter(30)
     void seedRecordingLogFromSnapshotShouldCreateANewRecordingLogFromALatestValidSnapshotCommandLine(
         final @TempDir Path emptyClusterDir) throws IOException
     {
         testSeedRecordingLogFromSnapshot(
             emptyClusterDir,
             clusterDir -> ClusterTool.main(new String[]{ clusterDir.toString(), "seed-recording-log-from-snapshot" }));
+    }
+
+    @Test
+    @InterruptAfter(30)
+    void shouldCheckForLeaderInAnyStateAfterElectionWasClosed()
+    {
+        final TestCluster cluster = aCluster().withStaticNodes(3).start();
+        systemTestWatcher.cluster(cluster);
+        final PrintStream out = mock(PrintStream.class);
+
+        final TestNode leader = cluster.awaitLeader();
+        assertEquals(0, ClusterTool.isLeader(out, leader.consensusModule().context().clusterDir()));
+        for (final TestNode follower : cluster.followers())
+        {
+            assertEquals(1, ClusterTool.isLeader(out, follower.consensusModule().context().clusterDir()));
+        }
+
+        assertTrue(ClusterTool.suspend(leader.consensusModule().context().clusterDir(), out));
+        assertEquals(0, ClusterTool.isLeader(out, leader.consensusModule().context().clusterDir()));
+        for (final TestNode follower : cluster.followers())
+        {
+            assertEquals(1, ClusterTool.isLeader(out, follower.consensusModule().context().clusterDir()));
+        }
+    }
+
+    @Test
+    void listMembersShouldReturnFalseIfNoMarkFileExists(@TempDir final File emptyClusterDir)
+    {
+        final ClusterMembership clusterMembership = new ClusterMembership();
+        assertFalse(ClusterTool.listMembers(clusterMembership, emptyClusterDir, 0));
+    }
+
+    @Test
+    void listMembersShouldReturnFalseIfQueryTimesOut(@TempDir final Path clusterDir)
+    {
+        final SystemEpochClock clock = SystemEpochClock.INSTANCE;
+        try (TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
+            .aeronDirectoryName(CommonContext.generateRandomDirName()), systemTestWatcher);
+            ClusterMarkFile clusterMarkFile = new ClusterMarkFile(
+                clusterDir.resolve(ClusterMarkFile.FILENAME).toFile(),
+                ClusterComponentType.BACKUP,
+                1024 * 1024,
+                clock,
+                1000,
+                LogBufferDescriptor.PAGE_MIN_SIZE))
+        {
+            clusterMarkFile.encoder()
+                .activityTimestamp(clock.time())
+                .consensusModuleStreamId(111)
+                .serviceStreamId(222)
+                .aeronDirectory(driver.aeronDirectoryName())
+                .controlChannel("aeron:udp?endpoint=localhost:7799");
+            clusterMarkFile.signalReady(clock.time());
+
+            final ClusterMembership clusterMembership = new ClusterMembership();
+            assertFalse(ClusterTool.listMembers(clusterMembership, clusterMarkFile.parentDirectory(), 1));
+        }
     }
 
     private void testSeedRecordingLogFromSnapshot(final Path emptyClusterDir, final Consumer<File> truncateAction)
@@ -353,6 +463,7 @@ class ClusterToolTest
                     entry.timestamp,
                     entry.serviceId,
                     entry.type,
+                    null,
                     entry.isValid,
                     i - 2));
             }
@@ -372,30 +483,5 @@ class ClusterToolTest
         // compare up to millis, because upon copy file timestamp seems to be truncated
         // e.g. expected: <2021-09-27T09:49:22.756944756Z> but was: <2021-09-27T09:49:22.756944Z>
         assertEquals(logLastModifiedTime.toMillis(), Files.getLastModifiedTime(backupLogFile).toMillis());
-    }
-
-    static class CapturingPrintStream
-    {
-        private final ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        private final PrintStream printStream = new PrintStream(byteArrayOutputStream);
-
-        PrintStream resetAndGetPrintStream()
-        {
-            byteArrayOutputStream.reset();
-            return printStream;
-        }
-
-        String flushAndGetContent()
-        {
-            printStream.flush();
-            try
-            {
-                return byteArrayOutputStream.toString(US_ASCII.name());
-            }
-            catch (final UnsupportedEncodingException ex)
-            {
-                throw new RuntimeException(ex);
-            }
-        }
     }
 }

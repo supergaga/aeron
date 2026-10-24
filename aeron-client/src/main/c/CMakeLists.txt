@@ -1,4 +1,4 @@
-# Copyright 2014-2022 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,9 +14,24 @@
 
 include(CheckSymbolExists)
 
+if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
+    set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
+    add_definitions(-D_DEFAULT_SOURCE)
+endif ()
+
 if (MSVC AND "${CMAKE_SYSTEM_NAME}" MATCHES "Windows")
-    set(AERON_LIB_WINSOCK_LIBS wsock32 ws2_32 Iphlpapi)
-    set(WSAPOLL_PROTOTYPE_EXISTS True)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    set(BUILD_SHARED_LIBS ON)
+    set(AERON_LIB_WINSOCK_LIBS ws2_32 Iphlpapi Psapi)
+endif ()
+
+if (NOT MSVC)
+    message(STATUS "Looking up: /dev/urandom")
+    execute_process(
+        COMMAND ls /dev/urandom
+        RESULT_VARIABLE DEV_URANDOM_EXISTS
+        OUTPUT_QUIET
+    )
 endif ()
 
 if (MSVC)
@@ -26,13 +41,22 @@ else()
     set(AERON_STATIC_LIB_LINK_OPTS "-rdynamic")
 endif()
 
-if (WSAPOLL_PROTOTYPE_EXISTS)
-    add_definitions(-DHAVE_WSAPOLL)
+check_include_file("bsd/stdlib.h" BSDSTDLIB_H_EXISTS)
+find_library(LIBBSD_EXISTS NAMES bsd libbsd)
+
+if (LIBBSD_EXISTS)
+    set(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES} -lbsd")
 endif ()
 
-if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
-    set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
-    add_definitions(-D_DEFAULT_SOURCE)
+if (NOT BSDSTDLIB_H_EXISTS)
+    check_symbol_exists(arc4random "stdlib.h" ARC4RANDOM_PROTOTYPE_EXISTS)
+    check_symbol_exists(posix_memalign "stdlib.h" POSIX_MEMALIGN_PROTOTYPE_EXISTS)
+    check_symbol_exists(reallocf "stdlib.h" REALLOCF_PROTOTYPE_EXISTS)
+else ()
+    add_definitions(-DHAVE_BSDSTDLIB_H)
+    check_symbol_exists(arc4random "bsd/stdlib.h" ARC4RANDOM_PROTOTYPE_EXISTS)
+    check_symbol_exists(posix_memalign "bsd/stdlib.h" POSIX_MEMALIGN_PROTOTYPE_EXISTS)
+    check_symbol_exists(reallocf "bsd/stdlib.h" REALLOCF_PROTOTYPE_EXISTS)
 endif ()
 
 check_symbol_exists(fallocate "fcntl.h" FALLOCATE_PROTOTYPE_EXISTS)
@@ -51,9 +75,23 @@ if (F_PREALLOCATE_PROTOTYPE_EXISTS)
     add_definitions(-DHAVE_F_PREALLOCATE)
 endif ()
 
-if (MSVC AND "${CMAKE_SYSTEM_NAME}" MATCHES "Windows")
-    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-    set(BUILD_SHARED_LIBS ON)
+if (ARC4RANDOM_PROTOTYPE_EXISTS)
+    add_definitions(-DHAVE_ARC4RANDOM)
+else ()
+    message(WARNING "Could not find arc4random. If on Linux, is libbsd installed?")
+endif ()
+
+if (DEV_URANDOM_EXISTS EQUAL 0)
+    message(STATUS "Found: /dev/urandom")
+    add_definitions(-DHAVE_DEV_URANDOM)
+endif ()
+
+if (POSIX_MEMALIGN_PROTOTYPE_EXISTS)
+    add_definitions(-DHAVE_POSIX_MEMALIGN)
+endif ()
+
+if (REALLOCF_PROTOTYPE_EXISTS)
+    add_definitions(-DHAVE_REALLOCF)
 endif ()
 
 set(SOURCE
@@ -63,6 +101,7 @@ set(SOURCE
     collections/aeron_int64_counter_map.c
     collections/aeron_int64_to_ptr_hash_map.c
     collections/aeron_int64_to_tagged_ptr_hash_map.c
+    collections/aeron_linked_queue.c
     collections/aeron_map.c
     collections/aeron_str_to_ptr_hash_map.c
     concurrent/aeron_atomic.c
@@ -87,6 +126,7 @@ set(SOURCE
     util/aeron_arrayutil.c
     util/aeron_bitutil.c
     util/aeron_clock.c
+    util/aeron_deque.c
     util/aeron_dlopen.c
     util/aeron_env.c
     util/aeron_error.c
@@ -99,6 +139,7 @@ set(SOURCE
     util/aeron_strutil.c
     util/aeron_symbol_table.c
     uri/aeron_uri.c
+    uri/aeron_uri_string_builder.c
     aeron_agent.c
     aeron_alloc.c
     aeron_client.c
@@ -114,9 +155,9 @@ set(SOURCE
     aeron_publication.c
     aeron_socket.c
     aeron_subscription.c
-    aeron_version.c
     aeron_windows.c
-    aeronc.c)
+    aeronc.c
+    aeron_version.c)
 
 set(HEADERS
     collections/aeron_array_to_ptr_hash_map.h
@@ -125,6 +166,7 @@ set(HEADERS
     collections/aeron_int64_counter_map.h
     collections/aeron_int64_to_ptr_hash_map.h
     collections/aeron_int64_to_tagged_ptr_hash_map.h
+    collections/aeron_linked_queue.h
     collections/aeron_map.h
     collections/aeron_str_to_ptr_hash_map.h
     command/aeron_control_protocol.h
@@ -156,6 +198,7 @@ set(HEADERS
     util/aeron_arrayutil.h
     util/aeron_bitutil.h
     util/aeron_clock.h
+    util/aeron_deque.h
     util/aeron_dlopen.h
     util/aeron_env.h
     util/aeron_error.h
@@ -169,6 +212,7 @@ set(HEADERS
     util/aeron_strutil.h
     util/aeron_symbol_table.h
     uri/aeron_uri.h
+    uri/aeron_uri_string_builder.h
     aeron_agent.h
     aeron_alloc.h
     aeron_client.h
@@ -188,18 +232,27 @@ set(HEADERS
     aeron_windows.h
     aeronc.h)
 
-add_library(aeron SHARED ${SOURCE} ${HEADERS})
+add_library(aeron SHARED ${SOURCE} ${HEADERS}
+    aeron_client_error.h
+    aeron_archive_client_error.h)
+add_library(aeron::aeron ALIAS aeron)
 target_include_directories(aeron
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include/aeron>")
 
 add_library(aeron_static STATIC ${SOURCE} ${HEADERS})
+add_library(aeron::aeron_static ALIAS aeron_static)
 target_include_directories(aeron_static
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include/aeron>")
 
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -DDISABLE_BOUNDS_CHECKS")
 
 if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
     set(AERON_LIB_M_LIBS m)
+
+    if (LIBBSD_EXISTS)
+        set(AERON_LIB_BSD_LIBS bsd)
+    endif ()
+
     if ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "aarch64")
         set(AERON_LIB_ATOMIC_LIBS atomic)
     endif ()
@@ -209,6 +262,7 @@ target_link_libraries(
     aeron
     ${CMAKE_DL_LIBS}
     ${AERON_LIB_M_LIBS}
+    ${AERON_LIB_BSD_LIBS}
     ${AERON_LIB_ATOMIC_LIBS}
     ${CMAKE_THREAD_LIBS_INIT}
     ${AERON_LIB_WINSOCK_LIBS})
@@ -217,6 +271,7 @@ target_link_libraries(
     aeron_static INTERFACE
     ${CMAKE_DL_LIBS}
     ${AERON_LIB_M_LIBS}
+    ${AERON_LIB_BSD_LIBS}
     ${AERON_LIB_ATOMIC_LIBS}
     ${CMAKE_THREAD_LIBS_INIT}
     ${AERON_LIB_WINSOCK_LIBS}
@@ -226,8 +281,9 @@ target_link_libraries(
 if (AERON_INSTALL_TARGETS)
     install(
         TARGETS aeron aeron_static
+        EXPORT aeron-targets
         RUNTIME DESTINATION lib
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
-    install(DIRECTORY . DESTINATION include/aeron FILES_MATCHING PATTERN "*.h")
+    install(DIRECTORY ./ DESTINATION include/aeron FILES_MATCHING PATTERN "*.h")
 endif ()

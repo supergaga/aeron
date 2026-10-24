@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,22 +16,28 @@
 package io.aeron.test.driver;
 
 import io.aeron.Aeron;
+import io.aeron.AeronCounters;
 import io.aeron.CommonContext;
 import io.aeron.driver.*;
 import io.aeron.protocol.HeaderFlyweight;
+import io.aeron.test.SystemTestConfig;
+import io.aeron.test.Tests;
 import org.agrona.IoUtil;
 import org.agrona.LangUtil;
 import org.agrona.SystemUtil;
+import org.agrona.collections.MutableInteger;
 import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-
-import static java.util.Collections.emptyMap;
+import java.util.function.Supplier;
 
 public final class CTestMediaDriver implements TestMediaDriver
 {
@@ -90,6 +96,8 @@ public final class CTestMediaDriver implements TestMediaDriver
             return;
         }
 
+        awaitSendersAndReceiversClosed();
+
         isClosed = true;
 
         Exception error = null;
@@ -107,10 +115,11 @@ public final class CTestMediaDriver implements TestMediaDriver
 
         try
         {
-            final int exitCode = terminateDriver();
+            final ExitStatus exitStatus = terminateDriver();
             if (null != driverOutputConsumer)
             {
-                driverOutputConsumer.exitCode(context.aeronDirectoryName(), exitCode);
+                driverOutputConsumer.exitCode(
+                    context.aeronDirectoryName(), exitStatus.exitCode, exitStatus.exitMessage);
             }
         }
         catch (final Exception ex)
@@ -131,6 +140,35 @@ public final class CTestMediaDriver implements TestMediaDriver
         }
     }
 
+    private void awaitSendersAndReceiversClosed()
+    {
+        if (!SystemTestConfig.DRIVER_AWAIT_COUNTER_CLOSE)
+        {
+            return;
+        }
+
+        final MutableInteger counterCount = new MutableInteger();
+        final CountersReader.MetaData metaData = (counterId, typeId, keyBuffer, label) ->
+        {
+            if (AeronCounters.DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID == typeId ||
+                AeronCounters.DRIVER_SEND_CHANNEL_STATUS_TYPE_ID == typeId)
+            {
+                counterCount.increment();
+            }
+        };
+
+        final long deadlineMs = System.currentTimeMillis() + 15_000;
+        do
+        {
+            counterCount.set(0);
+            counters().forEach(metaData);
+
+            Tests.checkInterruptStatus();
+            Tests.yield();
+        }
+        while (0 != counterCount.get() && System.currentTimeMillis() < deadlineMs);
+    }
+
     public void cleanup()
     {
         if (NULL_FILE != stdoutFile)
@@ -148,9 +186,12 @@ public final class CTestMediaDriver implements TestMediaDriver
     {
         if (null == countersReader)
         {
-            aeronContext = new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()).conclude();
+            aeronContext = new Aeron.Context()
+                .aeronDirectoryName(context.aeronDirectoryName())
+                .keepAliveIntervalNs(TimeUnit.MILLISECONDS.toNanos(100))
+                .conclude();
             countersReader = new CountersReader(
-                aeronContext.countersMetaDataBuffer(), aeronContext.countersValuesBuffer());
+                aeronContext.countersMetaDataBuffer(), aeronContext.countersValuesBuffer(), StandardCharsets.US_ASCII);
         }
 
         return countersReader;
@@ -187,20 +228,35 @@ public final class CTestMediaDriver implements TestMediaDriver
         environment.put("AERON_TERM_BUFFER_SPARSE_FILE", Boolean.toString(context.termBufferSparseFile()));
         environment.put("AERON_TERM_BUFFER_LENGTH", String.valueOf(context.publicationTermBufferLength()));
         environment.put("AERON_IPC_TERM_BUFFER_LENGTH", String.valueOf(context.ipcTermBufferLength()));
+        environment.put("AERON_FILE_PAGE_SIZE", String.valueOf(context.filePageSize()));
         environment.put(
             "AERON_PUBLICATION_UNBLOCK_TIMEOUT", String.valueOf(context.publicationUnblockTimeoutNs()));
         environment.put(
             "AERON_PUBLICATION_CONNECTION_TIMEOUT", String.valueOf(context.publicationConnectionTimeoutNs()));
+        environment.put("AERON_PUBLICATION_LINGER_TIMEOUT", String.valueOf(context.publicationLingerTimeoutNs()));
         environment.put("AERON_SPIES_SIMULATE_CONNECTION", Boolean.toString(context.spiesSimulateConnection()));
+        environment.put("AERON_RCV_STATUS_MESSAGE_TIMEOUT", String.valueOf(context.statusMessageTimeoutNs()));
         environment.put("AERON_PERFORM_STORAGE_CHECKS", Boolean.toString(context.performStorageChecks()));
         if (null != context.threadingMode())
         {
             environment.put("AERON_THREADING_MODE", context.threadingMode().name());
         }
+        setIdleStrategy(environment, "AERON_CONDUCTOR_IDLE_STRATEGY", context::conductorIdleStrategy);
+        setIdleStrategy(environment, "AERON_SENDER_IDLE_STRATEGY", context::senderIdleStrategy);
+        setIdleStrategy(environment, "AERON_RECEIVER_IDLE_STRATEGY", context::receiverIdleStrategy);
+        setIdleStrategy(
+            environment, "AERON_NATIVE_RESOURCE_AGENT_IDLE_STRATEGY", context::nativeResourceAgentIdleStrategy);
+        setIdleStrategy(environment, "AERON_SHARED_IDLE_STRATEGY", context::sharedIdleStrategy);
+        setIdleStrategy(environment, "AERON_SHAREDNETWORK_IDLE_STRATEGY", context::sharedNetworkIdleStrategy);
         environment.put("AERON_TIMER_INTERVAL", String.valueOf(context.timerIntervalNs()));
-        environment.put("AERON_UNTETHERED_RESTING_TIMEOUT", String.valueOf(context.untetheredRestingTimeoutNs()));
         environment.put(
             "AERON_UNTETHERED_WINDOW_LIMIT_TIMEOUT", String.valueOf(context.untetheredWindowLimitTimeoutNs()));
+        final long untetheredLingerTimeoutNs = context.untetheredLingerTimeoutNs();
+        if (Aeron.NULL_VALUE != untetheredLingerTimeoutNs)
+        {
+            environment.put("AERON_UNTETHERED_LINGER_TIMEOUT", String.valueOf(untetheredLingerTimeoutNs));
+        }
+        environment.put("AERON_UNTETHERED_RESTING_TIMEOUT", String.valueOf(context.untetheredRestingTimeoutNs()));
 
         if (null != context.receiverGroupTag())
         {
@@ -209,7 +265,7 @@ public final class CTestMediaDriver implements TestMediaDriver
         environment.put("AERON_FLOW_CONTROL_GROUP_TAG", String.valueOf(context.flowControlGroupTag()));
         environment.put(
             "AERON_FLOW_CONTROL_GROUP_MIN_SIZE", String.valueOf(context.flowControlGroupMinSize()));
-        environment.put("AERON_PRINT_CONFIGURATION", Boolean.toString(context.printConfigurationOnStart()));
+        environment.put("AERON_PRINT_CONFIGURATION", "true");
 
         if (null != context.resolverName())
         {
@@ -235,11 +291,38 @@ public final class CTestMediaDriver implements TestMediaDriver
             environment.put("AERON_NAME_RESOLVER_SUPPLIER", "csv_table");
             environment.put("AERON_NAME_RESOLVER_INIT_ARGS", csvConfiguration);
         }
+        environment.put("AERON_DRIVER_CONDUCTOR_CYCLE_THRESHOLD", String.valueOf(context.conductorCycleThresholdNs()));
+        environment.put("AERON_DRIVER_SENDER_CYCLE_THRESHOLD", String.valueOf(context.senderCycleThresholdNs()));
+        environment.put("AERON_DRIVER_RECEIVER_CYCLE_THRESHOLD", String.valueOf(context.receiverCycleThresholdNs()));
+        environment.put("AERON_DRIVER_NAME_RESOLVER_THRESHOLD", String.valueOf(context.nameResolverThresholdNs()));
+        final String senderWildcardPortRange = context.senderWildcardPortRange();
+        if (null != senderWildcardPortRange)
+        {
+            environment.put("AERON_SENDER_WILDCARD_PORT_RANGE", senderWildcardPortRange);
+        }
+        final String receiverWildcardPortRange = context.receiverWildcardPortRange();
+        if (null != receiverWildcardPortRange)
+        {
+            environment.put("AERON_RECEIVER_WILDCARD_PORT_RANGE", receiverWildcardPortRange);
+        }
+
+        environment.put("AERON_ENABLE_EXPERIMENTAL_FEATURES", String.valueOf(context.enableExperimentalFeatures()));
+
+        environment.put("AERON_DRIVER_STREAM_SESSION_LIMIT", String.valueOf(context.streamSessionLimit()));
+
+        environment.put("AERON_DRIVER_RESOLVER_NEIGHBOR_TIMEOUT",
+            String.valueOf(context.resolverNeighborTimeoutNs()));
+        environment.put("AERON_DRIVER_RESOLVER_SELF_RESOLUTION_INTERVAL",
+            String.valueOf(context.resolverSelfResolutionIntervalNs()));
+        environment.put("AERON_DRIVER_RESOLVER_NEIGHBOR_RESOLUTION_INTERVAL",
+            String.valueOf(context.resolverNeighborResolutionIntervalNs()));
+        environment.put("AERON_DRIVER_RESOLVER_BOOTSTRAP_NEIGHBOR_RESOLUTION_INTERVAL",
+            String.valueOf(context.resolverBootstrapNeighborResolutionIntervalNs()));
 
         setFlowControlStrategy(environment, context);
         setLogging(environment);
         setTransportSecurity(environment);
-        setAdditionalEnvVars(environment, C_DRIVER_ADDITIONAL_ENV_VARS.get().getOrDefault(context, emptyMap()));
+        setAdditionalEnvVars(environment, getAdditionalEnvVarsMap(context));
 
         try
         {
@@ -249,7 +332,7 @@ public final class CTestMediaDriver implements TestMediaDriver
             final ProcessBuilder pb = new ProcessBuilder(aeronBinary.getAbsolutePath());
             if (null != driverOutputConsumer)
             {
-                stdoutFile = File.createTempFile(context.aeronDirectory().getName() + "-driver-", ".out");
+                stdoutFile = Files.createTempFile(context.aeronDirectory().getName() + "-driver-", ".out").toFile();
                 final String tmpName = stdoutFile.getName().substring(0, stdoutFile.getName().length() - 4) + ".err";
                 stderrFile = new File(stdoutFile.getParent(), tmpName);
                 driverOutputConsumer.outputFiles(context.aeronDirectoryName(), stdoutFile, stderrFile);
@@ -270,6 +353,18 @@ public final class CTestMediaDriver implements TestMediaDriver
         }
     }
 
+    private static void setIdleStrategy(
+        final HashMap<String, String> environment,
+        final String envKey,
+        final Supplier<IdleStrategy> idleStrategySupplier)
+    {
+        final IdleStrategy idleStrategy = idleStrategySupplier.get();
+        if (null != idleStrategy)
+        {
+            environment.put(envKey, idleStrategy.alias());
+        }
+    }
+
     public MediaDriver.Context context()
     {
         return context;
@@ -282,10 +377,10 @@ public final class CTestMediaDriver implements TestMediaDriver
 
     public AgentInvoker sharedAgentInvoker()
     {
-        throw new UnsupportedOperationException("Not supported in C media driver");
+        return null;
     }
 
-    public static void enableLossGenerationOnReceive(
+    public static void enableRandomLossOnReceive(
         final MediaDriver.Context context,
         final double rate,
         final long seed,
@@ -308,29 +403,65 @@ public final class CTestMediaDriver implements TestMediaDriver
         lossTransportEnv.put(UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR, interceptor);
         lossTransportEnv.put("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_LOSS_ARGS", lossArgs);
 
-        // This is a bit of an ugly hack to decorate the MediaDriver.Context with additional information.
-        C_DRIVER_ADDITIONAL_ENV_VARS.get().put(context, lossTransportEnv);
+        getAdditionalEnvVarsMap(context).putAll(lossTransportEnv);
+    }
+
+    public static void enableFixedLossOnReceive(
+        final MediaDriver.Context context,
+        final int termId,
+        final int termOffset,
+        final int length)
+    {
+        final Object2ObjectHashMap<String, String> fixedLossTransportEnv = new Object2ObjectHashMap<>();
+
+        final String interceptor = "fixed-loss";
+        final String fixedLossArgs = "term-id=" + termId +
+            "|term-offset=" + termOffset +
+            "|length=" + length;
+
+        fixedLossTransportEnv.put(UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR, interceptor);
+        fixedLossTransportEnv.put("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_FIXED_LOSS_ARGS", fixedLossArgs);
+
+        getAdditionalEnvVarsMap(context).putAll(fixedLossTransportEnv);
+    }
+
+    public static void enableMultiGapLossOnReceive(
+        final MediaDriver.Context context,
+        final int termId,
+        final int gapRadix,
+        final int gapLength,
+        final int totalGaps)
+    {
+        final Object2ObjectHashMap<String, String> multiGapLossTransportEnv = new Object2ObjectHashMap<>();
+
+        final String interceptor = "multi-gap-loss";
+        final String multiGapLossArgs = "term-id=" + termId +
+            "|gap-radix=" + gapRadix +
+            "|gap-length=" + gapLength +
+            "|total-gaps=" + totalGaps;
+
+        multiGapLossTransportEnv.put(UDP_CHANNEL_INCOMING_INTERCEPTORS_ENV_VAR, interceptor);
+        multiGapLossTransportEnv.put("AERON_UDP_CHANNEL_TRANSPORT_BINDINGS_MULTI_GAP_LOSS_ARGS", multiGapLossArgs);
+
+        getAdditionalEnvVarsMap(context).putAll(multiGapLossTransportEnv);
+    }
+
+    public static void dontCoalesceNaksOnReceiverByDefault(final MediaDriver.Context context)
+    {
+        getAdditionalEnvVarsMap(context).put("AERON_NAK_UNICAST_DELAY", "0");
+    }
+
+    public static Map<String, String> getAdditionalEnvVarsMap(final MediaDriver.Context context)
+    {
+        return C_DRIVER_ADDITIONAL_ENV_VARS.get().computeIfAbsent(context, c -> new IdentityHashMap<>());
     }
 
     private static void setLogging(final Map<String, String> environment)
     {
         environment.put("AERON_EVENT_LOG", System.getProperty(
             "aeron.event.log",
-            "admin,NAME_RESOLUTION_RESOLVE,FLOW_CONTROL_RECEIVER_ADDED,FLOW_CONTROL_RECEIVER_REMOVED"));
+            "admin"));
         environment.put("AERON_EVENT_LOG_DISABLE", System.getProperty("aeron.event.log.disable", ""));
-
-        final String driverAgentPath = System.getProperty(DRIVER_AGENT_PATH_PROP_NAME);
-        if (null == driverAgentPath)
-        {
-            return;
-        }
-
-        final File driverAgent = new File(driverAgentPath);
-        if (!driverAgent.exists())
-        {
-            throw new RuntimeException(
-                "Unable to find driver agent file at: " + DRIVER_AGENT_PATH_PROP_NAME + "=" + driverAgentPath);
-        }
     }
 
     private static void setTransportSecurity(final HashMap<String, String> environment)
@@ -393,7 +524,7 @@ public final class CTestMediaDriver implements TestMediaDriver
         else if (null != multicastFlowControlSupplier)
         {
             throw new RuntimeException("No equivalent C multicast flow control strategy for: " +
-                multicastFlowControlSupplier.getClass().getName());
+                multicastFlowControlSupplier.getClass());
         }
 
         final FlowControlSupplier unicastFlowControlSupplier = context.unicastFlowControlSupplier();
@@ -405,7 +536,7 @@ public final class CTestMediaDriver implements TestMediaDriver
         else if (null != unicastFlowControlSupplier)
         {
             throw new RuntimeException("No equivalent C unicast flow control strategy for: " +
-                multicastFlowControlSupplier.getClass().getName());
+                unicastFlowControlSupplier.getClass());
         }
     }
 
@@ -415,12 +546,42 @@ public final class CTestMediaDriver implements TestMediaDriver
             null : C_DRIVER_FLOW_CONTROL_STRATEGY_NAME_BY_TYPE.get(flowControlSupplier.getClass());
     }
 
-    private int terminateDriver()
+    private static final class ExitStatus
+    {
+        private final int exitCode;
+        private final String exitMessage;
+
+        private ExitStatus(final int exitCode, final String exitMessage)
+        {
+            this.exitCode = exitCode;
+            this.exitMessage = exitMessage;
+        }
+    }
+
+    private ExitStatus terminateDriver()
     {
         boolean isInterrupted = false;
         boolean requestTermination = true;
         try
         {
+            try
+            {
+                final int exitCode = aeronMediaDriverProcess.exitValue();
+                String exitMessage = "Process exited early";
+                if (!SystemUtil.isWindows())
+                {
+                    final int exitSignal = (0x7F & exitCode); // Essentially the same on Linux and macOS.
+                    if (0 != exitSignal)
+                    {
+                        exitMessage += " - signal " + exitSignal;
+                    }
+                }
+                return new ExitStatus(exitCode, exitMessage);
+            }
+            catch (final IllegalThreadStateException ignore)
+            {
+            }
+
             while (true)
             {
                 isInterrupted |= Thread.interrupted();
@@ -431,12 +592,13 @@ public final class CTestMediaDriver implements TestMediaDriver
                         requestTermination = false;
                         if (requestDriverTermination() && aeronMediaDriverProcess.waitFor(10, TimeUnit.SECONDS))
                         {
-                            return aeronMediaDriverProcess.exitValue();
+                            return new ExitStatus(aeronMediaDriverProcess.exitValue(), "Process shutdown cleanly");
                         }
                     }
 
                     aeronMediaDriverProcess.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
-                    return aeronMediaDriverProcess.exitValue();
+                    final int exitCode = aeronMediaDriverProcess.exitValue();
+                    return new ExitStatus(exitCode, "Process destroyed forcibly");
                 }
                 catch (final InterruptedException ex)
                 {
@@ -457,8 +619,7 @@ public final class CTestMediaDriver implements TestMediaDriver
     {
         try
         {
-            CommonContext.requestDriverTermination(new File(context.aeronDirectoryName()), null, 0, 0);
-            return true;
+            return CommonContext.requestDriverTermination(new File(context.aeronDirectoryName()), null, 0, 0);
         }
         catch (final Exception ex)
         {

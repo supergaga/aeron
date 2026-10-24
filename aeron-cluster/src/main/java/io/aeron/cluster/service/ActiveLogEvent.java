@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ class ActiveLogEvent
     final boolean isStartup;
     final Cluster.Role role;
     final String channel;
+    final boolean isStandby;
 
     ActiveLogEvent(
         final long logPosition,
@@ -37,6 +38,7 @@ class ActiveLogEvent
         final int streamId,
         final boolean isStartup,
         final Cluster.Role role,
+        final boolean isStandby,
         final String channel)
     {
         this.logPosition = logPosition;
@@ -47,6 +49,7 @@ class ActiveLogEvent
         this.isStartup = isStartup;
         this.role = role;
         this.channel = channel;
+        this.isStandby = isStandby;
     }
 
     public String toString()
@@ -59,6 +62,7 @@ class ActiveLogEvent
             ", streamId=" + streamId +
             ", isStartup=" + isStartup +
             ", role=" + role +
+            ", isStandby=" + isStandby +
             ", channel='" + channel + '\'' +
             '}';
     }

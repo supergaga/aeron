@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -84,7 +84,7 @@ inline int aeron_array_to_ptr_hash_map_init(
     size_t capacity = (size_t)aeron_find_next_power_of_two((int32_t)initial_capacity);
 
     map->load_factor = load_factor;
-    map->resize_threshold = (size_t)(load_factor * capacity);
+    map->resize_threshold = (size_t)(load_factor * (float)capacity);
     map->keys = NULL;
     map->values = NULL;
     map->capacity = capacity;
@@ -121,7 +121,7 @@ inline void aeron_array_to_ptr_hash_map_delete(aeron_array_to_ptr_hash_map_t *ma
 inline int aeron_array_to_ptr_hash_map_rehash(aeron_array_to_ptr_hash_map_t *map, size_t new_capacity)
 {
     size_t mask = new_capacity - 1;
-    map->resize_threshold = (size_t)(new_capacity * map->load_factor);
+    map->resize_threshold = (size_t)((float)new_capacity * map->load_factor);
 
     aeron_array_to_ptr_hash_map_key_t *tmp_keys;
     void **tmp_values;
@@ -135,6 +135,7 @@ inline int aeron_array_to_ptr_hash_map_rehash(aeron_array_to_ptr_hash_map_t *map
     if (aeron_alloc((void **)&tmp_values, (new_capacity * sizeof(void *))) < 0)
     {
         AERON_APPEND_ERR("%s", "Unable to allocate new values");
+        aeron_free(tmp_keys);
         return -1;
     }
 
@@ -197,11 +198,11 @@ inline int aeron_array_to_ptr_hash_map_put(
     if (NULL == old_value)
     {
         ++map->size;
-        map->keys[index].arr = key;
         map->keys[index].hash_code = hash_code;
         map->keys[index].arr_length = key_len;
     }
 
+    map->keys[index].arr = key;
     map->values[index] = value;
 
     if (map->size > map->resize_threshold)

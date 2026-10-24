@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,9 @@
 #include "agent/aeron_driver_agent.h"
 #include "aeron_driver_context.h"
 #include "aeron_alloc.h"
+#include "aeron_driver_version.h"
 #include "util/aeron_arrayutil.h"
+#include "util/aeron_strutil.h"
 #include "aeron_windows.h"
 
 #if !defined(HAVE_STRUCT_MMSGHDR)
@@ -67,12 +69,12 @@ aeron_driver_agent_log_event_t;
 static AERON_INIT_ONCE agent_is_initialized = AERON_INIT_ONCE_VALUE;
 static aeron_mpsc_rb_t logging_mpsc_rb;
 static uint8_t *rb_buffer = NULL;
-static FILE *logfp = NULL;
+
 static aeron_thread_t log_reader_thread;
 static aeron_driver_agent_dynamic_dissector_entry_t *dynamic_dissector_entries = NULL;
 static size_t num_dynamic_dissector_entries = 0;
 static int64_t dynamic_dissector_index = 0;
-static struct aeron_driver_agent_log_event_stct log_events[AERON_DRIVER_EVENT_NUM_ELEMENTS] =
+static aeron_driver_agent_log_event_t log_events[] =
     {
         { AERON_DRIVER_AGENT_EVENT_UNKNOWN_NAME,  AERON_DRIVER_AGENT_EVENT_TYPE_UNKNOWN, false },
         { "FRAME_IN",                             AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
@@ -125,48 +127,56 @@ static struct aeron_driver_agent_log_event_stct log_events[AERON_DRIVER_EVENT_NU
         { "FLOW_CONTROL_RECEIVER_ADDED",          AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
         { "FLOW_CONTROL_RECEIVER_REMOVED",        AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
         { "NAME_RESOLUTION_RESOLVE",              AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "GENERIC_MESSAGE",                      AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "NAME_RESOLUTION_LOOKUP",               AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "NAME_RESOLUTION_HOST_NAME",            AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "NAK_SENT",                             AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "RESEND",                               AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "CMD_IN_REMOVE_DESTINATION_BY_ID",      AERON_DRIVER_AGENT_EVENT_TYPE_CMD_IN,  false },
+        { "CMD_IN_REJECT_IMAGE",                  AERON_DRIVER_AGENT_EVENT_TYPE_CMD_IN,  false },
+        { "NAK_RECEIVED",                         AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
+        { "PUBLICATION_REVOKE",                   AERON_DRIVER_AGENT_EVENT_TYPE_CMD_IN,   false },
+        { "PUBLICATION_IMAGE_REVOKE",             AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
         { "ADD_DYNAMIC_DISSECTOR",                AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
         { "DYNAMIC_DISSECTOR_EVENT",              AERON_DRIVER_AGENT_EVENT_TYPE_OTHER,   false },
     };
 
-typedef struct aeron_driver_agent_name_resolver_state_stct
+#define AERON_DRIVER_EVENT_NUM_ELEMENTS (sizeof(log_events) / sizeof(aeron_driver_agent_log_event_t))
+
+size_t aeron_driver_agent_max_event_count(void)
 {
-    aeron_name_resolver_resolve_func_t delegate_resolve_func;
+    return AERON_DRIVER_EVENT_NUM_ELEMENTS;
 }
-aeron_driver_agent_name_resolver_state_t;
 
 aeron_mpsc_rb_t *aeron_driver_agent_mpsc_rb(void)
 {
     return &logging_mpsc_rb;
 }
 
-void aeron_driver_agent_format_date(char *str, size_t count, int64_t timestamp)
+void aeron_driver_agent_log_reader_do_start(const aeron_driver_agent_log_state_t *state)
 {
-    char time_buffer[80];
-    char msec_buffer[8];
-    char tz_buffer[8];
-    struct tm time;
-    time_t just_seconds = timestamp / 1000;
-    int64_t msec_after_sec = timestamp % 1000;
+    aeron_driver_agent_dissect_log_start(state->logfp, aeron_nano_clock(), state->start_time_ms);
+}
 
-    localtime_r(&just_seconds, &time);
+void aeron_driver_agent_log_reader_do_work(aeron_driver_agent_log_state_t *state, aeron_mpsc_rb_t *rb)
+{
+    const size_t messages_read = aeron_mpsc_rb_read(rb, aeron_driver_agent_buffer_read, state, 10);
 
-    strftime(time_buffer, sizeof(time_buffer) - 1, "%Y-%m-%d %H:%M:%S.", &time);
-    snprintf(msec_buffer, sizeof(msec_buffer) - 1, "%03" PRId64, msec_after_sec);
-    strftime(tz_buffer, sizeof(tz_buffer) - 1, "%z", &time);
-
-    snprintf(str, count, "%s%s%s", time_buffer, msec_buffer, tz_buffer);
+    if (0 == messages_read)
+    {
+        fflush(state->logfp);
+        aeron_nano_sleep(1000 * 1000);
+    }
 }
 
 static void *aeron_driver_agent_log_reader(void *arg)
 {
+    aeron_driver_agent_log_state_t *state = arg;
+    aeron_driver_agent_log_reader_do_start(state);
+
     while (true)
     {
-        size_t messages_read = aeron_mpsc_rb_read(&logging_mpsc_rb, aeron_driver_agent_log_dissector, NULL, 10);
-        if (0 == messages_read)
-        {
-            aeron_nano_sleep(1000 * 1000);
-        }
+        aeron_driver_agent_log_reader_do_work(state, &logging_mpsc_rb);
     }
 
     return NULL;
@@ -178,14 +188,15 @@ void aeron_driver_agent_logging_ring_buffer_init(void)
 
     if ((rb_buffer = (uint8_t *)malloc(rb_length)) == NULL)
     {
-        fprintf(stderr, "could not allocate ring buffer buffer. exiting.\n");
+        AERON_FPRINTF(stderr, "could not allocate ring buffer buffer. exiting.\n");
         exit(EXIT_FAILURE);
     }
+
     memset(rb_buffer, 0, rb_length);
 
     if (aeron_mpsc_rb_init(&logging_mpsc_rb, rb_buffer, rb_length) < 0)
     {
-        fprintf(stderr, "could not init logging mpwc_rb. exiting.\n");
+        AERON_FPRINTF(stderr, "could not init logging mpsc_rb. exiting.\n");
         exit(EXIT_FAILURE);
     }
 }
@@ -212,7 +223,7 @@ static aeron_driver_agent_event_t aeron_driver_agent_event_name_to_id(const char
         return AERON_DRIVER_EVENT_UNKNOWN_EVENT;
     }
 
-    for (int i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
+    for (size_t i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
     {
         const char *name = log_events[i].name;
         if (0 == strncmp(name, event_name, strlen(name) + 1))
@@ -226,7 +237,7 @@ static aeron_driver_agent_event_t aeron_driver_agent_event_name_to_id(const char
 
 static inline bool is_valid_event_id(const int id)
 {
-    return id >= 0 && id < AERON_DRIVER_EVENT_NUM_ELEMENTS;
+    return id >= 0 && id < (int)AERON_DRIVER_EVENT_NUM_ELEMENTS;
 }
 
 const char *aeron_driver_agent_event_name(const aeron_driver_agent_event_t id)
@@ -246,7 +257,7 @@ bool aeron_driver_agent_is_event_enabled(const aeron_driver_agent_event_t id)
 
 static void aeron_driver_agent_set_enabled_all_events(const bool is_enabled)
 {
-    for (int i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
+    for (size_t i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
     {
         const char *event_name = log_events[i].name;
         if (!aeron_driver_agent_is_unknown_event(event_name))
@@ -258,38 +269,25 @@ static void aeron_driver_agent_set_enabled_all_events(const bool is_enabled)
 
 static void aeron_driver_agent_set_enabled_admin_events(const bool is_enabled)
 {
-    log_events[AERON_DRIVER_EVENT_CMD_IN_ADD_PUBLICATION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_ADD_SUBSCRIPTION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_KEEPALIVE_CLIENT].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_REMOVE_PUBLICATION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_REMOVE_SUBSCRIPTION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_ADD_COUNTER].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_REMOVE_COUNTER].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_CLIENT_CLOSE].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_ADD_RCV_DESTINATION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_REMOVE_RCV_DESTINATION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_REMOVE_IMAGE_CLEANUP].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_REMOVE_PUBLICATION_CLEANUP].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_REMOVE_SUBSCRIPTION_CLEANUP].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_PUBLICATION_READY].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_AVAILABLE_IMAGE].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_ON_UNAVAILABLE_IMAGE].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_ON_OPERATION_SUCCESS].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_ERROR].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_SUBSCRIPTION_READY].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_COUNTER_READY].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_ON_UNAVAILABLE_COUNTER].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_OUT_ON_CLIENT_TIMEOUT].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_CMD_IN_TERMINATE_DRIVER].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_SEND_CHANNEL_CREATION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_RECEIVE_CHANNEL_CREATION].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_SEND_CHANNEL_CLOSE].enabled = is_enabled;
-    log_events[AERON_DRIVER_EVENT_RECEIVE_CHANNEL_CLOSE].enabled = is_enabled;
+    for (size_t i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
+    {
+        if (AERON_DRIVER_EVENT_FRAME_IN != i &&
+            AERON_DRIVER_EVENT_FRAME_OUT != i &&
+            AERON_DRIVER_EVENT_ADD_DYNAMIC_DISSECTOR != i &&
+            AERON_DRIVER_EVENT_DYNAMIC_DISSECTOR_EVENT != i)
+        {
+            const char *event_name = log_events[i].name;
+            if (!aeron_driver_agent_is_unknown_event(event_name))
+            {
+                log_events[i].enabled = is_enabled;
+            }
+        }
+    }
 }
 
 static void aeron_driver_agent_set_enabled_specific_events(const uint8_t type, const bool is_enabled)
 {
-    for (int i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
+    for (size_t i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
     {
         if (type == log_events[i].type)
         {
@@ -300,7 +298,7 @@ static void aeron_driver_agent_set_enabled_specific_events(const uint8_t type, c
 
 static bool any_event_enabled(const uint8_t type)
 {
-    for (int i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
+    for (size_t i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
     {
         if (type == log_events[i].type && log_events[i].enabled)
         {
@@ -313,23 +311,31 @@ static bool any_event_enabled(const uint8_t type)
 
 static aeron_driver_agent_event_t parse_event_name(const char *event_name)
 {
-    aeron_driver_agent_event_t event_id = aeron_driver_agent_event_name_to_id(event_name);
-    if (AERON_DRIVER_EVENT_UNKNOWN_EVENT == event_id)
+    if (0 == strncmp("SEND_NAK_MESSAGE", event_name, strlen("SEND_NAK_MESSAGE") + 1))
     {
-        const long id = strtol(event_name, NULL, 0);
-        if (is_valid_event_id((int)id) &&
-            !aeron_driver_agent_is_unknown_event(aeron_driver_agent_event_name((aeron_driver_agent_event_t)id)))
-        {
-            event_id = (aeron_driver_agent_event_t)id;
-        }
+        return AERON_DRIVER_EVENT_NAK_SENT;
     }
 
-    return event_id;
+    aeron_driver_agent_event_t event_id = aeron_driver_agent_event_name_to_id(event_name);
+    if (AERON_DRIVER_EVENT_UNKNOWN_EVENT != event_id)
+    {
+        return event_id;
+    }
+
+    const long id = strtol(event_name, NULL, 0);
+    if (is_valid_event_id((int)id) &&
+        !aeron_driver_agent_is_unknown_event(aeron_driver_agent_event_name((aeron_driver_agent_event_t)id)))
+    {
+        return (aeron_driver_agent_event_t)id;
+    }
+
+    return AERON_DRIVER_EVENT_UNKNOWN_EVENT;
 }
 
 static bool aeron_driver_agent_events_set_enabled(char const **events, const int num_events, const bool is_enabled)
 {
     bool result = false;
+
     for (int i = num_events - 1; i >= 0; i--)
     {
         const char *event_name = events[i];
@@ -347,6 +353,7 @@ static bool aeron_driver_agent_events_set_enabled(char const **events, const int
         else if (0 == strncmp("0x", event_name, 2))  // Legacy mask-based events
         {
             const uint64_t mask = strtoull(event_name, NULL, 0);
+
             if (0 != mask)
             {
                 if (mask >= 0xFFFFu)
@@ -400,6 +407,7 @@ static bool aeron_driver_agent_events_set_enabled(char const **events, const int
         else
         {
             const aeron_driver_agent_event_t event_id = parse_event_name(event_name);
+
             if (AERON_DRIVER_EVENT_UNKNOWN_EVENT != event_id)
             {
                 log_events[event_id].enabled = is_enabled;
@@ -407,7 +415,7 @@ static bool aeron_driver_agent_events_set_enabled(char const **events, const int
             }
             else
             {
-                fprintf(stderr, "unknown event code: '%s'\n", event_name);
+                AERON_FPRINTF(stderr, "unknown event code: '%s'\n", event_name);
             }
         }
     }
@@ -426,17 +434,16 @@ bool aeron_driver_agent_logging_events_init(const char *event_log, const char *e
     char *event_log_dup = strdup(event_log);
     if (NULL == event_log_dup)
     {
-        fprintf(stderr, "failed to copy logging events string\n");
+        AERON_FPRINTF(stderr, "failed to copy logging events string\n");
         return false;
     }
 
     char *events[AERON_DRIVER_EVENT_NUM_ELEMENTS];
-    const int num_events =
-        aeron_tokenise(event_log_dup, ',', AERON_DRIVER_EVENT_NUM_ELEMENTS, events);
+    const int num_events = aeron_tokenise(event_log_dup, ',', AERON_DRIVER_EVENT_NUM_ELEMENTS, events);
 
     if (num_events < 0)
     {
-        fprintf(stderr, "failed to parse logging events: '%s'\n", event_log);
+        AERON_FPRINTF(stderr, "failed to parse logging events: '%s'\n", event_log);
         aeron_free(event_log_dup);
         return false;
     }
@@ -450,7 +457,7 @@ bool aeron_driver_agent_logging_events_init(const char *event_log, const char *e
         event_log_disable_dup = strdup(event_log_disable);
         if (NULL == event_log_disable_dup)
         {
-            fprintf(stderr, "failed to copy logging disable events string\n");
+            AERON_FPRINTF(stderr, "failed to copy logging disable events string\n");
             aeron_free(event_log_dup);
             return false;
         }
@@ -460,7 +467,7 @@ bool aeron_driver_agent_logging_events_init(const char *event_log, const char *e
 
         if (num_events_disable < 0)
         {
-            fprintf(stderr, "failed to parse logging events: '%s'\n", event_log_disable);
+            AERON_FPRINTF(stderr, "failed to parse logging events: '%s'\n", event_log_disable);
             aeron_free(event_log_dup);
             aeron_free(event_log_disable_dup);
             return false;
@@ -481,7 +488,7 @@ bool aeron_driver_agent_logging_events_init(const char *event_log, const char *e
 
 void aeron_driver_agent_logging_events_free(void)
 {
-    for (int i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
+    for (size_t i = 0; i < AERON_DRIVER_EVENT_NUM_ELEMENTS; i++)
     {
         log_events[i].enabled = false;
     }
@@ -495,32 +502,44 @@ static void initialize_agent_logging(void)
 {
     const char *event_log_str = getenv(AERON_EVENT_LOG_ENV_VAR);
     const char *event_log_disable_str = getenv(AERON_EVENT_LOG_DISABLE_ENV_VAR);
+    aeron_driver_agent_log_state_t *state;
+
+    if (aeron_alloc((void **)&state, sizeof(aeron_driver_agent_log_state_t)) < 0)
+    {
+        AERON_FPRINTF(stderr, "%s\n", "failed to allocate memory for event logging");
+        exit(EXIT_FAILURE);
+    }
 
     if (aeron_driver_agent_logging_events_init(event_log_str, event_log_disable_str))
     {
-        logfp = stdout;
-        const char *log_filename = getenv(AERON_EVENT_LOG_FILENAME_ENV_VAR);
-        if (log_filename)
-        {
-            if ((logfp = fopen(log_filename, "a")) == NULL)
-            {
-                int errcode = errno;
+        state->logfp = stdout;
+        state->start_time_ms = aeron_epoch_clock();
+        state->file_max_length = INT64_MAX;
+        state->filename = getenv(AERON_EVENT_LOG_FILENAME_ENV_VAR);
+        state->next_file_index = 1;
 
-                fprintf(stderr, "could not fopen log file %s (%d, %s). exiting.\n",
-                    log_filename, errcode, strerror(errcode));
+        if (state->filename)
+        {
+            if (NULL == (state->logfp = aeron_open_file_append(state->filename)))
+            {
+                AERON_FPRINTF( stderr, "could not open log file %s. exiting.\n%s\n", state->filename, aeron_errmsg());
                 exit(EXIT_FAILURE);
             }
         }
 
-        aeron_driver_agent_logging_ring_buffer_init();
-
-        if (aeron_thread_create(&log_reader_thread, NULL, aeron_driver_agent_log_reader, NULL) != 0)
+        uint64_t file_max_length = 0;
+        if (0 == aeron_parse_size64(getenv(AERON_EVENT_LOG_FILE_MAX_LENGTH_ENV_VAR), &file_max_length))
         {
-            fprintf(stderr, "could not start log reader thread. exiting.\n");
-            exit(EXIT_FAILURE);
+            state->file_max_length = (INT64_MAX < file_max_length) ? INT64_MAX : (int64_t)file_max_length;
         }
 
-        fprintf(logfp, "%s\n", aeron_driver_agent_dissect_log_start(aeron_nano_clock(), aeron_epoch_clock()));
+        aeron_driver_agent_logging_ring_buffer_init();
+
+        if (aeron_thread_create(&log_reader_thread, NULL, aeron_driver_agent_log_reader, state) != 0)
+        {
+            AERON_FPRINTF(stderr, "could not start log reader thread. exiting.\n");
+            exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -600,8 +619,53 @@ static aeron_driver_agent_event_t command_id_to_driver_event_id(const int32_t ms
         case AERON_RESPONSE_ON_CLIENT_TIMEOUT:
             return AERON_DRIVER_EVENT_CMD_OUT_ON_CLIENT_TIMEOUT;
 
+        case AERON_COMMAND_REMOVE_DESTINATION_BY_ID:
+            return AERON_DRIVER_EVENT_CMD_IN_REMOVE_DESTINATION_BY_ID;
+
+        case AERON_COMMAND_REJECT_IMAGE:
+            return AERON_DRIVER_EVENT_CMD_IN_REJECT_IMAGE;
+
         default:
             return AERON_DRIVER_EVENT_UNKNOWN_EVENT;
+    }
+}
+
+static void aeron_driver_agent_log_nak_message(
+    const aeron_driver_agent_event_t log_event,
+    const struct sockaddr_storage *address,
+    const int32_t session_id,
+    const int32_t stream_id,
+    const int32_t term_id,
+    const int32_t term_offset,
+    const int32_t nak_length,
+    const size_t channel_length,
+    const char *channel)
+{
+    int32_t offset = aeron_mpsc_rb_try_claim(
+        &logging_mpsc_rb,
+        log_event,
+        sizeof(aeron_driver_agent_nak_message_header_t) +
+            channel_length);
+
+    if (offset > 0)
+    {
+        uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
+        aeron_driver_agent_nak_message_header_t *hdr =
+            (aeron_driver_agent_nak_message_header_t *)ptr;
+
+        hdr->time_ns = aeron_nano_clock();
+        memcpy(&hdr->address, address, sizeof(hdr->address));
+        hdr->session_id = session_id;
+        hdr->stream_id = stream_id;
+        hdr->term_id = term_id;
+        hdr->term_offset = term_offset;
+        hdr->nak_length = nak_length;
+        hdr->channel_length = (int32_t)channel_length;
+
+        ptr += sizeof(aeron_driver_agent_nak_message_header_t);
+        memcpy(ptr, channel, channel_length);
+
+        aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
     }
 }
 
@@ -640,6 +704,7 @@ void aeron_driver_agent_conductor_to_client_interceptor(
 
     const size_t command_length = sizeof(aeron_driver_agent_cmd_log_header_t) + length;
     int32_t offset = aeron_mpsc_rb_try_claim(&logging_mpsc_rb, event_id, command_length);
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
@@ -652,26 +717,25 @@ void aeron_driver_agent_conductor_to_client_interceptor(
     }
 }
 
-void aeron_driver_agent_log_frame(
-    int32_t msg_type_id, const struct msghdr *msghdr, int result, int32_t message_len)
+void aeron_driver_agent_log_frame(int32_t msg_type_id, const struct msghdr *msghdr, int32_t message_len)
 {
     const int32_t copy_length = message_len < AERON_MAX_FRAME_LENGTH ? message_len : AERON_MAX_FRAME_LENGTH;
     const size_t command_length =
         sizeof(aeron_driver_agent_frame_log_header_t) + msghdr->msg_namelen + copy_length;
     int32_t offset = aeron_mpsc_rb_try_claim(&logging_mpsc_rb, msg_type_id, command_length);
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
         aeron_driver_agent_frame_log_header_t *hdr = (aeron_driver_agent_frame_log_header_t *)ptr;
 
         hdr->time_ns = aeron_nano_clock();
-        hdr->result = (int32_t)result;
         hdr->sockaddr_len = msghdr->msg_namelen;
         hdr->message_len = message_len;
 
         if (msghdr->msg_iovlen > 1)
         {
-            fprintf(stderr, "only aware of 1 iov. %d iovs detected.\n", (int)msghdr->msg_iovlen);
+            AERON_FPRINTF(stderr, "only aware of 1 iov. %d iovs detected.\n", (int)msghdr->msg_iovlen);
         }
 
         ptr += sizeof(aeron_driver_agent_frame_log_header_t);
@@ -685,20 +749,20 @@ void aeron_driver_agent_log_frame(
 }
 
 void aeron_driver_agent_log_frame_iov(
-    int32_t msg_type_id, const struct sockaddr_storage *address, struct iovec *iov, int32_t message_len, int result)
+    int32_t msg_type_id, const struct sockaddr_storage *address, struct iovec *iov, int32_t message_len)
 {
     const int32_t copy_length = message_len < AERON_MAX_FRAME_LENGTH ? message_len : AERON_MAX_FRAME_LENGTH;
     size_t address_length = AERON_ADDR_LEN(address);
     const size_t command_length =
         sizeof(aeron_driver_agent_frame_log_header_t) + address_length + copy_length;
     int32_t offset = aeron_mpsc_rb_try_claim(&logging_mpsc_rb, msg_type_id, command_length);
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
         aeron_driver_agent_frame_log_header_t *hdr = (aeron_driver_agent_frame_log_header_t *)ptr;
 
         hdr->time_ns = aeron_nano_clock();
-        hdr->result = (int32_t)result;
         hdr->sockaddr_len = (int32_t)address_length;
         hdr->message_len = message_len;
 
@@ -712,7 +776,6 @@ void aeron_driver_agent_log_frame_iov(
     }
 }
 
-
 int aeron_driver_agent_outgoing_send(
     void *interceptor_state,
     aeron_udp_channel_outgoing_interceptor_t *delegate,
@@ -722,22 +785,24 @@ int aeron_driver_agent_outgoing_send(
     size_t iov_length,
     int64_t *bytes_sent)
 {
-    int result = delegate->outgoing_send_func(
-        delegate->interceptor_state, delegate->next_interceptor, transport, address, iov, iov_length, bytes_sent);
-
-    for (int i = 0; i < result; i++)
+    for (size_t i = 0; i < iov_length; i++)
     {
         aeron_driver_agent_log_frame_iov(
             AERON_DRIVER_EVENT_FRAME_OUT,
             address,
             &iov[i],
-            iov[i].iov_len,
-            result);
+            (int32_t)iov[i].iov_len);
+    }
+
+    int result = 0;
+    if (NULL != delegate)
+    {
+        result = delegate->outgoing_send_func(
+            delegate->interceptor_state, delegate->next_interceptor, transport, address, iov, iov_length, bytes_sent);
     }
 
     return result;
 }
-
 
 void aeron_driver_agent_incoming_msg(
     void *interceptor_state,
@@ -763,35 +828,28 @@ void aeron_driver_agent_incoming_msg(
     message.msg_controllen = 0;
     message.msg_namelen = AERON_ADDR_LEN(addr);
 
-    aeron_driver_agent_log_frame(AERON_DRIVER_EVENT_FRAME_IN, &message, (int32_t)length, (int32_t)length);
+    aeron_driver_agent_log_frame(AERON_DRIVER_EVENT_FRAME_IN, &message, (int32_t)length);
 
-    delegate->incoming_func(
-        delegate->interceptor_state,
-        delegate->next_interceptor,
-        transport,
-        receiver_clientd,
-        endpoint_clientd,
-        destination_clientd,
-        buffer,
-        length,
-        addr,
-        media_timestamp);
+    if (NULL != delegate)
+    {
+        delegate->incoming_func(
+            delegate->interceptor_state,
+            delegate->next_interceptor,
+            transport,
+            receiver_clientd,
+            endpoint_clientd,
+            destination_clientd,
+            buffer,
+            length,
+            addr,
+            media_timestamp);
+    }
 }
 
-void aeron_untethered_subscription_state_change(
+void aeron_driver_agent_untethered_subscription_state_change(
     aeron_tetherable_position_t *tetherable_position,
     int64_t now_ns,
-    aeron_subscription_tether_state_t new_state,
-    int32_t stream_id,
-    int32_t session_id)
-{
-    tetherable_position->state = new_state;
-    tetherable_position->time_of_last_update_ns = now_ns;
-}
-
-void aeron_driver_agent_untethered_subscription_state_change_interceptor(
-    aeron_tetherable_position_t *tetherable_position,
-    int64_t now_ns,
+    aeron_subscription_tether_state_t old_state,
     aeron_subscription_tether_state_t new_state,
     int32_t stream_id,
     int32_t session_id)
@@ -800,6 +858,7 @@ void aeron_driver_agent_untethered_subscription_state_change_interceptor(
         &logging_mpsc_rb,
         AERON_DRIVER_EVENT_UNTETHERED_SUBSCRIPTION_STATE_CHANGE,
         sizeof(aeron_driver_agent_untethered_subscription_state_change_log_header_t));
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
@@ -810,10 +869,8 @@ void aeron_driver_agent_untethered_subscription_state_change_interceptor(
         hdr->subscription_id = tetherable_position->subscription_registration_id;
         hdr->stream_id = stream_id;
         hdr->session_id = session_id;
-        hdr->old_state = tetherable_position->state;
+        hdr->old_state = old_state;
         hdr->new_state = new_state;
-
-        aeron_untethered_subscription_state_change(tetherable_position, now_ns, new_state, stream_id, session_id);
 
         aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
     }
@@ -823,6 +880,7 @@ void log_name_resolution_neighbor_change(const aeron_driver_agent_event_t id, co
 {
     int32_t offset = aeron_mpsc_rb_try_claim(
         &logging_mpsc_rb, id, sizeof(aeron_driver_agent_log_header_t) + AERON_ADDR_LEN(addr));
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
@@ -860,6 +918,7 @@ void log_flow_control_on_receiver_change(
         &logging_mpsc_rb,
         event_id,
         sizeof(aeron_driver_agent_flow_control_receiver_change_log_header_t) + channel_length);
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
@@ -915,7 +974,7 @@ void aeron_driver_agent_flow_control_on_receiver_removed(
         receiver_count);
 }
 
-int32_t aeron_driver_agent_socket_address_length(struct sockaddr_storage *address)
+int32_t aeron_driver_agent_socket_address_length(const struct sockaddr_storage *address)
 {
     if (NULL == address)
     {
@@ -933,9 +992,170 @@ int32_t aeron_driver_agent_socket_address_length(struct sockaddr_storage *addres
     return 0;
 }
 
+void aeron_driver_agent_send_nak_message(
+    const struct sockaddr_storage *address,
+    const int32_t session_id,
+    const int32_t stream_id,
+    const int32_t term_id,
+    const int32_t term_offset,
+    const int32_t nak_length,
+    const size_t channel_length,
+    const char *channel)
+{
+    aeron_driver_agent_log_nak_message(
+        AERON_DRIVER_EVENT_NAK_SENT,
+        address,
+        session_id,
+        stream_id,
+        term_id,
+        term_offset,
+        nak_length,
+        channel_length,
+        channel);
+}
+
+void aeron_driver_agent_on_nak_message(
+    const struct sockaddr_storage *address,
+    const int32_t session_id,
+    const int32_t stream_id,
+    const int32_t term_id,
+    const int32_t term_offset,
+    const int32_t nak_length,
+    const size_t channel_length,
+    const char *channel)
+{
+    aeron_driver_agent_log_nak_message(
+        AERON_DRIVER_EVENT_NAK_RECEIVED,
+        address,
+        session_id,
+        stream_id,
+        term_id,
+        term_offset,
+        nak_length,
+        channel_length,
+        channel);
+}
+
+void aeron_driver_agent_resend(
+    const int32_t session_id,
+    const int32_t stream_id,
+    const int32_t term_id,
+    const int32_t term_offset,
+    const int32_t resend_length,
+    const size_t channel_length,
+    const char *channel)
+{
+    int32_t offset = aeron_mpsc_rb_try_claim(
+        &logging_mpsc_rb,
+        AERON_DRIVER_EVENT_RESEND,
+        sizeof(aeron_driver_agent_resend_header_t) +
+            channel_length);
+
+    if (offset > 0)
+    {
+        uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
+        aeron_driver_agent_resend_header_t *hdr =
+            (aeron_driver_agent_resend_header_t *)ptr;
+
+        hdr->time_ns = aeron_nano_clock();
+        hdr->session_id = session_id;
+        hdr->stream_id = stream_id;
+        hdr->term_id = term_id;
+        hdr->term_offset = term_offset;
+        hdr->resend_length = resend_length;
+        hdr->channel_length = (int32_t)channel_length;
+
+        ptr += sizeof(aeron_driver_agent_resend_header_t);
+        memcpy(ptr, channel, channel_length);
+
+        aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
+    }
+}
+
+void aeron_driver_agent_publication_revoke(
+    int64_t revoked_pos,
+    int32_t session_id,
+    int32_t stream_id,
+    size_t channel_length,
+    const char *channel)
+{
+    int32_t offset = aeron_mpsc_rb_try_claim(
+        &logging_mpsc_rb,
+        AERON_DRIVER_EVENT_PUBLICATION_REVOKE,
+        sizeof(aeron_driver_agent_publication_revoke_header_t) +
+            channel_length);
+
+    if (offset > 0)
+    {
+        uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
+        aeron_driver_agent_publication_revoke_header_t *hdr =
+            (aeron_driver_agent_publication_revoke_header_t *)ptr;
+
+        hdr->time_ns = aeron_nano_clock();
+        hdr->revoked_pos = revoked_pos;
+        hdr->session_id = session_id;
+        hdr->stream_id = stream_id;
+        hdr->channel_length = (int32_t)channel_length;
+
+        ptr += sizeof(aeron_driver_agent_publication_revoke_header_t);
+        memcpy(ptr, channel, channel_length);
+
+        aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
+    }
+}
+
+void aeron_driver_agent_publication_image_revoke(
+    int64_t revoked_pos,
+    int32_t session_id,
+    int32_t stream_id,
+    size_t channel_length,
+    const char *channel)
+{
+    int32_t offset = aeron_mpsc_rb_try_claim(
+        &logging_mpsc_rb,
+        AERON_DRIVER_EVENT_PUBLICATION_IMAGE_REVOKE,
+        sizeof(aeron_driver_agent_publication_image_revoke_header_t) +
+            channel_length);
+
+    if (offset > 0)
+    {
+        uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
+        aeron_driver_agent_publication_image_revoke_header_t *hdr =
+            (aeron_driver_agent_publication_image_revoke_header_t *)ptr;
+
+        hdr->time_ns = aeron_nano_clock();
+        hdr->revoked_pos = revoked_pos;
+        hdr->session_id = session_id;
+        hdr->stream_id = stream_id;
+        hdr->channel_length = (int32_t)channel_length;
+
+        ptr += sizeof(aeron_driver_agent_publication_image_revoke_header_t);
+        memcpy(ptr, channel, channel_length);
+
+        aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
+    }
+}
+
+void aeron_driver_agent_socket_address_copy(uint8_t *ptr, const struct sockaddr_storage *address, const size_t address_length)
+{
+    if (AF_INET == address->ss_family)
+    {
+        struct sockaddr_in *address_in = (struct sockaddr_in *)address;
+        memcpy(ptr, &address_in->sin_addr, address_length);
+    }
+    else if (AF_INET6 == address->ss_family)
+    {
+        struct sockaddr_in6 *address_in6 = (struct sockaddr_in6 *)address;
+        memcpy(ptr, &address_in6->sin6_addr, address_length);
+    }
+}
+
+
 void aeron_driver_agent_name_resolver_on_resolve(
     aeron_name_resolver_t *name_resolver,
+    int64_t duration_ns,
     const char *hostname,
+    bool is_re_resolution,
     struct sockaddr_storage *address)
 {
     const size_t resolverNameFullLength = strlen(name_resolver->name);
@@ -963,9 +1183,11 @@ void aeron_driver_agent_name_resolver_on_resolve(
             (aeron_driver_agent_name_resolver_resolve_log_header_t *)ptr;
 
         hdr->time_ns = aeron_nano_clock();
+        hdr->duration_ns = duration_ns;
         hdr->resolver_name_length = (int32_t)resolverNameLength;
         hdr->hostname_length = (int32_t)hostnameLength;
         hdr->address_length = (int32_t)addressLength;
+        hdr->is_re_resolution = is_re_resolution;
 
         uint8_t *bodyPtr = ptr + sizeof(aeron_driver_agent_name_resolver_resolve_log_header_t);
         memcpy(bodyPtr, name_resolver->name, (size_t)resolverNameLength);
@@ -973,23 +1195,91 @@ void aeron_driver_agent_name_resolver_on_resolve(
 
         if (NULL != address)
         {
-            if (AF_INET == address->ss_family)
-            {
-                struct sockaddr_in *address_in = (struct sockaddr_in *)address;
-                memcpy(
-                    bodyPtr + resolverNameLength + hostnameLength,
-                    &address_in->sin_addr,
-                    addressLength);
-            }
-            else if (AF_INET6 == address->ss_family)
-            {
-                struct sockaddr_in6 *address_in6 = (struct sockaddr_in6 *)address;
-                memcpy(
-                    bodyPtr + resolverNameLength + hostnameLength,
-                    &address_in6->sin6_addr,
-                    addressLength);
-            }
+            aeron_driver_agent_socket_address_copy(
+                bodyPtr + resolverNameLength + hostnameLength,
+                address,
+                addressLength);
         }
+
+        aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
+    }
+}
+
+void aeron_driver_agent_name_resolver_on_lookup(
+    aeron_name_resolver_t *name_resolver,
+    int64_t duration_ns,
+    const char *name,
+    bool is_re_lookup,
+    const char *resolved_name)
+{
+    const size_t resolverNameFullLength = strlen(name_resolver->name);
+    const size_t resolverNameLength = resolverNameFullLength < AERON_MAX_HOSTNAME_LEN ?
+        resolverNameFullLength : AERON_MAX_HOSTNAME_LEN;
+
+    const size_t nameFullLength = strlen(name);
+    const size_t nameLength = nameFullLength < AERON_MAX_HOSTNAME_LEN ? nameFullLength : AERON_MAX_HOSTNAME_LEN;
+
+    const size_t resolvedNameFullLength = NULL != resolved_name ? strlen(resolved_name) : 0;
+    const size_t resolvedNameLength = resolvedNameFullLength < AERON_MAX_HOSTNAME_LEN ?
+        resolvedNameFullLength : AERON_MAX_HOSTNAME_LEN;
+
+    int32_t offset = aeron_mpsc_rb_try_claim(
+        &logging_mpsc_rb,
+        AERON_DRIVER_EVENT_NAME_RESOLUTION_LOOKUP,
+        sizeof(aeron_driver_agent_name_resolver_lookup_log_header_t) +
+            resolverNameLength +
+            nameLength +
+            resolvedNameLength);
+
+    if (offset > 0)
+    {
+        uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
+        aeron_driver_agent_name_resolver_lookup_log_header_t *hdr =
+            (aeron_driver_agent_name_resolver_lookup_log_header_t *)ptr;
+
+        hdr->time_ns = aeron_nano_clock();
+        hdr->duration_ns = duration_ns;
+        hdr->resolver_name_length = (int32_t)resolverNameLength;
+        hdr->name_length = (int32_t)nameLength;
+        hdr->resolved_name_length = (int32_t)resolvedNameLength;
+        hdr->is_re_lookup = is_re_lookup;
+
+        uint8_t *bodyPtr = ptr + sizeof(aeron_driver_agent_name_resolver_lookup_log_header_t);
+        memcpy(bodyPtr, name_resolver->name, (size_t)resolverNameLength);
+        memcpy(bodyPtr + resolverNameLength, name, (size_t)nameLength);
+
+        if (NULL != resolved_name)
+        {
+            memcpy(bodyPtr + resolverNameLength + nameLength, resolved_name, (size_t)resolvedNameLength);
+        }
+
+        aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
+    }
+}
+
+void aeron_driver_agent_name_resolver_on_host_name(int64_t duration_ns, const char *host_name)
+{
+    const size_t hostNameFullLength = strlen(host_name);
+    const size_t hostNameLength =
+        hostNameFullLength < AERON_MAX_HOSTNAME_LEN ? hostNameFullLength : AERON_MAX_HOSTNAME_LEN;
+
+    int32_t offset = aeron_mpsc_rb_try_claim(
+        &logging_mpsc_rb,
+        AERON_DRIVER_EVENT_NAME_RESOLUTION_HOST_NAME,
+        sizeof(aeron_driver_agent_name_resolver_host_name_log_header_t) + hostNameLength);
+
+    if (offset > 0)
+    {
+        uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
+        aeron_driver_agent_name_resolver_host_name_log_header_t *hdr =
+            (aeron_driver_agent_name_resolver_host_name_log_header_t *)ptr;
+
+        hdr->time_ns = aeron_nano_clock();
+        hdr->duration_ns = duration_ns;
+        hdr->host_name_length = (int32_t)hostNameLength;
+
+        uint8_t *bodyPtr = ptr + sizeof(aeron_driver_agent_name_resolver_host_name_log_header_t);
+        memcpy(bodyPtr, host_name, (size_t)hostNameLength);
 
         aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);
     }
@@ -1001,157 +1291,217 @@ int aeron_driver_agent_interceptor_init(
     return 0;
 }
 
+aeron_udp_channel_interceptor_bindings_t *aeron_driver_agent_new_interceptor(void)
+{
+    aeron_udp_channel_interceptor_bindings_t *interceptor = NULL;
+
+    if (aeron_alloc((void **)&interceptor, sizeof(aeron_udp_channel_interceptor_bindings_t)) < 0)
+    {
+        AERON_APPEND_ERR("%s", "failed to allocate interceptor bindings for logging agent");
+        return NULL;
+    }
+
+    interceptor->incoming_init_func = aeron_driver_agent_interceptor_init;
+    interceptor->incoming_close_func = NULL;
+    interceptor->incoming_func = NULL;
+    interceptor->incoming_transport_notification_func = NULL;
+    interceptor->incoming_publication_notification_func = NULL;
+    interceptor->incoming_image_notification_func = NULL;
+    interceptor->outgoing_init_func = aeron_driver_agent_interceptor_init;
+    interceptor->outgoing_close_func = NULL;
+    interceptor->outgoing_send_func = NULL;
+    interceptor->outgoing_transport_notification_func = NULL;
+    interceptor->outgoing_publication_notification_func = NULL;
+    interceptor->outgoing_image_notification_func = NULL;
+
+    interceptor->meta_info.name = "logging";
+    interceptor->meta_info.type = "interceptor";
+    interceptor->meta_info.source_symbol = (aeron_fptr_t)aeron_driver_agent_context_init;
+    interceptor->meta_info.next_interceptor_bindings = NULL;
+
+    return interceptor;
+}
+
 int aeron_driver_agent_init_logging_events_interceptors(aeron_driver_context_t *context)
 {
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_FRAME_IN))
     {
-        aeron_udp_channel_interceptor_bindings_t *incoming_bindings = NULL;
-
-        if (aeron_alloc((void **)&incoming_bindings, sizeof(aeron_udp_channel_interceptor_bindings_t)) < 0)
+        aeron_udp_channel_interceptor_bindings_t *interceptors = context->udp_channel_incoming_interceptor_bindings;
+        aeron_udp_channel_interceptor_bindings_t *first_interceptor = aeron_driver_agent_new_interceptor();
+        if (NULL == first_interceptor)
         {
-            AERON_APPEND_ERR("%s", "Incoming interceptor bindings for logging agent");
+            AERON_APPEND_ERR("%s", "");
             return -1;
         }
+        first_interceptor->incoming_func = aeron_driver_agent_incoming_msg;
+        first_interceptor->meta_info.name = "incoming pre logging";
+        first_interceptor->meta_info.next_interceptor_bindings = interceptors;
+        context->udp_channel_incoming_interceptor_bindings = first_interceptor;
 
-        incoming_bindings->outgoing_init_func = NULL;
-        incoming_bindings->outgoing_close_func = NULL;
-        incoming_bindings->outgoing_send_func = NULL;
-        incoming_bindings->incoming_init_func = aeron_driver_agent_interceptor_init;
-        incoming_bindings->incoming_close_func = NULL;
-        incoming_bindings->incoming_func = aeron_driver_agent_incoming_msg;
-        incoming_bindings->outgoing_transport_notification_func = NULL;
-        incoming_bindings->outgoing_publication_notification_func = NULL;
-        incoming_bindings->outgoing_image_notification_func = NULL;
-        incoming_bindings->incoming_transport_notification_func = NULL;
-        incoming_bindings->incoming_publication_notification_func = NULL;
-        incoming_bindings->incoming_image_notification_func = NULL;
-
-        incoming_bindings->meta_info.name = "logging";
-        incoming_bindings->meta_info.type = "interceptor";
-        incoming_bindings->meta_info.source_symbol = (aeron_fptr_t)aeron_driver_agent_context_init;
-        incoming_bindings->meta_info.next_interceptor_bindings = NULL;
-
-        if (NULL == context->udp_channel_incoming_interceptor_bindings)
+        if (NULL != interceptors)
         {
-            context->udp_channel_incoming_interceptor_bindings = incoming_bindings;
-        }
-        else
-        {
-            aeron_udp_channel_interceptor_bindings_t *iter = context->udp_channel_incoming_interceptor_bindings;
-            while (NULL != iter->meta_info.next_interceptor_bindings)
+            aeron_udp_channel_interceptor_bindings_t *last_interceptor = aeron_driver_agent_new_interceptor();
+            if (NULL == last_interceptor)
             {
-                iter = (aeron_udp_channel_interceptor_bindings_t *)iter->meta_info.next_interceptor_bindings;
+                AERON_APPEND_ERR("%s", "");
+                return -1;
             }
 
-            iter->meta_info.next_interceptor_bindings = incoming_bindings;
+            last_interceptor->incoming_func = aeron_driver_agent_incoming_msg;
+            last_interceptor->meta_info.name = "incoming post logging";
+
+            while (NULL != interceptors->meta_info.next_interceptor_bindings)
+            {
+                interceptors = (aeron_udp_channel_interceptor_bindings_t *)interceptors->meta_info.next_interceptor_bindings;
+            }
+            interceptors->meta_info.next_interceptor_bindings = last_interceptor;
         }
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_FRAME_OUT))
     {
-        aeron_udp_channel_interceptor_bindings_t *outgoing_bindings = NULL;
-
-        if (aeron_alloc((void **)&outgoing_bindings, sizeof(aeron_udp_channel_interceptor_bindings_t)) < 0)
+        aeron_udp_channel_interceptor_bindings_t *interceptors = context->udp_channel_outgoing_interceptor_bindings;
+        aeron_udp_channel_interceptor_bindings_t *first_interceptor = aeron_driver_agent_new_interceptor();
+        if (NULL == first_interceptor)
         {
-            AERON_APPEND_ERR("%s", "Outgoing interceptor bindings for logging agent");
+            AERON_APPEND_ERR("%s", "");
             return -1;
         }
 
-        outgoing_bindings->outgoing_init_func = aeron_driver_agent_interceptor_init;
-        outgoing_bindings->outgoing_close_func = NULL;
-        outgoing_bindings->outgoing_send_func = aeron_driver_agent_outgoing_send;
-        outgoing_bindings->incoming_init_func = NULL;
-        outgoing_bindings->incoming_close_func = NULL;
-        outgoing_bindings->incoming_func = NULL;
-        outgoing_bindings->outgoing_transport_notification_func = NULL;
-        outgoing_bindings->outgoing_publication_notification_func = NULL;
-        outgoing_bindings->outgoing_image_notification_func = NULL;
-        outgoing_bindings->incoming_transport_notification_func = NULL;
-        outgoing_bindings->incoming_publication_notification_func = NULL;
-        outgoing_bindings->incoming_image_notification_func = NULL;
+        first_interceptor->outgoing_send_func = aeron_driver_agent_outgoing_send;
+        first_interceptor->meta_info.name = "outgoing pre logging";
+        first_interceptor->meta_info.next_interceptor_bindings = interceptors;
+        context->udp_channel_outgoing_interceptor_bindings = first_interceptor;
 
-        outgoing_bindings->meta_info.name = "logging";
-        outgoing_bindings->meta_info.type = "interceptor";
-        outgoing_bindings->meta_info.source_symbol = (aeron_fptr_t)aeron_driver_agent_context_init;
-        outgoing_bindings->meta_info.next_interceptor_bindings = context->udp_channel_outgoing_interceptor_bindings;
+        if (NULL != interceptors)
+        {
+            aeron_udp_channel_interceptor_bindings_t *last_interceptor = aeron_driver_agent_new_interceptor();
+            if (NULL == last_interceptor)
+            {
+                AERON_APPEND_ERR("%s", "");
+                return -1;
+            }
 
-        context->udp_channel_outgoing_interceptor_bindings = outgoing_bindings;
+            last_interceptor->outgoing_send_func = aeron_driver_agent_outgoing_send;
+            last_interceptor->meta_info.name = "outgoing post logging";
+
+            while (NULL != interceptors->meta_info.next_interceptor_bindings)
+            {
+                interceptors = (aeron_udp_channel_interceptor_bindings_t *)interceptors->meta_info.next_interceptor_bindings;
+            }
+            interceptors->meta_info.next_interceptor_bindings = last_interceptor;
+        }
     }
 
     if (any_event_enabled(AERON_DRIVER_AGENT_EVENT_TYPE_CMD_IN))
     {
-        context->to_driver_interceptor_func = aeron_driver_agent_conductor_to_driver_interceptor;
+        context->log.to_driver_interceptor = aeron_driver_agent_conductor_to_driver_interceptor;
     }
 
     if (any_event_enabled(AERON_DRIVER_AGENT_EVENT_TYPE_CMD_OUT))
     {
-        context->to_client_interceptor_func = aeron_driver_agent_conductor_to_client_interceptor;
+        context->log.to_client_interceptor = aeron_driver_agent_conductor_to_client_interceptor;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_REMOVE_PUBLICATION_CLEANUP))
     {
-        context->remove_publication_cleanup_func = aeron_driver_agent_remove_publication_cleanup;
+        context->log.remove_publication_cleanup = aeron_driver_agent_remove_publication_cleanup;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_REMOVE_SUBSCRIPTION_CLEANUP))
     {
-        context->remove_subscription_cleanup_func = aeron_driver_agent_remove_subscription_cleanup;
+        context->log.remove_subscription_cleanup = aeron_driver_agent_remove_subscription_cleanup;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_REMOVE_IMAGE_CLEANUP))
     {
-        context->remove_image_cleanup_func = aeron_driver_agent_remove_image_cleanup;
+        context->log.remove_image_cleanup = aeron_driver_agent_remove_image_cleanup;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_SEND_CHANNEL_CREATION))
     {
-        context->sender_proxy_on_add_endpoint_func = aeron_driver_agent_sender_proxy_on_add_endpoint;
+        context->log.sender_proxy_on_add_endpoint = aeron_driver_agent_sender_proxy_on_add_endpoint;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_SEND_CHANNEL_CLOSE))
     {
-        context->sender_proxy_on_remove_endpoint_func = aeron_driver_agent_sender_proxy_on_remove_endpoint;
+        context->log.sender_proxy_on_remove_endpoint = aeron_driver_agent_sender_proxy_on_remove_endpoint;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_RECEIVE_CHANNEL_CREATION))
     {
-        context->receiver_proxy_on_add_endpoint_func = aeron_driver_agent_receiver_proxy_on_add_endpoint;
+        context->log.receiver_proxy_on_add_endpoint = aeron_driver_agent_receiver_proxy_on_add_endpoint;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_RECEIVE_CHANNEL_CLOSE))
     {
-        context->receiver_proxy_on_remove_endpoint_func = aeron_driver_agent_receiver_proxy_on_remove_endpoint;
+        context->log.receiver_proxy_on_remove_endpoint = aeron_driver_agent_receiver_proxy_on_remove_endpoint;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_UNTETHERED_SUBSCRIPTION_STATE_CHANGE))
     {
-        context->untethered_subscription_state_change_func =
-            aeron_driver_agent_untethered_subscription_state_change_interceptor;
+        context->log.untethered_subscription_on_state_change =
+            aeron_driver_agent_untethered_subscription_state_change;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAME_RESOLUTION_NEIGHBOR_ADDED))
     {
-        context->name_resolution_on_neighbor_added_func = aeron_driver_agent_name_resolution_on_neighbor_added;
+        context->log.name_resolution_on_neighbor_added = aeron_driver_agent_name_resolution_on_neighbor_added;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAME_RESOLUTION_NEIGHBOR_REMOVED))
     {
-        context->name_resolution_on_neighbor_removed_func = aeron_driver_agent_name_resolution_on_neighbor_removed;
+        context->log.name_resolution_on_neighbor_removed = aeron_driver_agent_name_resolution_on_neighbor_removed;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_FLOW_CONTROL_RECEIVER_ADDED))
     {
-        context->flow_control_on_receiver_added_func = aeron_driver_agent_flow_control_on_receiver_added;
+        context->log.flow_control_on_receiver_added = aeron_driver_agent_flow_control_on_receiver_added;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_FLOW_CONTROL_RECEIVER_REMOVED))
     {
-        context->flow_control_on_receiver_removed_func = aeron_driver_agent_flow_control_on_receiver_removed;
+        context->log.flow_control_on_receiver_removed = aeron_driver_agent_flow_control_on_receiver_removed;
     }
 
     if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAME_RESOLUTION_RESOLVE))
     {
-        context->on_name_resolve_func = aeron_driver_agent_name_resolver_on_resolve;
+        context->log.on_name_resolve = aeron_driver_agent_name_resolver_on_resolve;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAME_RESOLUTION_LOOKUP))
+    {
+        context->log.on_name_lookup = aeron_driver_agent_name_resolver_on_lookup;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAME_RESOLUTION_HOST_NAME))
+    {
+        context->log.on_host_name = aeron_driver_agent_name_resolver_on_host_name;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAK_SENT))
+    {
+        context->log.send_nak_message = aeron_driver_agent_send_nak_message;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_NAK_RECEIVED))
+    {
+        context->log.on_nak_message = aeron_driver_agent_on_nak_message;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_RESEND))
+    {
+        context->log.resend = aeron_driver_agent_resend;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_PUBLICATION_REVOKE))
+    {
+        context->log.publication_revoke = aeron_driver_agent_publication_revoke;
+    }
+
+    if (aeron_driver_agent_is_event_enabled(AERON_DRIVER_EVENT_PUBLICATION_IMAGE_REVOKE))
+    {
+        context->log.publication_image_revoke = aeron_driver_agent_publication_image_revoke;
     }
 
     return 0;
@@ -1174,12 +1524,15 @@ const char *aeron_driver_agent_dissect_log_header(
 {
     static char buffer[256];
 
+    const int64_t seconds = time_ns / NANOS_PER_SECOND;
+    const int64_t nanos = time_ns - seconds * NANOS_PER_SECOND;
     const char *event_name = aeron_driver_agent_event_name(event_id);
     snprintf(
         buffer,
         sizeof(buffer) - 1,
-        "[%.6f] %s: %.*s [%" PRIu64 "/%" PRIu64 "]",
-        (double)time_ns / NANOS_PER_SECOND,
+        "[%" PRIu64".%09" PRIu64 "] %s: %.*s [%" PRIu64 "/%" PRIu64 "]",
+        seconds,
+        nanos,
         AERON_DRIVER_AGENT_LOG_CONTEXT,
         AERON_DRIVER_AGENT_MAX_EVENT_NAME_LENGTH,
         event_name,
@@ -1189,15 +1542,21 @@ const char *aeron_driver_agent_dissect_log_header(
     return buffer;
 }
 
-const char *aeron_driver_agent_dissect_log_start(int64_t time_ns, int64_t time_ms)
+void aeron_driver_agent_dissect_log_start(FILE* stream, const int64_t time_ns, const int64_t time_ms)
 {
-    static char buffer[384];
-    char datestamp[256];
+    static char datestamp[256];
 
-    aeron_driver_agent_format_date(datestamp, sizeof(datestamp) - 1, time_ms);
-    snprintf(buffer, sizeof(buffer) - 1, "[%.6f] log started %s", (double)time_ns / NANOS_PER_SECOND, datestamp);
-
-    return buffer;
+    const int64_t seconds = time_ns / NANOS_PER_SECOND;
+    const int64_t nanos = time_ns - seconds * NANOS_PER_SECOND;
+    aeron_format_date(datestamp, sizeof(datestamp) - 1, time_ms);
+    fprintf(
+        stream,
+        "[%" PRIu64".%09" PRIu64 "] log started %s, enabled loggers: {DRIVER: version=%s commit=%s}\n",
+        seconds,
+        nanos,
+        datestamp,
+        aeron_driver_version_text(),
+        aeron_driver_version_git_sha());
 }
 
 static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t length)
@@ -1213,22 +1572,70 @@ static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t le
             aeron_publication_command_t *command = (aeron_publication_command_t *)message;
 
             const char *channel = (const char *)message + sizeof(aeron_publication_command_t);
-            snprintf(buffer, sizeof(buffer) - 1, "%d %.*s [%" PRId64 ":%" PRId64 "]",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "streamId=%d clientId=%" PRId64 " correlationId=%" PRId64 " channel=%.*s",
                 command->stream_id,
-                command->channel_length,
-                channel,
                 command->correlated.client_id,
-                command->correlated.correlation_id);
+                command->correlated.correlation_id,
+                command->channel_length,
+                channel);
             break;
         }
 
         case AERON_COMMAND_REMOVE_PUBLICATION:
+        {
+            aeron_remove_publication_command_t *command = (aeron_remove_publication_command_t *)message;
+
+            if (length >= sizeof(aeron_remove_publication_command_t))
+            {
+                snprintf(
+                    buffer,
+                    sizeof(buffer) - 1,
+                    "registrationId=%" PRId64 " clientId=%" PRId64 " correlationId=%" PRId64 " revoke=%s",
+                    command->registration_id,
+                    command->correlated.client_id,
+                    command->correlated.correlation_id,
+                    command->flags & AERON_COMMAND_REMOVE_PUBLICATION_FLAG_REVOKE ? "true" : "false");
+            }
+            else
+            {
+                snprintf(
+                    buffer,
+                    sizeof(buffer) - 1,
+                    "registrationId=%" PRId64 " clientId=%" PRId64 " correlationId=%" PRId64,
+                    command->registration_id,
+                    command->correlated.client_id,
+                    command->correlated.correlation_id);
+            }
+
+            break;
+        }
+
         case AERON_COMMAND_REMOVE_SUBSCRIPTION:
+        {
+            aeron_remove_subscription_command_t *command = (aeron_remove_subscription_command_t *)message;
+
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "registrationId=%" PRId64 " clientId=%" PRId64 " correlationId=%" PRId64,
+                command->registration_id,
+                command->correlated.client_id,
+                command->correlated.correlation_id);
+
+            break;
+        }
+
         case AERON_COMMAND_REMOVE_COUNTER:
         {
-            aeron_remove_command_t *command = (aeron_remove_command_t *)message;
+            aeron_remove_counter_command_t *command = (aeron_remove_counter_command_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64 " [%" PRId64 ":%" PRId64 "]",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "registrationId=%" PRId64 " clientId=%" PRId64 " correlationId=%" PRId64,
                 command->registration_id,
                 command->correlated.client_id,
                 command->correlated.correlation_id);
@@ -1241,13 +1648,16 @@ static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t le
             aeron_subscription_command_t *command = (aeron_subscription_command_t *)message;
 
             const char *channel = (const char *)message + sizeof(aeron_subscription_command_t);
-            snprintf(buffer, sizeof(buffer) - 1, "%d %.*s [%" PRId64 "][%" PRId64 ":%" PRId64 "]",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "streamId=%d registrationCorrelationId=%" PRId64 " clientId=%" PRId64 " correlationId=%" PRId64 " channel=%.*s",
                 command->stream_id,
-                command->channel_length,
-                channel,
                 command->registration_correlation_id,
                 command->correlated.client_id,
-                command->correlated.correlation_id);
+                command->correlated.correlation_id,
+                command->channel_length,
+                channel);
             break;
         }
 
@@ -1256,7 +1666,10 @@ static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t le
         {
             aeron_correlated_command_t *command = (aeron_correlated_command_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "[%" PRId64 ":%" PRId64 "]",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "clientId=%" PRId64 " correlationId=%" PRId64,
                 command->client_id,
                 command->correlation_id);
             break;
@@ -1270,12 +1683,14 @@ static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t le
             aeron_destination_command_t *command = (aeron_destination_command_t *)message;
 
             const char *channel = (const char *)message + sizeof(aeron_destination_command_t);
-            snprintf(buffer, sizeof(buffer) - 1, "%.*s %" PRId64 " [%" PRId64 ":%" PRId64 "]",
-                command->channel_length,
-                channel,
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1, "registrationCorrelationId=%" PRId64 " clientId=%" PRId64 " correlationId=%" PRId64 " channel=%.*s",
                 command->registration_id,
                 command->correlated.client_id,
-                command->correlated.correlation_id);
+                command->correlated.correlation_id,
+                command->channel_length,
+                channel);
             break;
         }
 
@@ -1294,12 +1709,14 @@ static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t le
             int32_t label_length;
             memcpy(&label_length, cursor, sizeof(label_length));
 
-            snprintf(buffer, sizeof(buffer) - 1, "ADD_COUNTER %d [%d %d][%d %d][%" PRId64 ":%" PRId64 "]",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "ADD_COUNTER typeId=%d keyBufferOffset=%d keyBufferLength=%d labelBufferOffset=%d labelBufferLength=%d clientId=%" PRId64 " correlationId=%" PRId64,
                 command->type_id,
                 (int)(sizeof(aeron_counter_command_t) + sizeof(int32_t)),
                 key_length,
-                (int)(sizeof(aeron_counter_command_t) + (2 * sizeof(int32_t)) +
-                    AERON_ALIGN(key_length, sizeof(int32_t))),
+                (int)(sizeof(aeron_counter_command_t) + (2 * sizeof(int32_t)) + AERON_ALIGN(key_length, sizeof(int32_t))),
                 label_length,
                 command->correlated.client_id,
                 command->correlated.correlation_id);
@@ -1310,9 +1727,42 @@ static const char *dissect_cmd_in(int64_t cmd_id, const void *message, size_t le
         {
             aeron_terminate_driver_command_t *command = (aeron_terminate_driver_command_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64 " %d",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "clientId=%" PRId64 " tokenBufferLength=%d",
                 command->correlated.client_id,
                 command->token_length);
+            break;
+        }
+
+        case AERON_COMMAND_REMOVE_DESTINATION_BY_ID:
+        {
+            aeron_destination_by_id_command_t *command = (aeron_destination_by_id_command_t *)message;
+
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "resourceRegistrationId=%" PRId64 "  destinationRegistrationId=%" PRId64,
+                command->resource_registration_id,
+                command->destination_registration_id);
+            break;
+        }
+
+        case AERON_COMMAND_REJECT_IMAGE:
+        {
+            aeron_reject_image_command_t *command = (aeron_reject_image_command_t *)message;
+
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "clientId=%" PRId64 " correlationId=%" PRId64 " imageCorrelationId=%" PRId64 "position=%" PRId64 " reason=%.*s",
+                command->correlated.client_id,
+                command->correlated.correlation_id,
+                command->image_correlation_id,
+                command->position,
+                command->reason_length,
+                command->reason_text);
             break;
         }
 
@@ -1334,7 +1784,7 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
         {
             aeron_operation_succeeded_t *command = (aeron_operation_succeeded_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64, command->correlation_id);
+            snprintf(buffer, sizeof(buffer) - 1, "correlationId=%" PRId64, command->correlation_id);
             break;
         }
 
@@ -1345,7 +1795,10 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
 
             const char *log_file_name = (const char *)message + sizeof(aeron_publication_buffers_ready_t);
 
-            snprintf(buffer, sizeof(buffer) - 1, "%d:%d %d %d [%" PRId64 " %" PRId64 "]\n    \"%.*s\"",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "sessionId=%d streamId=%d publicationLimitCounterId=%d channelStatusCounterId=%d correlationId=%" PRId64 " registrationId=%" PRId64 " logFileName=%.*s",
                 command->session_id,
                 command->stream_id,
                 command->position_limit_counter_id,
@@ -1361,7 +1814,10 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
         {
             aeron_subscription_ready_t *command = (aeron_subscription_ready_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64 " %d",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "correlationId=%" PRId64 " channelStatusCounterId=%d",
                 command->correlation_id,
                 command->channel_status_indicator_id);
             break;
@@ -1372,9 +1828,12 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
             aeron_error_response_t *command = (aeron_error_response_t *)message;
 
             const char *error_message = (const char *)message + sizeof(aeron_error_response_t);
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64 "%d %.*s",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "offendingCommandCorrelationId=%" PRId64 " errorCode=%s message=%.*s",
                 command->offending_command_correlation_id,
-                command->error_code,
+                aeron_error_code_str(command->error_code),
                 command->error_message_length,
                 error_message);
             break;
@@ -1385,11 +1844,14 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
             aeron_image_message_t *command = (aeron_image_message_t *)message;
 
             const char *channel = (const char *)message + sizeof(aeron_image_message_t);
-            snprintf(buffer, sizeof(buffer) - 1, "%d %.*s [%" PRId64 "]",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1, "streamId=%d correlationId=%" PRId64 " subscriptionRegistrationId=%" PRId64 " channel=%.*s",
                 command->stream_id,
+                command->correlation_id,
+                command->subscription_registration_id,
                 command->channel_length,
-                channel,
-                command->correlation_id);
+                channel);
             break;
         }
 
@@ -1410,14 +1872,14 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
             snprintf(
                 buffer,
                 sizeof(buffer) - 1,
-                "%d:%d [%" PRId32 ":%" PRId64 "] \"%.*s\" [%" PRId64 "] \"%.*s\"",
+                "sessionId=%d streamId=%d subscriberPositionId=%" PRId32 " subscriptionRegistrationId=%" PRId64 " correlationId=%" PRId64 " sourceIdentity=%.*s logFileName=%.*s",
                 command->session_id,
                 command->stream_id,
                 command->subscriber_position_id,
                 command->subscriber_registration_id,
+                command->correlation_id,
                 source_identity_length,
                 source_identity,
-                command->correlation_id,
                 log_file_name_length,
                 log_file_name);
             break;
@@ -1427,7 +1889,10 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
         {
             aeron_counter_update_t *command = (aeron_counter_update_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64 " %d",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "correlationId=%" PRId64 " counterId=%d",
                 command->correlation_id,
                 command->counter_id);
             break;
@@ -1437,7 +1902,7 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
         {
             aeron_client_timeout_t *command = (aeron_client_timeout_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%" PRId64, command->client_id);
+            snprintf(buffer, sizeof(buffer) - 1, "clientId=%" PRId64, command->client_id);
             break;
         }
 
@@ -1448,14 +1913,14 @@ static const char *dissect_cmd_out(int64_t cmd_id, const void *message, size_t l
     return buffer;
 }
 
-static char *dissect_flags(uint8_t flags, char *dissected_flags, size_t flags_length)
+static char *dissect_flags(uint8_t flags, char *dissected_flags)
 {
-    const size_t len = flags_length < sizeof(uint8_t) ? flags_length : sizeof(uint8_t);
+    const size_t len = 8;
     uint8_t flag_mask = (uint8_t)(1 << (len - 1));
 
     for (size_t i = 0; i < len; i++)
     {
-        dissected_flags[i] = (flags & flag_mask) == (flag_mask ? '1' : '0');
+        dissected_flags[i] = (flags & flag_mask) == flag_mask ? '1' : '0';
         flag_mask >>= 1;
     }
 
@@ -1475,17 +1940,20 @@ static const char *dissect_frame_type(int16_t type)
 {
     switch (type)
     {
+        case AERON_HDR_TYPE_PAD:
+            return "PAD";
+
         case AERON_HDR_TYPE_DATA:
             return "DATA";
 
-        case AERON_HDR_TYPE_PAD:
-            return "PAD";
+        case AERON_HDR_TYPE_NAK:
+            return "NAK";
 
         case AERON_HDR_TYPE_SM:
             return "SM";
 
-        case AERON_HDR_TYPE_NAK:
-            return "NAK";
+        case AERON_HDR_TYPE_ERR:
+            return "ERR";
 
         case AERON_HDR_TYPE_SETUP:
             return "SETUP";
@@ -1505,28 +1973,36 @@ static const char *dissect_frame_type(int16_t type)
         case AERON_HDR_TYPE_ATS_SM:
             return "ATS_SM";
 
+        case AERON_HDR_TYPE_RSP_SETUP:
+            return "RSP_SETUP";
+
         default:
-            return "unknown command";
+            return "unknown frame type";
     }
 }
 
-static const char *dissect_frame(const void *message, size_t length)
+const char *aeron_driver_agent_dissect_frame(const void *message, size_t length)
 {
     static char buffer[256];
+    static char dissected_flags[8] = { '0', '0', '0', '0', '0', '0', '0', '0' };
     aeron_frame_header_t *hdr = (aeron_frame_header_t *)message;
 
     buffer[0] = '\0';
     switch (hdr->type)
     {
-        case AERON_HDR_TYPE_DATA:
         case AERON_HDR_TYPE_PAD:
+        case AERON_HDR_TYPE_DATA:
         case AERON_HDR_TYPE_ATS_DATA:
         {
             aeron_data_header_t *data = (aeron_data_header_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%s 0x%x len %d %d:%d:%d @%x",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d termId=%d termOffset=%d",
                 dissect_frame_type(hdr->type),
-                hdr->flags,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
                 hdr->frame_length,
                 data->session_id,
                 data->stream_id,
@@ -1535,14 +2011,38 @@ static const char *dissect_frame(const void *message, size_t length)
             break;
         }
 
+        case AERON_HDR_TYPE_NAK:
+        {
+            aeron_nak_header_t *nak = (aeron_nak_header_t *)message;
+
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d termId=%d termOffset=%d length=%d",
+                dissect_frame_type(hdr->type),
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
+                hdr->frame_length,
+                nak->session_id,
+                nak->stream_id,
+                nak->term_id,
+                nak->term_offset,
+                nak->length);
+            break;
+        }
+
         case AERON_HDR_TYPE_SM:
         case AERON_HDR_TYPE_ATS_SM:
         {
             aeron_status_message_header_t *sm = (aeron_status_message_header_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%s 0x%x len %d %d:%d:%d @%x %d %" PRId64,
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d termId=%d termOffset=%d receiverWindowLength=%d receiverId=%" PRId64,
                 dissect_frame_type(hdr->type),
-                hdr->flags,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
                 hdr->frame_length,
                 sm->session_id,
                 sm->stream_id,
@@ -1553,19 +2053,26 @@ static const char *dissect_frame(const void *message, size_t length)
             break;
         }
 
-        case AERON_HDR_TYPE_NAK:
+        case AERON_HDR_TYPE_ERR:
         {
-            aeron_nak_header_t *nak = (aeron_nak_header_t *)message;
+            aeron_error_header_t *err = (aeron_error_header_t *)message;
+            const char *error_msg = (const char *)message + sizeof(aeron_error_header_t);
 
-            snprintf(buffer, sizeof(buffer) - 1, "%s 0x%x len %d %d:%d:%d @%x %d",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d receiverId=%" PRIi64 " groupTag=%" PRIi64 " errorCode=%d errorMessage=\"%.*s\"",
                 dissect_frame_type(hdr->type),
-                hdr->flags,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
                 hdr->frame_length,
-                nak->session_id,
-                nak->stream_id,
-                nak->term_id,
-                nak->term_offset,
-                nak->length);
+                err->session_id,
+                err->stream_id,
+                err->receiver_id,
+                err->group_tag,
+                err->error_code,
+                err->error_length,
+                error_msg);
             break;
         }
 
@@ -1574,9 +2081,13 @@ static const char *dissect_frame(const void *message, size_t length)
         {
             aeron_setup_header_t *setup = (aeron_setup_header_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%s 0x%x len %d %d:%d:%d %d @%x %d MTU %d TTL %d",
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d activeTermId=%d initialTermId=%d termOffset=%d termLength=%d mtu=%d ttl=%d",
                 dissect_frame_type(hdr->type),
-                hdr->flags,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
                 hdr->frame_length,
                 setup->session_id,
                 setup->stream_id,
@@ -1589,13 +2100,35 @@ static const char *dissect_frame(const void *message, size_t length)
             break;
         }
 
+        case AERON_HDR_TYPE_RSP_SETUP:
+        {
+            aeron_response_setup_header_t *rsp_setup = (aeron_response_setup_header_t *)message;
+
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d responseSessionId=%d",
+                dissect_frame_type(hdr->type),
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
+                hdr->frame_length,
+                rsp_setup->session_id,
+                rsp_setup->stream_id,
+                rsp_setup->response_session_id);
+            break;
+        }
+
         case AERON_HDR_TYPE_RTTM:
         {
             aeron_rttm_header_t *rttm = (aeron_rttm_header_t *)message;
 
-            snprintf(buffer, sizeof(buffer) - 1, "%s 0x%x len %d %d:%d %" PRId64 " %" PRId64 " %" PRId64,
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s flags=%.*s frameLength=%d sessionId=%d streamId=%d echoTimestampNs=%" PRId64 " receptionDelta=%" PRId64 " receiverId=%" PRId64,
                 dissect_frame_type(hdr->type),
-                hdr->flags,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
                 hdr->frame_length,
                 rttm->session_id,
                 rttm->stream_id,
@@ -1608,16 +2141,16 @@ static const char *dissect_frame(const void *message, size_t length)
         case AERON_HDR_TYPE_RES:
         {
             uint8_t null_buffer[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            char dissected_flags[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
             const uint8_t *message_bytes = (uint8_t *)message;
             const int buffer_available = sizeof(buffer) - 1;
 
             int buffer_used = snprintf(
                 buffer,
                 buffer_available,
-                "%s 0x%x len %d",
+                "type=%s flags=%.*s frameLength=%d",
                 dissect_frame_type(hdr->type),
-                hdr->flags,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
                 hdr->frame_length);
             size_t message_offset = sizeof(aeron_frame_header_t);
 
@@ -1657,10 +2190,10 @@ static const char *dissect_frame(const void *message, size_t length)
 
                 buffer_used += snprintf(
                     &buffer[buffer_used], buffer_available - buffer_used,
-                    " [%" PRId8 " %.*s port %" PRIu16 " %" PRId32 " %s %.*s]",
+                    " [resType=%" PRId8 " flags=%.*s port=%" PRIu16 " ageInMs=%" PRId32 " address=%s name=%.*s]",
                     res->res_type,
                     (int)sizeof(dissected_flags),
-                    dissect_flags(res->res_flags, dissected_flags, sizeof(dissected_flags)),
+                    dissect_flags(res->res_flags, dissected_flags),
                     res->udp_port,
                     res->age_in_ms,
                     dissect_res_address(res->res_type, address),
@@ -1679,6 +2212,16 @@ static const char *dissect_frame(const void *message, size_t length)
         }
 
         default:
+            snprintf(
+                buffer,
+                sizeof(buffer) - 1,
+                "type=%s (0x%x) version=0x%x flags=%.*s frameLength=%d",
+                dissect_frame_type(hdr->type),
+                hdr->type,
+                hdr->version,
+                (int)sizeof(dissected_flags),
+                dissect_flags(hdr->flags, dissected_flags),
+                hdr->frame_length);
             break;
     }
 
@@ -1698,13 +2241,65 @@ static const char *dissect_tether_state(aeron_subscription_tether_state_t state)
         case AERON_SUBSCRIPTION_TETHER_RESTING:
             return "RESTING";
 
+        case AERON_SUBSCRIPTION_TETHER_CLOSED:
+            return "CLOSED";
+
         default:
             return "unknown tether state";
     }
 }
 
+static void aeron_driver_agent_check_for_file_rolling(aeron_driver_agent_log_state_t *state)
+{
+    if (NULL == state->filename || aeron_ftell(state->logfp) < state->file_max_length)
+    {
+        return;
+    }
+
+    // Create aeron versions.
+    fflush(state->logfp);
+    fclose(state->logfp);
+
+    char new_filename[AERON_MAX_PATH];
+    do
+    {
+        snprintf(new_filename, sizeof(new_filename), "%s.%" PRId64, state->filename, state->next_file_index);
+        state->next_file_index++;
+    }
+    while (aeron_file_exists(new_filename));
+
+    if (-1 == rename(state->filename, new_filename))
+    {
+        AERON_SET_ERR(errno, "failed to rename %s to %s", state->filename, new_filename);
+        AERON_FPRINTF(stderr, "%s", aeron_errmsg());
+        aeron_err_clear();
+    }
+
+    if (NULL == (state->logfp = aeron_open_file_append(state->filename)))
+    {
+        AERON_APPEND_ERR("%s", "failed to open log file after rolling, falling back to stdout");
+        AERON_FPRINTF(stderr, "%s", aeron_errmsg());
+        aeron_err_clear();
+        state->logfp = stdout;
+        state->filename = NULL;
+    }
+    else
+    {
+        aeron_driver_agent_dissect_log_start(state->logfp, aeron_nano_clock(), aeron_epoch_clock());
+    }
+}
+
+void aeron_driver_agent_buffer_read(int32_t msg_type_id, const void *message, size_t length, void *clientd)
+{
+    aeron_driver_agent_log_dissector(msg_type_id, message, length, clientd);
+    aeron_driver_agent_check_for_file_rolling(clientd);
+}
+
 void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, size_t length, void *clientd)
 {
+    aeron_driver_agent_log_state_t *state = clientd;
+    FILE *logfp = state->logfp;
+
     switch (msg_type_id)
     {
         case AERON_DRIVER_EVENT_FRAME_IN:
@@ -1718,13 +2313,13 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
             char addr_buf[AERON_NETUTIL_FORMATTED_MAX_LENGTH];
             const int addr_length = aeron_format_source_identity(addr_buf, sizeof(addr_buf), addr);
 
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
-                "%s: %.*s %s\n",
+                "%s: address=%.*s %s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, (size_t)hdr->message_len),
                 addr_length,
                 addr_buf,
-                dissect_frame(frame, (size_t)hdr->message_len));
+                aeron_driver_agent_dissect_frame(frame, (size_t)hdr->message_len));
             break;
         }
 
@@ -1732,7 +2327,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
         {
             aeron_driver_agent_remove_resource_cleanup_t *hdr = (aeron_driver_agent_remove_resource_cleanup_t *)message;
             const char *channel = (const char *)message + sizeof(aeron_driver_agent_remove_resource_cleanup_t);
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: sessionId=%d streamId=%d channel=%.*s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1747,7 +2342,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
         {
             aeron_driver_agent_remove_resource_cleanup_t *hdr = (aeron_driver_agent_remove_resource_cleanup_t *)message;
             const char *channel = (const char *)message + sizeof(aeron_driver_agent_remove_resource_cleanup_t);
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: streamId=%d id=%" PRId64 " channel=%.*s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1762,7 +2357,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
         {
             aeron_driver_agent_remove_resource_cleanup_t *hdr = (aeron_driver_agent_remove_resource_cleanup_t *)message;
             const char *channel = (const char *)message + sizeof(aeron_driver_agent_remove_resource_cleanup_t);
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: sessionId=%d streamId=%d id=%" PRId64 " channel=%.*s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1787,7 +2382,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
             const int remote_addr_length = aeron_format_source_identity(
                 remote_addr_buf, sizeof(remote_addr_buf), &hdr->remote_data);
 
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: localData: %.*s, remoteData: %.*s, ttl: %d\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1804,7 +2399,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
             aeron_driver_agent_untethered_subscription_state_change_log_header_t *hdr =
                 (aeron_driver_agent_untethered_subscription_state_change_log_header_t *)message;
 
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: subscriptionId=%" PRId64 " streamId=%d sessionId=%d %s -> %s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1825,7 +2420,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
             char addr_buf[AERON_NETUTIL_FORMATTED_MAX_LENGTH];
             const int addr_length = aeron_format_source_identity(addr_buf, sizeof(addr_buf), addr);
 
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: %.*s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1839,7 +2434,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
         {
             aeron_driver_agent_flow_control_receiver_change_log_header_t *hdr = (aeron_driver_agent_flow_control_receiver_change_log_header_t *)message;
             const char *channel = (const char *)message + sizeof(aeron_driver_agent_flow_control_receiver_change_log_header_t);
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
                 "%s: receiverCount=%d receiverId=%" PRId64 " sessionId=%d streamId=%d channel=%.*s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1852,6 +2447,87 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
             break;
         }
 
+        case AERON_DRIVER_EVENT_NAK_SENT:
+        case AERON_DRIVER_EVENT_NAK_RECEIVED:
+        {
+            aeron_driver_agent_nak_message_header_t *hdr = (aeron_driver_agent_nak_message_header_t *)message;
+            char address_buf[AERON_NETUTIL_FORMATTED_MAX_LENGTH];
+            const int address_length = aeron_format_source_identity(address_buf, sizeof(address_buf), &hdr->address);
+            const char *channel = (const char *)message + sizeof(aeron_driver_agent_nak_message_header_t);
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: address=%.*s sessionId=%d streamId=%d termId=%d termOffset=%d length=%d channel=%.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                address_length,
+                address_buf,
+                hdr->session_id,
+                hdr->stream_id,
+                hdr->term_id,
+                hdr->term_offset,
+                hdr->nak_length,
+                hdr->channel_length,
+                channel);
+
+            break;
+        }
+
+        case AERON_DRIVER_EVENT_RESEND:
+        {
+            aeron_driver_agent_resend_header_t *hdr = (aeron_driver_agent_resend_header_t *)message;
+            const char *channel = (const char *)message + sizeof(aeron_driver_agent_resend_header_t);
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: sessionId=%d streamId=%d termId=%d termOffset=%d length=%d channel=%.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                hdr->session_id,
+                hdr->stream_id,
+                hdr->term_id,
+                hdr->term_offset,
+                hdr->resend_length,
+                hdr->channel_length,
+                channel);
+
+            break;
+        }
+
+        case AERON_DRIVER_EVENT_PUBLICATION_REVOKE:
+        {
+            aeron_driver_agent_publication_revoke_header_t *hdr = (aeron_driver_agent_publication_revoke_header_t *)message;
+            const char *channel = (const char *)message + sizeof(aeron_driver_agent_publication_revoke_header_t);
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: revokedPos=%" PRIu64 " sessionId=%d streamId=%d channel=%.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                hdr->revoked_pos,
+                hdr->session_id,
+                hdr->stream_id,
+                hdr->channel_length,
+                channel);
+
+            break;
+        }
+
+        case AERON_DRIVER_EVENT_PUBLICATION_IMAGE_REVOKE:
+        {
+            aeron_driver_agent_publication_image_revoke_header_t *hdr = (aeron_driver_agent_publication_image_revoke_header_t *)message;
+            const char *channel = (const char *)message + sizeof(aeron_driver_agent_publication_image_revoke_header_t);
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: revokedPos=%" PRIu64 " sessionId=%d streamId=%d channel=%.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                hdr->revoked_pos,
+                hdr->session_id,
+                hdr->stream_id,
+                hdr->channel_length,
+                channel);
+
+            break;
+        }
+
         case AERON_DRIVER_EVENT_NAME_RESOLUTION_RESOLVE:
         {
             aeron_driver_agent_name_resolver_resolve_log_header_t *hdr =
@@ -1860,13 +2536,8 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
             char address_buf[INET6_ADDRSTRLEN] = { 0 };
             uint8_t *resolver_name_ptr =
                 (uint8_t *)message + sizeof(aeron_driver_agent_name_resolver_resolve_log_header_t);
-            uint8_t *hostname_ptr =
-                (uint8_t *)message + sizeof(aeron_driver_agent_name_resolver_resolve_log_header_t) +
-                hdr->resolver_name_length;
-            uint8_t *address_ptr =
-                (uint8_t *)message + sizeof(aeron_driver_agent_name_resolver_resolve_log_header_t) +
-                hdr->resolver_name_length +
-                hdr->hostname_length;
+            uint8_t *hostname_ptr = resolver_name_ptr + hdr->resolver_name_length;
+            uint8_t *address_ptr = hostname_ptr + hdr->hostname_length;
 
             const char *addr_prefix = "";
             const char *addr_suffix = "";
@@ -1880,21 +2551,80 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
                 addr_prefix = "[";
                 addr_suffix = "]";
 
-                inet_ntop(AF_INET, address_ptr, address_buf, sizeof(address_buf));
+                inet_ntop(AF_INET6, address_ptr, address_buf, sizeof(address_buf));
                 address_str = address_buf;
             }
 
-            fprintf(
+            AERON_FPRINTF(
                 logfp,
-                "%s: resolver=%.*s hostname=%.*s address=%s%s%s\n",
+                "%s: resolver=%.*s durationNs=%" PRIu64 " name=%.*s isReResolution=%s address=%s%s%s\n",
                 aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
                 (int)hdr->resolver_name_length,
                 resolver_name_ptr,
+                (uint64_t)hdr->duration_ns,
                 (int)hdr->hostname_length,
                 hostname_ptr,
+                hdr->is_re_resolution ? "true" : "false",
                 addr_prefix,
                 address_str,
                 addr_suffix);
+            break;
+        }
+
+        case AERON_DRIVER_EVENT_NAME_RESOLUTION_LOOKUP:
+        {
+            aeron_driver_agent_name_resolver_lookup_log_header_t *hdr =
+                (aeron_driver_agent_name_resolver_lookup_log_header_t *)message;
+            uint8_t *resolver_name_ptr =
+                (uint8_t *)message + sizeof(aeron_driver_agent_name_resolver_lookup_log_header_t);
+            uint8_t *name_ptr = resolver_name_ptr + hdr->resolver_name_length;
+            uint8_t *resolved_name_ptr = name_ptr + hdr->name_length;
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: resolver=%.*s durationNs=%" PRIu64 " name=%.*s isReLookup=%s resolvedName=%.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                (int)hdr->resolver_name_length,
+                resolver_name_ptr,
+                (uint64_t)hdr->duration_ns,
+                (int)hdr->name_length,
+                name_ptr,
+                hdr->is_re_lookup ? "true" : "false",
+                (int)hdr->resolved_name_length,
+                resolved_name_ptr);
+            break;
+        }
+
+        case AERON_DRIVER_EVENT_NAME_RESOLUTION_HOST_NAME:
+        {
+            aeron_driver_agent_name_resolver_host_name_log_header_t *hdr =
+                (aeron_driver_agent_name_resolver_host_name_log_header_t *)message;
+            uint8_t *host_name_name_ptr =
+                (uint8_t *)message + sizeof(aeron_driver_agent_name_resolver_host_name_log_header_t);
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: durationNs=%" PRIu64 " hostName=%.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                (uint64_t)hdr->duration_ns,
+                (int)hdr->host_name_length,
+                host_name_name_ptr);
+            break;
+        }
+
+        case AERON_DRIVER_EVENT_NAME_TEXT_DATA:
+        {
+            aeron_driver_agent_text_data_log_header_t *hdr =
+                (aeron_driver_agent_text_data_log_header_t *)message;
+            uint8_t *message_ptr =
+                (uint8_t *)message + sizeof(aeron_driver_agent_text_data_log_header_t);
+
+            AERON_FPRINTF(
+                logfp,
+                "%s: %.*s\n",
+                aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
+                hdr->message_length,
+                message_ptr);
             break;
         }
 
@@ -1938,7 +2668,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
                 {
                     aeron_driver_agent_cmd_log_header_t *hdr = (aeron_driver_agent_cmd_log_header_t *)message;
 
-                    fprintf(
+                    AERON_FPRINTF(
                         logfp,
                         "%s: %s\n",
                         aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1951,7 +2681,7 @@ void aeron_driver_agent_log_dissector(int32_t msg_type_id, const void *message, 
                 {
                     aeron_driver_agent_cmd_log_header_t *hdr = (aeron_driver_agent_cmd_log_header_t *)message;
 
-                    fprintf(
+                    AERON_FPRINTF(
                         logfp,
                         "%s: %s\n",
                         aeron_driver_agent_dissect_log_header(hdr->time_ns, msg_type_id, length, length),
@@ -1975,6 +2705,7 @@ static void log_remove_resource_cleanup(
 {
     const size_t command_length = sizeof(aeron_driver_agent_remove_resource_cleanup_t) + channel_length;
     int32_t offset = aeron_mpsc_rb_try_claim(&logging_mpsc_rb, event_id, command_length);
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
@@ -2036,6 +2767,7 @@ static void log_endpoint_change_event(const aeron_driver_agent_event_t event_id,
 {
     int32_t offset = aeron_mpsc_rb_try_claim(
         &logging_mpsc_rb, event_id, sizeof(aeron_driver_agent_on_endpoint_change_t));
+
     if (offset > 0)
     {
         uint8_t *ptr = (logging_mpsc_rb.buffer + offset);
@@ -2083,6 +2815,7 @@ int64_t aeron_driver_agent_add_dynamic_dissector(aeron_driver_agent_generic_diss
         &logging_mpsc_rb,
         AERON_DRIVER_EVENT_ADD_DYNAMIC_DISSECTOR,
         sizeof(aeron_driver_agent_add_dissector_header_t));
+
     if (offset > 0)
     {
 
@@ -2092,7 +2825,7 @@ int64_t aeron_driver_agent_add_dynamic_dissector(aeron_driver_agent_generic_diss
             (aeron_driver_agent_add_dissector_header_t *)ptr;
 
         hdr->time_ns = aeron_nano_clock();
-        AERON_GET_AND_ADD_INT64(hdr->index, dynamic_dissector_index, 1);
+        AERON_GET_AND_ADD_INT64(hdr->index, dynamic_dissector_index, INT64_C(1));
         hdr->dissector_func = func;
 
         aeron_mpsc_rb_commit(&logging_mpsc_rb, offset);

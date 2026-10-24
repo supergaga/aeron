@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,17 +15,40 @@
  */
 package io.aeron.driver.media;
 
-import io.aeron.driver.DriverConductorProxy;
 import io.aeron.driver.MediaDriver;
-import io.aeron.status.LocalSocketAddressStatus;
 import io.aeron.status.ChannelEndpointStatus;
+import io.aeron.status.LocalSocketAddressStatus;
 import org.agrona.CloseHelper;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
-import java.nio.channels.SelectionKey;
 
-abstract class ReceiveDestinationTransportHotFields extends UdpChannelTransport
+import static io.aeron.status.ChannelEndpointStatus.status;
+
+abstract class ReceiveDestinationTransportLhsPadding extends UdpChannelTransport
+{
+    byte p000, p001, p002, p003, p004, p005, p006, p007, p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023, p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039, p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055, p056, p057, p058, p059, p060, p061, p062, p063;
+
+    ReceiveDestinationTransportLhsPadding(
+        final UdpChannel udpChannel,
+        final InetSocketAddress endPointAddress,
+        final InetSocketAddress bindAddress,
+        final InetSocketAddress connectAddress,
+        final MediaDriver.Context context,
+        final int socketRcvbufLength,
+        final int socketSndbufLength,
+        final int socketTos)
+    {
+        super(
+            udpChannel, endPointAddress, bindAddress, connectAddress, context.receiverPortManager(),
+            context, socketRcvbufLength, socketSndbufLength, socketTos);
+    }
+}
+
+abstract class ReceiveDestinationTransportHotFields extends ReceiveDestinationTransportLhsPadding
 {
     long timeOfLastActivityNs;
 
@@ -36,25 +59,46 @@ abstract class ReceiveDestinationTransportHotFields extends UdpChannelTransport
         final InetSocketAddress connectAddress,
         final MediaDriver.Context context,
         final int socketRcvbufLength,
-        final int socketSndbufLength)
+        final int socketSndbufLength,
+        final int socketTos)
     {
         super(
-            udpChannel, endPointAddress, bindAddress, connectAddress, context, socketRcvbufLength, socketSndbufLength);
+            udpChannel, endPointAddress, bindAddress, connectAddress, context,
+            socketRcvbufLength, socketSndbufLength, socketTos);
+    }
+}
+
+abstract class ReceiveDestinationTransportRhsPadding extends ReceiveDestinationTransportHotFields
+{
+    byte p064, p065, p066, p067, p068, p069, p070, p071, p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087, p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103, p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119, p120, p121, p122, p123, p124, p125, p126, p127;
+
+    ReceiveDestinationTransportRhsPadding(
+        final UdpChannel udpChannel,
+        final InetSocketAddress endPointAddress,
+        final InetSocketAddress bindAddress,
+        final InetSocketAddress connectAddress,
+        final MediaDriver.Context context,
+        final int socketRcvbufLength,
+        final int socketSndbufLength,
+        final int socketTos)
+    {
+        super(
+            udpChannel, endPointAddress, bindAddress, connectAddress, context,
+            socketRcvbufLength, socketSndbufLength, socketTos);
     }
 }
 
 /**
  * Destination endpoint representation for reception into an image from a UDP transport.
  */
-public final class ReceiveDestinationTransport extends ReceiveDestinationTransportHotFields
+public final class ReceiveDestinationTransport extends ReceiveDestinationTransportRhsPadding
 {
-    byte p000, p001, p002, p003, p004, p005, p006, p007, p008, p009, p010, p011, p012, p013, p014, p015;
-    byte p016, p017, p018, p019, p020, p021, p022, p023, p024, p025, p026, p027, p028, p029, p030, p031;
-    byte p032, p033, p034, p035, p036, p037, p038, p039, p040, p041, p042, p043, p044, p045, p046, p047;
-    byte p048, p049, p050, p051, p052, p053, p054, p055, p056, p057, p058, p059, p060, p061, p062, p063;
-
     private InetSocketAddress currentControlAddress;
     private final AtomicCounter localSocketAddressIndicator;
+    private final ReceiveChannelEndpoint receiveChannelEndpoint;
 
     /**
      * Construct transport for a receiving destination.
@@ -77,58 +121,50 @@ public final class ReceiveDestinationTransport extends ReceiveDestinationTranspo
             null,
             context,
             receiveChannelEndpoint.socketRcvbufLength(),
-            receiveChannelEndpoint.socketSndbufLength());
+            receiveChannelEndpoint.socketSndbufLength(),
+            receiveChannelEndpoint.socketTos());
 
         this.timeOfLastActivityNs = context.receiverCachedNanoClock().nanoTime();
         this.currentControlAddress = udpChannel.hasExplicitControl() ? udpChannel.localControl() : null;
         this.localSocketAddressIndicator = localSocketAddressIndicator;
+        this.receiveChannelEndpoint = receiveChannelEndpoint;
     }
 
     /**
      * Open the channel by the receiver.
      *
-     * @param conductorProxy for sending instructions by to the driver conductor.
      * @param statusIndicator for the channel.
      */
-    public void openChannel(final DriverConductorProxy conductorProxy, final AtomicCounter statusIndicator)
+    public void openChannel(final AtomicCounter statusIndicator)
     {
-        if (conductorProxy.notConcurrent())
+        openDatagramChannel(statusIndicator);
+    }
+
+    /**
+     * Indicate that the transport is active after successfully opening it.
+     */
+    public void indicateActive()
+    {
+        final long currentStatus = localSocketAddressIndicator.getPlain();
+        if (currentStatus != ChannelEndpointStatus.INITIALIZING)
         {
-            openDatagramChannel(statusIndicator);
-        }
-        else
-        {
-            try
-            {
-                openDatagramChannel(statusIndicator);
-            }
-            catch (final Exception ex)
-            {
-                conductorProxy.channelEndpointError(statusIndicator.id(), ex);
-                throw ex;
-            }
+            throw new IllegalStateException(
+                "channel cannot be registered unless INITIALIZING: status=" + status(currentStatus));
         }
 
         LocalSocketAddressStatus.updateBindAddress(
             localSocketAddressIndicator, bindAddressAndPort(), context.countersMetaDataBuffer());
-        localSocketAddressIndicator.setOrdered(ChannelEndpointStatus.ACTIVE);
-    }
-
-    /**
-     * Close the networking elements of the ReceiveChannelEndpoint, but leave other components (e.g. counters) in place.
-     */
-    public void closeTransport()
-    {
-        super.close();
+        localSocketAddressIndicator.setRelease(ChannelEndpointStatus.ACTIVE);
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
-        CloseHelper.close(localSocketAddressIndicator);
         super.close();
+        CloseHelper.close(errorHandler, localSocketAddressIndicator);
     }
 
     /**
@@ -149,16 +185,6 @@ public final class ReceiveDestinationTransport extends ReceiveDestinationTranspo
     public InetSocketAddress explicitControlAddress()
     {
         return udpChannel.hasExplicitControl() ? currentControlAddress : null;
-    }
-
-    /**
-     * Store the {@link SelectionKey} for the registered transport.
-     *
-     * @param key the {@link SelectionKey} for the registered transport.
-     */
-    public void selectionKey(final SelectionKey key)
-    {
-        selectionKey = key;
     }
 
     /**
@@ -209,5 +235,18 @@ public final class ReceiveDestinationTransport extends ReceiveDestinationTranspo
     public InetSocketAddress currentControlAddress()
     {
         return currentControlAddress;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "ReceiveDestinationTransport{" +
+            "currentControlAddress=" + currentControlAddress +
+            ", localSocketAddress=" + localSocketAddressIndicator.label() +
+            ", statusIndicator=" + localSocketAddressIndicator.getPlain() +
+            '}';
     }
 }

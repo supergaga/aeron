@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,15 @@
 #include "media/aeron_udp_channel.h"
 
 #define AERON_DRIVER_RECEIVER_PENDING_SETUP_TIMEOUT_NS (1000 * 1000 * 1000LL)
+
+#if !defined(HAVE_STRUCT_MMSGHDR)
+#define HAVE_STRUCT_MMSGHDR
+struct mmsghdr
+{
+    struct msghdr msg_hdr;
+    unsigned int msg_len;
+};
+#endif
 
 typedef struct aeron_driver_receiver_image_entry_stct
 {
@@ -54,6 +63,7 @@ typedef struct aeron_driver_receiver_stct
         uint8_t *buffers[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
         struct iovec iov[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
         struct sockaddr_storage addrs[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
+        struct mmsghdr mmsghdr[AERON_DRIVER_RECEIVER_IO_VECTOR_LENGTH_MAX];
     }
     recv_buffers;
 
@@ -80,6 +90,12 @@ typedef struct aeron_driver_receiver_stct
     aeron_udp_channel_transport_recvmmsg_func_t recvmmsg_func;
     aeron_distinct_error_log_t *error_log;
     int64_t re_resolution_deadline_ns;
+    int64_t slow_tick_work_deadline_ns;
+    int64_t status_message_send_timeout_ns;
+    size_t duty_cycle_counter;
+    size_t duty_cycle_ratio;
+    int32_t images_per_cycle_limit;
+    int32_t next_image_index;
 
     int64_t *errors_counter;
     int64_t *invalid_frames_counter;
@@ -91,7 +107,7 @@ aeron_driver_receiver_t;
 inline void aeron_driver_receiver_log_error(aeron_driver_receiver_t *receiver)
 {
     aeron_distinct_error_log_record(receiver->error_log, aeron_errcode(), aeron_errmsg());
-    aeron_counter_increment(receiver->errors_counter, 1);
+    aeron_counter_increment(receiver->errors_counter);
     aeron_err_clear();
 }
 
@@ -110,6 +126,7 @@ void aeron_driver_receiver_on_remove_endpoint(void *clientd, void *item);
 void aeron_driver_receiver_on_add_subscription(void *clientd, void *item);
 void aeron_driver_receiver_on_remove_subscription(void *clientd, void *item);
 void aeron_driver_receiver_on_add_subscription_by_session(void *clientd, void *item);
+void aeron_driver_receiver_on_request_setup(void *clientd, void *item);
 void aeron_driver_receiver_on_remove_subscription_by_session(void *clientd, void *item);
 
 void aeron_driver_receiver_on_add_destination(void *clientd, void *item);
@@ -118,9 +135,11 @@ void aeron_driver_receiver_on_remove_destination(void *clientd, void *item);
 void aeron_driver_receiver_on_add_publication_image(void *clientd, void *item);
 void aeron_driver_receiver_on_remove_publication_image(void *clientd, void *item);
 
-void aeron_driver_receiver_on_remove_cool_down(void *clientd, void *item);
+void aeron_driver_receiver_on_remove_matching_state(void *clientd, void *item);
 
 void aeron_driver_receiver_on_resolution_change(void *clientd, void *item);
+
+void aeron_driver_receiver_on_invalidate_image(void *clientd, void *item);
 
 int aeron_driver_receiver_add_pending_setup(
     aeron_driver_receiver_t *receiver,
@@ -129,10 +148,5 @@ int aeron_driver_receiver_add_pending_setup(
     int32_t session_id,
     int32_t stream_id,
     struct sockaddr_storage *control_addr);
-
-inline size_t aeron_driver_receiver_num_images(aeron_driver_receiver_t *receiver)
-{
-    return receiver->images.length;
-}
 
 #endif //AERON_DRIVER_RECEIVER_H

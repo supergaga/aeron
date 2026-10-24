@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,14 @@
  */
 package io.aeron;
 
-import io.aeron.command.*;
+import io.aeron.command.ClientTimeoutFlyweight;
+import io.aeron.command.ControlProtocolEvents;
+import io.aeron.command.CorrelatedMessageFlyweight;
+import io.aeron.command.ErrorResponseFlyweight;
+import io.aeron.command.OperationSucceededFlyweight;
+import io.aeron.command.PublicationBuffersReadyFlyweight;
+import io.aeron.command.SubscriptionReadyFlyweight;
+import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.ConductorServiceTimeoutException;
 import io.aeron.exceptions.DriverTimeoutException;
 import io.aeron.exceptions.RegistrationException;
@@ -26,16 +33,28 @@ import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import org.agrona.ErrorHandler;
 import org.agrona.MutableDirectBuffer;
-import org.agrona.concurrent.*;
+import org.agrona.SemanticVersion;
+import org.agrona.concurrent.AgentTerminationException;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.MessageHandler;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.NoOpIdleStrategy;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.broadcast.CopyBroadcastReceiver;
+import org.agrona.concurrent.status.CountersManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.function.ToIntFunction;
 
+import static io.aeron.AeronCounters.DRIVER_SYSTEM_COUNTER_TYPE_ID;
+import static io.aeron.AeronCounters.SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION;
 import static io.aeron.ErrorCode.INVALID_CHANNEL;
 import static io.aeron.logbuffer.LogBufferDescriptor.PARTITION_COUNT;
 import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
@@ -45,8 +64,27 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.core.Is.is;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.atMostOnce;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.only;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(InterruptingTestCallback.class)
 class ClientConductorTest
@@ -89,8 +127,12 @@ class ClientConductorTest
     private final UnsafeBuffer clientTimeoutBuffer = new UnsafeBuffer(new byte[SEND_BUFFER_CAPACITY]);
 
     private final CopyBroadcastReceiver mockToClientReceiver = mock(CopyBroadcastReceiver.class);
-    private final UnsafeBuffer counterValuesBuffer = new UnsafeBuffer(new byte[COUNTER_BUFFER_LENGTH]);
-    private final UnsafeBuffer counterMetaDataBuffer = new UnsafeBuffer(new byte[COUNTER_BUFFER_LENGTH]);
+    final UnsafeBuffer counterMetaDataBuffer = new UnsafeBuffer(
+        ByteBuffer.allocateDirect(640 * 1024), 0, 512 * 1024);
+    final UnsafeBuffer counterValuesBuffer = new UnsafeBuffer(
+        counterMetaDataBuffer.byteBuffer(),
+        counterMetaDataBuffer.capacity(),
+        counterMetaDataBuffer.byteBuffer().capacity() - counterMetaDataBuffer.capacity());
 
     private long timeMs = 0;
     private final EpochClock epochClock = () -> timeMs += 10;
@@ -100,6 +142,7 @@ class ClientConductorTest
 
     private final ErrorHandler mockClientErrorHandler = spy(new PrintError());
 
+    private Aeron.Context context;
     private ClientConductor conductor;
     private final DriverProxy driverProxy = mock(DriverProxy.class);
     private final AvailableImageHandler mockAvailableImageHandler = mock(AvailableImageHandler.class);
@@ -113,7 +156,7 @@ class ClientConductorTest
     @BeforeEach
     void setUp()
     {
-        final Aeron.Context ctx = new Aeron.Context()
+        context = new Aeron.Context()
             .clientLock(mockClientLock)
             .epochClock(epochClock)
             .nanoClock(nanoClock)
@@ -129,18 +172,18 @@ class ClientConductorTest
             .driverTimeoutMs(AWAIT_TIMEOUT)
             .interServiceTimeoutNs(TimeUnit.MILLISECONDS.toNanos(INTER_SERVICE_TIMEOUT_MS));
 
-        ctx.countersMetaDataBuffer(counterMetaDataBuffer);
-        ctx.countersValuesBuffer(counterValuesBuffer);
+        context.countersMetaDataBuffer(counterMetaDataBuffer);
+        context.countersValuesBuffer(counterValuesBuffer);
 
         when(mockClientLock.tryLock()).thenReturn(TRUE);
 
         when(driverProxy.addPublication(CHANNEL, STREAM_ID_1)).thenReturn(CORRELATION_ID);
         when(driverProxy.addPublication(CHANNEL, STREAM_ID_2)).thenReturn(CORRELATION_ID_2);
-        when(driverProxy.removePublication(CORRELATION_ID)).thenReturn(CLOSE_CORRELATION_ID);
+        when(driverProxy.removePublication(CORRELATION_ID, false)).thenReturn(CLOSE_CORRELATION_ID);
         when(driverProxy.addSubscription(anyString(), anyInt())).thenReturn(CORRELATION_ID);
         when(driverProxy.removeSubscription(CORRELATION_ID)).thenReturn(CLOSE_CORRELATION_ID);
 
-        conductor = new ClientConductor(ctx, mockAeron);
+        conductor = new ClientConductor(context, mockAeron);
 
         publicationReady.wrap(publicationReadyBuffer, 0);
         subscriptionReady.wrap(subscriptionReadyBuffer, 0);
@@ -243,7 +286,7 @@ class ClientConductorTest
 
         publication.close();
 
-        verify(driverProxy).removePublication(CORRELATION_ID);
+        verify(driverProxy).removePublication(CORRELATION_ID, false);
     }
 
     @Test
@@ -316,8 +359,8 @@ class ClientConductorTest
 
         publication.close();
 
-        verify(driverProxy).removePublication(CORRELATION_ID);
-        verify(driverProxy, never()).removePublication(CORRELATION_ID_2);
+        verify(driverProxy).removePublication(CORRELATION_ID, false);
+        verify(driverProxy, never()).removePublication(CORRELATION_ID_2, false);
     }
 
     @Test
@@ -560,7 +603,374 @@ class ClientConductorTest
         assertFalse(conductor.isClosed());
     }
 
-    void whenReceiveBroadcastOnMessage(
+    @Test
+    void shouldRemovePendingSubscriptionByRegistrationId()
+    {
+        final String channel = "aeron:ipc?alias=test";
+        final int streamId = 42;
+        final long subscriptionId = -7777777777777L;
+        when(driverProxy.addSubscription(channel, streamId)).thenReturn(subscriptionId);
+
+        assertEquals(subscriptionId, conductor.asyncAddSubscription(channel, streamId));
+
+        assertTrue(conductor.asyncCommandIdSet.contains(subscriptionId));
+        final ClientConductor.PendingSubscription pendingSubscription =
+            (ClientConductor.PendingSubscription)conductor.resourceByRegIdMap.get(subscriptionId);
+        assertNotNull(pendingSubscription);
+        assertNotNull(pendingSubscription.subscription);
+        assertFalse(pendingSubscription.subscription.isClosed);
+
+        conductor.removeSubscription(subscriptionId);
+        assertFalse(conductor.asyncCommandIdSet.contains(subscriptionId));
+        assertNull(conductor.resourceByRegIdMap.get(subscriptionId));
+        verify(driverProxy, atMostOnce()).removeSubscription(subscriptionId);
+        assertTrue(pendingSubscription.subscription.isClosed());
+    }
+
+    @Test
+    void shouldRemoveSubscriptionByRegistrationId()
+    {
+        final String channel = "aeron:ipc?alias=test";
+        final int streamId = 42;
+        final long subscriptionId = 472394234579L;
+        final int statusIndicatorId = -444;
+        when(driverProxy.addSubscription(channel, streamId)).thenReturn(subscriptionId);
+        assertEquals(subscriptionId, conductor.asyncAddSubscription(channel, streamId));
+        conductor.onNewSubscription(subscriptionId, statusIndicatorId);
+
+
+        final Subscription subscription =
+            (Subscription)conductor.resourceByRegIdMap.get(subscriptionId);
+        assertNotNull(subscription);
+        assertFalse(subscription.isClosed);
+
+        conductor.removeSubscription(subscriptionId);
+        assertFalse(conductor.asyncCommandIdSet.contains(subscriptionId));
+        assertNull(conductor.resourceByRegIdMap.get(subscriptionId));
+        verify(driverProxy, atMostOnce()).removeSubscription(subscriptionId);
+        assertTrue(subscription.isClosed());
+    }
+
+    @Test
+    void shouldNotifyDriverWhenAsyncSubscriptionByRegistrationId()
+    {
+        final long subscriptionId = 42;
+        conductor.asyncCommandIdSet.add(subscriptionId);
+
+        conductor.removeSubscription(subscriptionId);
+        assertFalse(conductor.asyncCommandIdSet.contains(subscriptionId));
+        verify(driverProxy, only()).removeSubscription(subscriptionId);
+    }
+
+    @Test
+    void removeSubscriptionByRegistrationIdIsANoOpIfIdIsUnknown()
+    {
+        final long subscriptionId = 666;
+
+        conductor.removeSubscription(subscriptionId);
+
+        assertFalse(conductor.asyncCommandIdSet.contains(subscriptionId));
+        verify(driverProxy, never()).removeSubscription(subscriptionId);
+    }
+
+    @Test
+    void shouldThrowAeronExceptionOnAttemptToRemoveWrongResourceUsingSubscriptionRegistrationId()
+    {
+        final long registrationId = 42;
+        conductor.resourceByRegIdMap.put(registrationId, "test resource");
+
+        final AeronException exception =
+            assertThrowsExactly(AeronException.class, () -> conductor.removeSubscription(registrationId));
+        assertEquals("ERROR - registration id is not a Subscription: String", exception.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "aeron:udp?endpoint=localhost:5050",
+        "aeron:udp?endpoint=localhost:5050|sparse=true",
+        "aeron:udp?endpoint=localhost:8080|sparse=false" })
+    void shouldPreTouchLogBuffersForNewImage(final String channel)
+    {
+        final int streamId = 42;
+        final long subscriptionId = -472398432L;
+        context.preTouchMappedMemory(true);
+
+        whenReceiveBroadcastOnMessage(
+            ControlProtocolEvents.ON_SUBSCRIPTION_READY,
+            subscriptionReadyBuffer,
+            (buffer) ->
+            {
+                subscriptionReady.correlationId(subscriptionId);
+                return SubscriptionReadyFlyweight.LENGTH;
+            });
+        when(driverProxy.addSubscription(channel, streamId)).thenReturn(subscriptionId);
+        final Subscription subscription = conductor.addSubscription(channel, streamId);
+
+        final String logFileName = SESSION_ID_1 + "-log";
+        conductor.onAvailableImage(
+            subscriptionId,
+            SESSION_ID_1,
+            subscription.registrationId(),
+            SUBSCRIPTION_POSITION_ID,
+            logFileName,
+            SOURCE_INFO);
+
+        final LogBuffers logBuffers = logBuffersFactory.map(logFileName);
+        assertNotNull(logBuffers);
+        verify(logBuffers, times(1)).preTouch();
+    }
+
+    @Test
+    void shouldNotPreTouchLogBuffersForImageIfDisabled()
+    {
+        final int streamId = 42;
+        final String channel = "aeron:ipc?alias=test";
+        final long subscriptionId = -472398432L;
+        context.preTouchMappedMemory(false);
+
+        whenReceiveBroadcastOnMessage(
+            ControlProtocolEvents.ON_SUBSCRIPTION_READY,
+            subscriptionReadyBuffer,
+            (buffer) ->
+            {
+                subscriptionReady.correlationId(subscriptionId);
+                return SubscriptionReadyFlyweight.LENGTH;
+            });
+        when(driverProxy.addSubscription(channel, streamId)).thenReturn(subscriptionId);
+        final Subscription subscription = conductor.addSubscription(channel, streamId);
+
+        final String logFileName = SESSION_ID_1 + "-log";
+        conductor.onAvailableImage(
+            subscriptionId,
+            SESSION_ID_1,
+            subscription.registrationId(),
+            SUBSCRIPTION_POSITION_ID,
+            logFileName,
+            SOURCE_INFO);
+
+        final LogBuffers logBuffers = logBuffersFactory.map(logFileName);
+        assertNotNull(logBuffers);
+        verify(logBuffers, never()).preTouch();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "aeron:udp?endpoint=localhost:5050",
+        "aeron:udp?endpoint=localhost:5050|sparse=true",
+        "aeron:udp?endpoint=localhost:8080|sparse=false" })
+    void shouldPreTouchLogBuffersForNewPublication(final String channel)
+    {
+        final int streamId = -53453894;
+        final long publicationId = 113;
+        final String logFileName = SESSION_ID_2 + "-log";
+        context.preTouchMappedMemory(true);
+
+        whenReceiveBroadcastOnMessage(
+            ControlProtocolEvents.ON_PUBLICATION_READY,
+            publicationReadyBuffer,
+            (buffer) ->
+            {
+                publicationReady.correlationId(publicationId);
+                publicationReady.registrationId(publicationId);
+                publicationReady.logFileName(logFileName);
+                return publicationReady.length();
+            });
+        when(driverProxy.addPublication(channel, streamId)).thenReturn(publicationId);
+        final ConcurrentPublication publication = conductor.addPublication(channel, streamId);
+        assertNotNull(publication);
+
+        final LogBuffers logBuffers = logBuffersFactory.map(logFileName);
+        assertNotNull(logBuffers);
+        verify(logBuffers, times(1)).preTouch();
+    }
+
+    @Test
+    void shouldNotPreTouchLogBuffersForPublicationIfDisabled()
+    {
+        final int streamId = -53453894;
+        final String channel = "aeron:ipc?alias=test";
+        final long publicationId = 113;
+        final String logFileName = SESSION_ID_2 + "-log";
+        context.preTouchMappedMemory(false);
+
+        whenReceiveBroadcastOnMessage(
+            ControlProtocolEvents.ON_PUBLICATION_READY,
+            publicationReadyBuffer,
+            (buffer) ->
+            {
+                publicationReady.correlationId(publicationId);
+                publicationReady.registrationId(publicationId);
+                publicationReady.logFileName(logFileName);
+                return publicationReady.length();
+            });
+        when(driverProxy.addPublication(channel, streamId)).thenReturn(publicationId);
+        final ConcurrentPublication publication = conductor.addPublication(channel, streamId);
+        assertNotNull(publication);
+
+        final LogBuffers logBuffers = logBuffersFactory.map(logFileName);
+        assertNotNull(logBuffers);
+        verify(logBuffers, never()).preTouch();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "aeron:udp?endpoint=localhost:5050",
+        "aeron:udp?endpoint=localhost:5050|sparse=true",
+        "aeron:udp?endpoint=localhost:8080|sparse=false" })
+    void shouldPreTouchLogBuffersForNewExclusivePublication(final String channel)
+    {
+        final int streamId = -53453894;
+        final long publicationId = 113;
+        final String logFileName = SESSION_ID_2 + "-log";
+        context.preTouchMappedMemory(true);
+
+        whenReceiveBroadcastOnMessage(
+            ControlProtocolEvents.ON_EXCLUSIVE_PUBLICATION_READY,
+            publicationReadyBuffer,
+            (buffer) ->
+            {
+                publicationReady.correlationId(publicationId);
+                publicationReady.registrationId(publicationId);
+                publicationReady.logFileName(logFileName);
+                return publicationReady.length();
+            });
+        when(driverProxy.addExclusivePublication(channel, streamId)).thenReturn(publicationId);
+        final ExclusivePublication publication = conductor.addExclusivePublication(channel, streamId);
+        assertNotNull(publication);
+
+        final LogBuffers logBuffers = logBuffersFactory.map(logFileName);
+        assertNotNull(logBuffers);
+        verify(logBuffers, times(1)).preTouch();
+    }
+
+    @Test
+    void shouldNotPreTouchLogBuffersForExclusivePublicationIfDisabled()
+    {
+        final int streamId = -53453894;
+        final String channel = "aeron:ipc?alias=test";
+        final long publicationId = 113;
+        final String logFileName = SESSION_ID_2 + "-log";
+        context.preTouchMappedMemory(false);
+
+        whenReceiveBroadcastOnMessage(
+            ControlProtocolEvents.ON_EXCLUSIVE_PUBLICATION_READY,
+            publicationReadyBuffer,
+            (buffer) ->
+            {
+                publicationReady.correlationId(publicationId);
+                publicationReady.registrationId(publicationId);
+                publicationReady.logFileName(logFileName);
+                return publicationReady.length();
+            });
+        when(driverProxy.addExclusivePublication(channel, streamId)).thenReturn(publicationId);
+        final ExclusivePublication publication = conductor.addExclusivePublication(channel, streamId);
+        assertNotNull(publication);
+
+        final LogBuffers logBuffers = logBuffersFactory.map(logFileName);
+        assertNotNull(logBuffers);
+        verify(logBuffers, never()).preTouch();
+    }
+
+    @Test
+    void shouldUseZeroAsControlProtocolVersionIfCounterNotAvailable()
+    {
+        assertEquals(0, conductor.controlProtocolVersion);
+    }
+
+    @Test
+    void shouldGetControlProtocolVersionFromSystemCounter()
+    {
+        final int expectedVersion = SemanticVersion.compose(123, 98, 19);
+        final CountersManager countersManager = new CountersManager(counterMetaDataBuffer, counterValuesBuffer);
+        for (int i = 0; i <= SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION; i++)
+        {
+            allocateSystemCounter(countersManager, i, "#" + i);
+        }
+        countersManager.setCounterValue(SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION, expectedVersion);
+
+        final ClientConductor clientConductor = new ClientConductor(context, mockAeron);
+        assertEquals(expectedVersion, clientConductor.controlProtocolVersion);
+    }
+
+    @Test
+    void shouldReturnRandomIdIfMediaDriverDoesNotSupportNextAvailableSessionIdCommand()
+    {
+        final int streamId = 42;
+
+        final int sessionId1 = conductor.nextSessionId(streamId);
+        final int sessionId2 = conductor.nextSessionId(streamId);
+        final int sessionId3 = conductor.nextSessionId(streamId);
+
+        assertNotEquals(sessionId1, sessionId2);
+        assertNotEquals(sessionId1, sessionId3);
+        assertNotEquals(sessionId1 + 1, sessionId2);
+        assertNotEquals(sessionId2 + 1, sessionId3);
+    }
+
+    @Test
+    void asyncRemoveCounterByRegistrationIdIsANoOpIfIdIsUnknown()
+    {
+        final long subscriptionId = 666;
+
+        conductor.asyncRemoveCounter(subscriptionId);
+
+        assertFalse(conductor.asyncCommandIdSet.contains(subscriptionId));
+        verify(driverProxy, never()).removeCounter(subscriptionId);
+    }
+
+    @Test
+    void shouldThrowAeronExceptionOnAttemptToRemoveWrongResourceUsingCounterRegistrationId()
+    {
+        final long registrationId = 42;
+        conductor.resourceByRegIdMap.put(registrationId, "test resource");
+
+        final AeronException exception =
+            assertThrowsExactly(AeronException.class, () -> conductor.asyncRemoveCounter(registrationId));
+        assertEquals("ERROR - registration id is not a Counter: String", exception.getMessage());
+    }
+
+    @Test
+    void shouldRemoveCounterByRegistrationId()
+    {
+        final int typeId = 42;
+        final String label = "test";
+        final long counterRegistrationId = 777;
+        final int counterId = 10;
+        when(driverProxy.addCounter(typeId, label)).thenReturn(counterRegistrationId);
+        assertEquals(counterRegistrationId, conductor.asyncAddCounter(typeId, label));
+        conductor.onNewCounter(counterRegistrationId, counterId);
+
+
+        final Counter counter =
+            (Counter)conductor.resourceByRegIdMap.get(counterRegistrationId);
+        assertNotNull(counter);
+        assertFalse(counter.isClosed());
+
+        conductor.asyncRemoveCounter(counterRegistrationId);
+        assertFalse(conductor.asyncCommandIdSet.contains(counterRegistrationId));
+        assertNull(conductor.resourceByRegIdMap.get(counterRegistrationId));
+        verify(driverProxy, atMostOnce()).removeCounter(counterRegistrationId);
+        assertTrue(counter.isClosed());
+    }
+
+    @Test
+    void shouldRemovePendingCounterByRegistrationId()
+    {
+        final int typeId = 42;
+        final String label = "test";
+        final long counterRegistrationId = 777;
+        when(driverProxy.addCounter(typeId, label)).thenReturn(counterRegistrationId);
+        assertEquals(counterRegistrationId, conductor.asyncAddCounter(typeId, label));
+
+        assertTrue(conductor.asyncCommandIdSet.contains(counterRegistrationId));
+        assertNull(conductor.resourceByRegIdMap.get(counterRegistrationId));
+
+        conductor.asyncRemoveCounter(counterRegistrationId);
+        assertFalse(conductor.asyncCommandIdSet.contains(counterRegistrationId));
+        verify(driverProxy, atMostOnce()).removeCounter(counterRegistrationId);
+    }
+
+    private void whenReceiveBroadcastOnMessage(
         final int msgTypeId, final MutableDirectBuffer buffer, final ToIntFunction<MutableDirectBuffer> filler)
     {
         doAnswer(
@@ -572,6 +982,18 @@ class ClientConductorTest
                 return 1;
             })
             .when(mockToClientReceiver).receive(any(MessageHandler.class));
+    }
+
+    private static void allocateSystemCounter(
+        final CountersManager countersManager, final int counterId, final String label)
+    {
+        final int id = countersManager.allocate(
+            label,
+            DRIVER_SYSTEM_COUNTER_TYPE_ID,
+            (buffer) -> buffer.putInt(0, counterId));
+        assertEquals(counterId, id);
+        countersManager.setCounterRegistrationId(id, counterId);
+        countersManager.setCounterOwnerId(id, Aeron.NULL_VALUE);
     }
 
     class PrintError implements ErrorHandler

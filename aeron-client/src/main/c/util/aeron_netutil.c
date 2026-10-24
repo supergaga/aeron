@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,8 @@ __inline DWORD64 __builtin_popcountll(DWORD64 operand)
 #error Unsupported platform!
 #endif
 
+#define AERON_NETUTIL_NAMED_INTERFACE_OPENING_CHAR '{'
+
 int aeron_ip_addr_resolver(const char *host, struct sockaddr_storage *sockaddr, int family_hint, int protocol)
 {
     if (-1 == aeron_net_init())
@@ -75,13 +77,13 @@ int aeron_ip_addr_resolver(const char *host, struct sockaddr_storage *sockaddr, 
         return -1;
     }
 
-    if (info->ai_family == AF_INET)
+    if (AF_INET == info->ai_family)
     {
         memcpy(sockaddr, info->ai_addr, sizeof(struct sockaddr_in));
         sockaddr->ss_family = AF_INET;
         result = 0;
     }
-    else if (info->ai_family == AF_INET6)
+    else if (AF_INET6 == info->ai_family)
     {
         memcpy(sockaddr, info->ai_addr, sizeof(struct sockaddr_in6));
         sockaddr->ss_family = AF_INET6;
@@ -170,12 +172,12 @@ int aeron_udp_port_resolver(const char *port_str, bool optional)
 
     if ((0 == value && 0 != errno) || end_ptr == port_str)
     {
-        AERON_SET_ERR(EINVAL, "port invalid: %s", port_str);
+        AERON_SET_ERR(EINVAL, "port invalid: '%s'", port_str);
         return -1;
     }
     else if (value > UINT16_MAX)
     {
-        AERON_SET_ERR(EINVAL, "port out of range: %s", port_str);
+        AERON_SET_ERR(EINVAL, "port out of range: '%s'", port_str);
         return -1;
     }
 
@@ -256,6 +258,7 @@ int aeron_interface_parse_and_resolve(const char *interface_str, struct sockaddr
 
     if (-1 == aeron_interface_split(interface_str, &parsed_interface))
     {
+        AERON_APPEND_ERR("%s", "");
         return -1;
     }
 
@@ -465,7 +468,7 @@ struct lookup_state
 {
     struct sockaddr_storage lookup_addr;
     struct sockaddr_storage *if_addr;
-    unsigned int *if_index;
+    unsigned int if_index;
     unsigned int if_flags;
     size_t prefixlen;
     size_t if_prefixlen;
@@ -486,7 +489,7 @@ int aeron_ip_lookup_func(
             if ((flags & IFF_LOOPBACK) && !state->found)
             {
                 memcpy(state->if_addr, addr, addr_len);
-                *state->if_index = if_nametoindex(name);
+                state->if_index = if_nametoindex(name);
                 state->found = true;
                 return 1;
             }
@@ -497,11 +500,48 @@ int aeron_ip_lookup_func(
                 if (current_if_prefixlen > state->if_prefixlen)
                 {
                     memcpy(state->if_addr, addr, addr_len);
-                    *state->if_index = if_nametoindex(name);
+                    state->if_index = if_nametoindex(name);
                     state->if_prefixlen = current_if_prefixlen;
                 }
 
                 state->found = true;
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+struct lookup_by_name_and_family_state
+{
+    char *name;
+    int family;
+    struct sockaddr_storage *if_addr;
+    unsigned int if_index;
+    bool found;
+    unsigned int name_matches;
+};
+
+static int aeron_ip_lookup_by_name_and_family_func(
+    void *clientd, const char *name, struct sockaddr *addr, struct sockaddr *netmask, unsigned int flags)
+{
+    if (flags & IFF_UP)
+    {
+        struct lookup_by_name_and_family_state *state = (struct lookup_by_name_and_family_state *)clientd;
+
+        if (0 == strcmp(name, state->name))
+        {
+            state->name_matches++;
+
+            if (!state->found && state->family == addr->sa_family)
+            {
+                size_t addr_len = AF_INET6 == addr->sa_family ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+
+                memcpy(state->if_addr, addr, addr_len);
+                state->if_index = if_nametoindex(name);
+                state->found = true;
+
                 return 1;
             }
         }
@@ -528,32 +568,183 @@ void aeron_ip_copy_port(struct sockaddr_storage *dest_addr, struct sockaddr_stor
     }
 }
 
-int aeron_find_interface(const char *interface_str, struct sockaddr_storage *if_addr, unsigned int *if_index)
+int aeron_parse_named_interface(const char *interface_str, aeron_named_interface_t *out)
 {
-    struct lookup_state state;
+    if (interface_str[0] != AERON_NETUTIL_NAMED_INTERFACE_OPENING_CHAR)
+    {
+        return -1;
+    }
+
+    int close_idx = 0;
+    int len = 1;
+    while (true)
+    {
+        char c = interface_str[len];
+        if (c == '\0')
+        {
+            break;
+        }
+        else if (c == '}')
+        {
+            close_idx = len;
+        }
+        len++;
+    }
+
+    int name_len = close_idx - 1;
+    if (name_len <= 0 || name_len >= IF_NAMESIZE)
+    {
+        AERON_SET_ERR(EINVAL, "name length %d out of bounds", name_len);
+        return -1;
+    }
+
+    int port = 0;
+    int idx = close_idx + 1;
+    if (idx < len)
+    {
+        if (interface_str[idx] != ':')
+        {
+            AERON_SET_ERR(EINVAL, "%s", "unexpected character after name closing brace");
+            return -1;
+        }
+
+        idx++;
+
+        int port_len = len - idx;
+        if (port_len <= 0 || port_len > 5)
+        {
+            AERON_SET_ERR(EINVAL, "port length %d out of bounds", port_len);
+            return -1;
+        }
+
+        port = aeron_udp_port_resolver(interface_str + idx, false);
+        if (port < 0)
+        {
+            return -1;
+        }
+    }
+
+    strncpy(out->name, interface_str + 1, name_len);
+    out->name[name_len] = '\0';
+    out->port = port;
+
+    return 0;
+}
+
+static int aeron_find_interface_by_name_and_family(
+    int family, const char *interface_str, struct sockaddr_storage *if_addr, unsigned int *if_index)
+{
+    aeron_named_interface_t named_interface;
+
+    if (0 > aeron_parse_named_interface(interface_str, &named_interface))
+    {
+        AERON_APPEND_ERR("could not parse interface='%s'", interface_str);
+        return -1;
+    }
+
+    struct lookup_by_name_and_family_state state = {
+        .name = named_interface.name,
+        .family = family,
+        .if_addr = if_addr,
+    };
+
+    int result = aeron_lookup_interfaces(aeron_ip_lookup_by_name_and_family_func, &state);
+    if (0 > result)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
+    if (0 == result)
+    {
+        if (!state.name_matches)
+        {
+            AERON_SET_ERR(EINVAL, "unknown interface %s", named_interface.name);
+        }
+        else
+        {
+            char buffer[20];
+            switch (family)
+            {
+                case AF_INET:
+                    snprintf(buffer, sizeof(buffer), "INET");
+                    break;
+                case AF_INET6:
+                    snprintf(buffer, sizeof(buffer), "INET6");
+                    break;
+                default:
+                    snprintf(buffer, sizeof(buffer), "family %d", family);
+                    break;
+            }
+            AERON_SET_ERR(EINVAL, "no %s addresses found on interface %s", buffer, named_interface.name);
+        }
+        return -1;
+    }
+
+    if (AF_INET6 == if_addr->ss_family)
+    {
+        struct sockaddr_in6 *dest = (struct sockaddr_in6 *)if_addr;
+
+        dest->sin6_port = htons(named_interface.port);
+    }
+    else if (AF_INET == if_addr->ss_family)
+    {
+        struct sockaddr_in *dest = (struct sockaddr_in *)if_addr;
+
+        dest->sin_port = htons(named_interface.port);
+    }
+
+    *if_index = state.if_index;
+
+    return 0;
+}
+
+static int aeron_find_interface_by_address(
+    const char *interface_str, struct sockaddr_storage *if_addr, unsigned int *if_index)
+{
+    struct lookup_state state = { 0 };
 
     if (aeron_interface_parse_and_resolve(interface_str, &state.lookup_addr, &state.prefixlen) < 0)
     {
+        AERON_APPEND_ERR("could not parse interface='%s'", interface_str);
         return -1;
     }
 
     state.if_addr = if_addr;
-    state.if_index = if_index;
-    state.if_prefixlen = 0;
-    state.if_flags = 0;
-    state.found = false;
 
     int result = aeron_lookup_interfaces(aeron_ip_lookup_func, &state);
+    if (result < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
 
     if (0 == result)
     {
-        AERON_SET_ERR(EINVAL, "could not find matching interface=(%s)", interface_str);
+        AERON_SET_ERR(EINVAL, "could not find matching interface='%s'", interface_str);
         return -1;
     }
 
     aeron_ip_copy_port(if_addr, &state.lookup_addr);
+    *if_index = state.if_index;
 
     return 0;
+}
+
+static bool aeron_is_named_interface(const char *interface_str)
+{
+    return interface_str[0] == AERON_NETUTIL_NAMED_INTERFACE_OPENING_CHAR;
+}
+
+int aeron_find_interface(
+    int family, const char *interface_str, struct sockaddr_storage *if_addr, unsigned int *if_index)
+{
+    if (aeron_is_named_interface(interface_str))
+    {
+        return aeron_find_interface_by_name_and_family(family, interface_str, if_addr, if_index);
+    }
+
+    return aeron_find_interface_by_address(interface_str, if_addr, if_index);
 }
 
 int aeron_find_unicast_interface(
@@ -566,14 +757,15 @@ int aeron_find_unicast_interface(
         struct sockaddr_storage tmp_addr;
         size_t prefixlen = 0;
 
-        if (aeron_interface_parse_and_resolve(interface_str, &tmp_addr, &prefixlen) >= 0 &&
+        if (!aeron_is_named_interface(interface_str) &&
+            aeron_interface_parse_and_resolve(interface_str, &tmp_addr, &prefixlen) >= 0 &&
             aeron_is_wildcard_addr(&tmp_addr))
         {
             memcpy(interface_addr, &tmp_addr, sizeof(tmp_addr));
             return 0;
         }
 
-        return aeron_find_interface(interface_str, interface_addr, interface_index);
+        return aeron_find_interface(family, interface_str, interface_addr, interface_index);
     }
     else if (AF_INET6 == family)
     {
@@ -722,4 +914,35 @@ done:
     }
 
     return result;
+}
+
+int aeron_sockaddr_storage_cmp(struct sockaddr_storage *a, struct sockaddr_storage *b, bool *result)
+{
+    if (a->ss_family != b->ss_family)
+    {
+        *result = false;
+    }
+    else if (AF_INET == a->ss_family)
+    {
+        struct sockaddr_in *a_in = (struct sockaddr_in *)a;
+        struct sockaddr_in *b_in = (struct sockaddr_in *)b;
+
+        *result = (a_in->sin_addr.s_addr == b_in->sin_addr.s_addr) && (a_in->sin_port == b_in->sin_port);
+    }
+    else if (AF_INET6 == a->ss_family)
+    {
+        struct sockaddr_in6 *a_in6 = (struct sockaddr_in6 *)a;
+        struct sockaddr_in6 *b_in6 = (struct sockaddr_in6 *)b;
+
+        *result = 0 == memcmp(&a_in6->sin6_addr, &b_in6->sin6_addr, sizeof(struct sockaddr_in6)) &&
+            (a_in6->sin6_port == b_in6->sin6_port);
+    }
+    else
+    {
+        *result = false;
+        AERON_SET_ERR(EINVAL, "%s", "Unsupported address family");
+        return -1;
+    }
+
+    return 0;
 }

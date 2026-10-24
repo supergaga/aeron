@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -124,26 +124,16 @@ inline std::int64_t xchg(volatile std::int64_t *address, std::int64_t value)
 
 inline std::int32_t cmpxchg(volatile std::int32_t *address, std::int32_t expected, std::int32_t desired)
 {
-    if (__atomic_compare_exchange(address, &expected, &desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
-    {
-        return expected;
-    }
-    else
-    {
-        return *address;
-    }
+    // on failure, expected is updated with the value observed by the compare and exchange
+    __atomic_compare_exchange(address, &expected, &desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
 }
 
 inline std::int64_t cmpxchg(volatile std::int64_t *address, std::int64_t expected, std::int64_t desired)
 {
-    if (__atomic_compare_exchange(address, &expected, &desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
-    {
-        return expected;
-    }
-    else
-    {
-        return *address;
-    }
+    // on failure, expected is updated with the value observed by the compare and exchange
+    __atomic_compare_exchange(address, &expected, &desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
 }
 
 //-------------------------------------

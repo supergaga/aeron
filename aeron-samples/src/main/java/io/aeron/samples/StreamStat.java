@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,15 +16,15 @@
 package io.aeron.samples;
 
 import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.driver.status.SubscriberPos;
+import org.agrona.collections.Hashing;
+import org.agrona.collections.Object2ObjectHashMap;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.PrintStream;
 import java.util.*;
 
-import static io.aeron.driver.status.PublisherLimit.PUBLISHER_LIMIT_TYPE_ID;
-import static io.aeron.driver.status.PublisherPos.PUBLISHER_POS_TYPE_ID;
-import static io.aeron.driver.status.ReceiverPos.RECEIVER_POS_TYPE_ID;
-import static io.aeron.driver.status.SenderLimit.SENDER_LIMIT_TYPE_ID;
 import static io.aeron.driver.status.StreamCounter.*;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.agrona.BitUtil.SIZE_OF_INT;
@@ -42,8 +42,8 @@ public final class StreamStat
 {
     private static final Comparator<StreamCompositeKey> LINES_COMPARATOR =
         Comparator.comparingLong(StreamCompositeKey::sessionId)
-        .thenComparingInt(StreamCompositeKey::streamId)
-        .thenComparing(StreamCompositeKey::channel);
+            .thenComparingInt(StreamCompositeKey::streamId)
+            .thenComparing(StreamCompositeKey::channel);
 
     private final CountersReader counters;
 
@@ -78,40 +78,39 @@ public final class StreamStat
     public Map<StreamCompositeKey, List<StreamPosition>> snapshot()
     {
         final Map<StreamCompositeKey, List<StreamPosition>> streams = new TreeMap<>(LINES_COMPARATOR);
+        final Object2ObjectHashMap<StreamCompositeKey, String> fullChannelByStream = new Object2ObjectHashMap<>();
 
         counters.forEach(
             (counterId, typeId, keyBuffer, label) ->
             {
-                if ((typeId >= PUBLISHER_LIMIT_TYPE_ID && typeId <= RECEIVER_POS_TYPE_ID) ||
-                    typeId == SENDER_LIMIT_TYPE_ID || typeId == PUBLISHER_POS_TYPE_ID)
+                if (isStreamCounterType(typeId))
                 {
-                    final String channel;
-                    final int uriIndex = label.indexOf("aeron:");
-                    if (uriIndex >= 0)
-                    {
-                        channel = label.substring(uriIndex);
-                    }
-                    else
-                    {
-                        final int channelLength = Math.min(
-                            keyBuffer.getInt(CHANNEL_OFFSET, LITTLE_ENDIAN),
-                            MAX_CHANNEL_LENGTH);
-                        channel = keyBuffer.getStringWithoutLengthAscii(CHANNEL_OFFSET + SIZE_OF_INT, channelLength);
-                    }
+                    final int channelLength = keyBuffer.getInt(CHANNEL_OFFSET, LITTLE_ENDIAN);
+                    final String channel =
+                        keyBuffer.getStringWithoutLengthAscii(CHANNEL_OFFSET + SIZE_OF_INT, channelLength);
 
                     final StreamCompositeKey key = new StreamCompositeKey(
-                        keyBuffer.getInt(SESSION_ID_OFFSET),
-                        keyBuffer.getInt(STREAM_ID_OFFSET),
-                        channel);
+                        keyBuffer.getInt(SESSION_ID_OFFSET), keyBuffer.getInt(STREAM_ID_OFFSET), channel);
 
                     final StreamPosition position = new StreamPosition(
+                        label.substring(0, label.indexOf(':')),
                         keyBuffer.getLong(REGISTRATION_ID_OFFSET),
-                        counters.getCounterValue(counterId),
-                        typeId);
+                        counters.getCounterValue(counterId)
+                    );
 
-                    streams.computeIfAbsent(key, (ignore) -> new ArrayList<>()).add(position);
+                    final List<StreamPosition> positions = streams.computeIfAbsent(key, k -> new ArrayList<>());
+                    positions.add(position);
+
+                    final String fullChannel = extractChannelInformation(typeId, label, channel);
+                    final String existingFullChannel = fullChannelByStream.get(key);
+                    if (null == existingFullChannel || fullChannel.length() > existingFullChannel.length())
+                    {
+                        fullChannelByStream.put(key, fullChannel);
+                    }
                 }
             });
+
+        streams.keySet().forEach(k -> k.fullChannel = fullChannelByStream.get(k));
 
         return streams;
     }
@@ -137,15 +136,15 @@ public final class StreamStat
             builder
                 .append("sessionId=").append(key.sessionId())
                 .append(" streamId=").append(key.streamId())
-                .append(" channel=").append(key.channel())
+                .append(" channel=").append(key.fullChannel)
                 .append(" :");
 
             for (final StreamPosition streamPosition : entry.getValue())
             {
                 builder
                     .append(' ')
-                    .append(labelName(streamPosition.typeId()))
-                    .append(':').append(streamPosition.id())
+                    .append(streamPosition.name())
+                    .append(':').append(streamPosition.registrationId())
                     .append(':').append(streamPosition.value());
             }
 
@@ -153,6 +152,48 @@ public final class StreamStat
         }
 
         return streams.size();
+    }
+
+    private static boolean isStreamCounterType(final int typeId)
+    {
+        return switch (typeId)
+        {
+            case AeronCounters.DRIVER_PUBLISHER_LIMIT_TYPE_ID,
+                 AeronCounters.DRIVER_SENDER_POSITION_TYPE_ID,
+                 AeronCounters.DRIVER_RECEIVER_HWM_TYPE_ID,
+                 AeronCounters.DRIVER_SUBSCRIBER_POSITION_TYPE_ID,
+                 AeronCounters.DRIVER_RECEIVER_POS_TYPE_ID,
+                 AeronCounters.DRIVER_SENDER_LIMIT_TYPE_ID,
+                 AeronCounters.DRIVER_PUBLISHER_POS_TYPE_ID,
+                 AeronCounters.DRIVER_SENDER_BPE_TYPE_ID,
+                 AeronCounters.DRIVER_SENDER_NAKS_RECEIVED_TYPE_ID,
+                 AeronCounters.DRIVER_RECEIVER_NAKS_SENT_TYPE_ID -> true;
+            default -> false;
+        };
+    }
+
+    private static String extractChannelInformation(final int typeId, final String label, final String channel)
+    {
+        final int uriIndex = label.indexOf("aeron:");
+        final String fullChannel;
+        if (uriIndex >= 0)
+        {
+            final int joinPositionIndex;
+            if (SubscriberPos.SUBSCRIBER_POSITION_TYPE_ID == typeId &&
+                (joinPositionIndex = label.lastIndexOf(" @")) > uriIndex)
+            {
+                fullChannel = label.substring(uriIndex, joinPositionIndex);
+            }
+            else
+            {
+                fullChannel = label.substring(uriIndex);
+            }
+        }
+        else
+        {
+            fullChannel = channel;
+        }
+        return fullChannel;
     }
 
     /**
@@ -163,6 +204,7 @@ public final class StreamStat
         private final int sessionId;
         private final int streamId;
         private final String channel;
+        String fullChannel;
 
         /**
          * Construct a new key representing a unique stream.
@@ -213,6 +255,7 @@ public final class StreamStat
         /**
          * {@inheritDoc}
          */
+        @Override
         public boolean equals(final Object o)
         {
             if (this == o)
@@ -235,18 +278,20 @@ public final class StreamStat
         /**
          * {@inheritDoc}
          */
+        @Override
         public int hashCode()
         {
             int result = sessionId;
             result = 31 * result + streamId;
             result = 31 * result + channel.hashCode();
 
-            return result;
+            return Hashing.hash(result);
         }
 
         /**
          * {@inheritDoc}
          */
+        @Override
         public String toString()
         {
             return "StreamCompositeKey{" +
@@ -259,98 +304,23 @@ public final class StreamStat
 
     /**
      * Represents a position within a particular stream of messages.
+     *
+     * @param name           of the counter.
+     * @param registrationId of the registered entity.
+     * @param value          of the position.
      */
-    public static final class StreamPosition
+    public record StreamPosition(String name, long registrationId, long value)
     {
-        private final long id;
-        private final long value;
-        private final int typeId;
-
-        /**
-         * Stream position representation.
-         *
-         * @param id     of the registered entity.
-         * @param value  of the position.
-         * @param typeId of the counter.
-         */
-        public StreamPosition(final long id, final long value, final int typeId)
-        {
-            this.id = id;
-            this.value = value;
-            this.typeId = typeId;
-        }
-
-        /**
-         * The identifier for the registered entity, such as publication or subscription, to which the counter relates.
-         *
-         * @return the identifier for the registered entity to which the counter relates.
-         */
-        public long id()
-        {
-            return id;
-        }
-
-        /**
-         * The value of the counter.
-         *
-         * @return the value of the counter.
-         */
-        public long value()
-        {
-            return value;
-        }
-
-        /**
-         * The type category of the counter for the stream position.
-         *
-         * @return the type category of the counter for the stream position.
-         */
-        public int typeId()
-        {
-            return typeId;
-        }
-
         /**
          * {@inheritDoc}
          */
-        public boolean equals(final Object o)
-        {
-            if (this == o)
-            {
-                return true;
-            }
-
-            if (!(o instanceof StreamPosition))
-            {
-                return false;
-            }
-
-            final StreamPosition that = (StreamPosition)o;
-
-            return this.id == that.id && this.value == that.value && this.typeId == that.typeId;
-        }
-
-        /**
-         * {@inheritDoc}
-         */
-        public int hashCode()
-        {
-            int result = (int)(id ^ (id >>> 32));
-            result = 31 * result + (int)(value ^ (value >>> 32));
-            result = 31 * result + typeId;
-
-            return result;
-        }
-
-        /**
-         * {@inheritDoc}
-         */
+        @Override
         public String toString()
         {
             return "StreamPosition{" +
-                "id=" + id +
+                "name=" + name +
+                ", registrationId=" + registrationId +
                 ", value=" + value +
-                ", typeId=" + typeId +
                 '}';
         }
     }

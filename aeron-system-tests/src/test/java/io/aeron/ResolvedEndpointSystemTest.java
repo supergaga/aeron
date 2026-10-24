@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,6 +64,8 @@ class ResolvedEndpointSystemTest
             .threadingMode(ThreadingMode.SHARED);
 
         driver = TestMediaDriver.launch(context, testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
         client = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
     }
 
@@ -71,10 +73,6 @@ class ResolvedEndpointSystemTest
     void after()
     {
         CloseHelper.closeAll(client, driver);
-        if (null != driver)
-        {
-            driver.context().deleteDirectory();
-        }
     }
 
     @Test
@@ -254,9 +252,10 @@ class ResolvedEndpointSystemTest
                 }
 
                 long totalReceived = 0;
-                while ((totalReceived += mdsSub.poll(fragmentHandler, 10)) < 2)
+                while (totalReceived < 2)
                 {
                     Tests.yieldingIdle("Failed to receive from both publications");
+                    totalReceived += mdsSub.poll(fragmentHandler, 10);
                 }
             }
         }
@@ -266,7 +265,7 @@ class ResolvedEndpointSystemTest
     @InterruptAfter(5)
     void shouldAllowSystemAssignedPortOnDynamicMultiDestinationPublication()
     {
-        final String mdcUri = "aeron:udp?control=localhost:0";
+        final String mdcUri = "aeron:udp?control=localhost:0|control-mode=dynamic";
 
         try (Publication pub = client.addPublication(mdcUri, STREAM_ID))
         {

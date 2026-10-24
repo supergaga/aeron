@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,6 @@
 #define AERON_DLL_EXPORTS
 
 #include "util/aeron_strutil.h"
-#include "aeron_windows.h"
 
 void aeron_format_date(char *str, size_t count, int64_t timestamp)
 {
@@ -92,7 +91,7 @@ char *aeron_format_number_to_locale(long long value, char *buffer, size_t buffer
     return buffer;
 }
 
-void aeron_format_to_hex(char *str, size_t str_length, uint8_t *data, size_t data_len)
+void aeron_format_to_hex(char *str, size_t str_length, const uint8_t *data, size_t data_len)
 {
     static char table[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
 
@@ -165,7 +164,40 @@ int aeron_tokenise(char *input, char delimiter, int max_tokens, char **tokens)
     return num_tokens;
 }
 
-#if defined(_MSC_VER) && !defined(AERON_NO_GETOPT)
+int aeron_digit_count(uint32_t value)
+{
+    static uint64_t table[] = {
+        4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+        12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+        21474826480, 21474826480, 21474826480, 21474826480, 25769703776,
+        25769703776, 25769703776, 30063771072, 30063771072, 30063771072,
+        34349738368, 34349738368, 34349738368, 34349738368, 38554705664,
+        38554705664, 38554705664, 41949672960, 41949672960, 41949672960,
+        42949672960, 42949672960 };
+    int log2 = 63 - aeron_number_of_leading_zeroes_u64((uint64_t)value | 1);
+    return (int)((value + table[log2]) >> 32);
+}
+
+#if defined(AERON_COMPILER_MSVC)
+
+char *aeron_strndup(const char *value, size_t length)
+{
+    size_t str_length = strlen(value);
+    char *dup = NULL;
+
+    str_length = (str_length > length) ? length : str_length;
+    if (aeron_alloc((void **)&dup, str_length + 1) < 0)
+    {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    strncpy(dup, value, str_length);
+    dup[str_length] = '\0';
+    return dup;
+}
+
+#ifndef AERON_NO_GETOPT
 
 // Taken and modified from https://www.codeproject.com/KB/cpp/xgetopt/XGetopt_demo.zip
 // *****************************************************************
@@ -259,8 +291,10 @@ int getopt(int argc, char *const argv[], const char *opt_string)
 
     return c;
 }
+#endif
 
 #endif
 
 extern uint64_t aeron_fnv_64a_buf(uint8_t *buf, size_t len);
 extern bool aeron_str_length(const char *str, size_t length_bound, size_t *length);
+extern void aeron_str_null_terminate(uint8_t *text, int index);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,13 @@ public class DefaultAuthenticatorSupplier implements AuthenticatorSupplier
      * Singleton instance which can be used to avoid allocation.
      */
     public static final Authenticator DEFAULT_AUTHENTICATOR = new DefaultAuthenticator();
+
+    /**
+     * Default constructor.
+     */
+    public DefaultAuthenticatorSupplier()
+    {
+    }
 
     /**
      * Gets the singleton instance {@link #DEFAULT_AUTHENTICATOR} which authenticates all connection requests

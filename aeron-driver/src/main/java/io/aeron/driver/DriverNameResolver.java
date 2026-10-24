@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,17 +16,26 @@
 package io.aeron.driver;
 
 import io.aeron.AeronCounters;
+import io.aeron.CounterProvider;
+import io.aeron.driver.logging.DriverTracing;
+import io.aeron.driver.media.NetworkUtil;
 import io.aeron.driver.media.UdpChannel;
 import io.aeron.driver.media.UdpNameResolutionTransport;
 import io.aeron.driver.status.SystemCounterDescriptor;
+import io.aeron.exceptions.AeronException;
 import io.aeron.protocol.HeaderFlyweight;
 import io.aeron.protocol.ResolutionEntryFlyweight;
+import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
 import org.agrona.CloseHelper;
+import org.agrona.ExpandableArrayBuffer;
 import org.agrona.LangUtil;
 import org.agrona.collections.ArrayListUtil;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
+import org.agrona.concurrent.status.CountersReader;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -35,25 +44,28 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.concurrent.TimeUnit;
 
-import static io.aeron.driver.DriverNameResolverCache.byteSubsetEquals;
-import static io.aeron.driver.media.NetworkUtil.formatAddressAndPort;
+import static io.aeron.driver.DriverNameResolverCache.fullLengthMatch;
 import static io.aeron.protocol.ResolutionEntryFlyweight.*;
+import static io.aeron.protocol.ResolutionEntryFlyweight.MIN_HEADER_LENGTH;
+import static io.aeron.protocol.ResolutionEntryFlyweight.RES_TYPE_NAME_TO_IP4_MD;
+import static io.aeron.protocol.ResolutionEntryFlyweight.RES_TYPE_NAME_TO_IP6_MD;
+import static io.aeron.protocol.ResolutionEntryFlyweight.SELF_FLAG;
+import static io.aeron.protocol.ResolutionEntryFlyweight.entryLengthRequired;
 import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
 
 /**
  * Default {@link NameResolver} for the {@link MediaDriver}.
  */
-final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransport.UdpFrameHandler, NameResolver
+final class DriverNameResolver implements UdpNameResolutionTransport.UdpFrameHandler, NameResolverAgent
 {
-    static NameResolver bootstrapNameResolver = DefaultNameResolver.INSTANCE;
-    private static final String RESOLVER_NEIGHBORS_COUNTER_LABEL = "Resolver neighbors";
+    private static final int MAX_BOOTSTRAP_NEIGHBORS = 20;
 
-    // TODO: make these configurable
-    private static final long SELF_RESOLUTION_INTERVAL_MS = TimeUnit.SECONDS.toMillis(1);
-    private static final long NEIGHBOR_RESOLUTION_INTERVAL_MS = TimeUnit.SECONDS.toMillis(2);
-    private static final long TIMEOUT_MS = TimeUnit.SECONDS.toMillis(10);
+    private static final String RESOLVER_NEIGHBORS_COUNTER_LABEL = "Resolver neighbors";
+    private static final String BOOTSTRAP_NEIGHBOR_COUNTER_LABEL = "Bootstrap neighbor";
+
     private static final long WORK_INTERVAL_MS = 10;
 
     private final ByteBuffer byteBuffer = BufferUtil.allocateDirectAligned(
@@ -63,15 +75,17 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
     private final ResolutionEntryFlyweight resolutionEntryFlyweight = new ResolutionEntryFlyweight();
     private final ArrayList<Neighbor> neighborList = new ArrayList<>();
 
+    private final CountedErrorHandler countedErrorHandler;
     private final UdpNameResolutionTransport transport;
     private final DriverNameResolverCache cache;
-    private final NameResolver delegateResolver;
+    private final NameResolverAgent delegateResolver;
+    private final EpochClock clock;
     private final AtomicCounter invalidPackets;
     private final AtomicCounter shortSends;
-    private final AtomicCounter neighborsCounter;
-    private final AtomicCounter cacheEntriesCounter;
-    private final byte[] nameTempBuffer = new byte[ResolutionEntryFlyweight.MAX_NAME_LENGTH];
-    private final byte[] addressTempBuffer = new byte[ResolutionEntryFlyweight.ADDRESS_LENGTH_IP6];
+    private AtomicCounter neighborsCounter;
+    private AtomicCounter cacheEntriesCounter;
+    private final byte[] nameTempBuffer = new byte[MAX_NAME_LENGTH];
+    private final byte[] addressTempBuffer = new byte[ADDRESS_LENGTH_IP6];
 
     private final String localDriverName;
     private InetSocketAddress localSocketAddress;
@@ -79,12 +93,15 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
     private byte[] localAddress;
 
     private final String[] bootstrapNeighbors;
-    private InetSocketAddress bootstrapNeighborAddress;
+    private final InetSocketAddress[] bootstrapNeighborAddresses;
+    private final AtomicCounter[] bootstrapNeighborCounters;
     private long bootstrapNeighborResolveDeadlineMs;
+    private final BitSet bootstrapNeighborConnected;
 
-    private final long neighborTimeoutMs = TIMEOUT_MS;
-    private final long selfResolutionIntervalMs = SELF_RESOLUTION_INTERVAL_MS;
-    private final long neighborResolutionIntervalMs = NEIGHBOR_RESOLUTION_INTERVAL_MS;
+    private final long neighborTimeoutMs;
+    private final long selfResolutionIntervalMs;
+    private final long neighborResolutionIntervalMs;
+    private final long bootstrapNeighborResolutionIntervalMs;
     private final int mtuLength;
     private final boolean preferIPv6 = false;
 
@@ -94,74 +111,145 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
 
     DriverNameResolver(final MediaDriver.Context ctx)
     {
+        this(ctx, UdpNameResolutionTransport::new);
+    }
+
+    DriverNameResolver(final MediaDriver.Context ctx, final UdpNameResolutionTransportFactory transportFactory)
+    {
+        countedErrorHandler = ctx.countedErrorHandler();
         mtuLength = ctx.mtuLength();
         invalidPackets = ctx.systemCounters().get(SystemCounterDescriptor.INVALID_PACKETS);
         shortSends = ctx.systemCounters().get(SystemCounterDescriptor.SHORT_SENDS);
         delegateResolver = ctx.nameResolver();
+        clock = ctx.cachedEpochClock();
 
-        final long nowMs = ctx.epochClock().time();
+        localDriverName = ctx.resolverName();
+        localName = localDriverName.getBytes(StandardCharsets.US_ASCII);
+        localSocketAddress = UdpNameResolutionTransport.getInterfaceAddress(ctx.resolverInterface());
+        localAddress = localSocketAddress.getAddress().getAddress();
+
+        neighborTimeoutMs = TimeUnit.NANOSECONDS.toMillis(ctx.resolverNeighborTimeoutNs());
+        selfResolutionIntervalMs = TimeUnit.NANOSECONDS.toMillis(ctx.resolverSelfResolutionIntervalNs());
+        neighborResolutionIntervalMs = TimeUnit.NANOSECONDS.toMillis(ctx.resolverNeighborResolutionIntervalNs());
+        bootstrapNeighborResolutionIntervalMs = TimeUnit.NANOSECONDS.toMillis(
+            ctx.resolverBootstrapNeighborResolutionIntervalNs());
 
         bootstrapNeighbors = null != ctx.resolverBootstrapNeighbor() ?
-            ctx.resolverBootstrapNeighbor().split(",") : null;
-        bootstrapNeighborAddress = null != bootstrapNeighbors ? resolveBootstrapNeighbor() : null;
-        bootstrapNeighborResolveDeadlineMs = nowMs + TIMEOUT_MS;
+            ctx.resolverBootstrapNeighbor().split(",") : new String[0];
 
-        localSocketAddress = null != ctx.resolverInterface() ?
-            UdpNameResolutionTransport.getInterfaceAddress(ctx.resolverInterface()) :
-            new InetSocketAddress("0.0.0.0", 0);
+        if (MAX_BOOTSTRAP_NEIGHBORS < bootstrapNeighbors.length)
+        {
+            throw new AeronException(
+                "Resolver Bootstrap Neighbor list too large.  Can have a maximum of " +
+                MAX_BOOTSTRAP_NEIGHBORS + ".");
+        }
 
-        localDriverName = null != ctx.resolverName() ? ctx.resolverName() : getCanonicalName();
-        localName = localDriverName.getBytes(StandardCharsets.US_ASCII);
-        localAddress = localSocketAddress.getAddress().getAddress();
+        bootstrapNeighborAddresses = new InetSocketAddress[bootstrapNeighbors.length];
+        bootstrapNeighborCounters = new AtomicCounter[bootstrapNeighbors.length];
+        bootstrapNeighborConnected = new BitSet(bootstrapNeighborAddresses.length);
+
+        final long nowMs = ctx.epochClock().time();
+        bootstrapNeighborResolveDeadlineMs = nowMs + bootstrapNeighborResolutionIntervalMs;
 
         selfResolutionDeadlineMs = 0;
         neighborResolutionDeadlineMs = nowMs + neighborResolutionIntervalMs;
 
-        cache = new DriverNameResolverCache(TIMEOUT_MS);
+        cache = new DriverNameResolverCache(neighborTimeoutMs);
 
-        final UdpChannel placeholderChannel = UdpChannel.parse("aeron:udp?endpoint=localhost:8050");
-        transport = new UdpNameResolutionTransport(placeholderChannel, localSocketAddress, unsafeBuffer, ctx);
-
-        neighborsCounter = ctx.countersManager().newCounter(
-            RESOLVER_NEIGHBORS_COUNTER_LABEL, AeronCounters.NAME_RESOLVER_NEIGHBORS_COUNTER_TYPE_ID);
-        cacheEntriesCounter = ctx.countersManager().newCounter(
-            "Resolver cache entries: name=" + localDriverName,
-            AeronCounters.NAME_RESOLVER_CACHE_ENTRIES_COUNTER_TYPE_ID);
-
+        final UdpChannel resolverChannel =
+            UdpChannel.parse("aeron:udp?endpoint=" +
+                NetworkUtil.formatAddressAndPort(localSocketAddress.getAddress(), localSocketAddress.getPort()),
+                delegateResolver);
+        transport = transportFactory.newInstance(resolverChannel, localSocketAddress, unsafeBuffer, ctx);
         openDatagramChannel();
     }
 
     /**
      * {@inheritDoc}
      */
-    public void close()
+    @Override
+    public void init(final CountersReader countersReader, final CounterProvider counterProvider)
     {
-        CloseHelper.closeAll(transport, cache);
+        final ExpandableArrayBuffer expandableArrayBuffer = new ExpandableArrayBuffer();
+
+        final int neighborsCounterLength = expandableArrayBuffer.putStringWithoutLengthAscii(
+            0, buildNeighborsCounterLabel());
+        neighborsCounter = counterProvider.newCounter(
+            AeronCounters.NAME_RESOLVER_NEIGHBORS_COUNTER_TYPE_ID,
+            expandableArrayBuffer, 0, 0, expandableArrayBuffer, 0, neighborsCounterLength);
+
+        final int cacheEntriesCounterLength = expandableArrayBuffer.putStringWithoutLengthAscii(
+            0, "Resolver cache entries: name=" + localDriverName);
+        cacheEntriesCounter = counterProvider.newCounter(
+            AeronCounters.NAME_RESOLVER_CACHE_ENTRIES_COUNTER_TYPE_ID,
+            expandableArrayBuffer, 0, 0, expandableArrayBuffer, 0, cacheEntriesCounterLength);
+
+        for (int i = 0; i < bootstrapNeighbors.length; ++i)
+        {
+            expandableArrayBuffer.putInt(0, i);
+            final int keyLength = BitUtil.SIZE_OF_INT;
+            final int labelLength = expandableArrayBuffer.putStringWithoutLengthAscii(
+                keyLength, buildBootstrapNeighborCounterLabel(bootstrapNeighbors[i], null));
+            bootstrapNeighborCounters[i] = counterProvider.newCounter(
+                AeronCounters.NAME_RESOLVER_BOOTSTRAP_NEIGHBOR_COUNTER_TYPE_ID,
+                expandableArrayBuffer, 0, keyLength, expandableArrayBuffer, keyLength, labelLength);
+        }
+
+        delegateResolver.init(countersReader, counterProvider);
     }
 
     /**
      * {@inheritDoc}
      */
-    public int doWork(final long nowMs)
+    @Override
+    public void onStart()
     {
+        for (int i = 0; i < bootstrapNeighborAddresses.length; ++i)
+        {
+            final String bootstrapNeighbor = bootstrapNeighbors[i];
+            final InetSocketAddress socketAddress = resolveBootstrapNeighbor(bootstrapNeighbor);
+            bootstrapNeighborAddresses[i] = socketAddress;
+
+            final String neighborLabel = buildBootstrapNeighborCounterLabel(bootstrapNeighbor, socketAddress);
+            bootstrapNeighborCounters[i].updateLabel(neighborLabel);
+        }
+
+        delegateResolver.onStart();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int doWork()
+    {
+        final long nowMs = clock.time();
         int workCount = 0;
 
-        if (nowMs > workDeadlineMs)
+        if (workDeadlineMs - nowMs <= 0)
         {
             workDeadlineMs = nowMs + WORK_INTERVAL_MS;
             workCount += transport.poll(this, nowMs);
             workCount += cache.timeoutOldEntries(nowMs, cacheEntriesCounter);
             workCount += timeoutNeighbors(nowMs);
 
-            if (nowMs > selfResolutionDeadlineMs)
+            if (selfResolutionDeadlineMs <= nowMs)
             {
                 sendSelfResolutions(nowMs);
             }
 
-            if (nowMs > neighborResolutionDeadlineMs)
+            if (neighborResolutionDeadlineMs <= nowMs)
             {
                 sendNeighborResolutions(nowMs);
             }
+
+            if (0 < bootstrapNeighborAddresses.length && bootstrapNeighborResolveDeadlineMs <= nowMs)
+            {
+                reresolveBootstrapNeighbors();
+                bootstrapNeighborResolveDeadlineMs = nowMs + bootstrapNeighborResolutionIntervalMs;
+            }
+
+            workCount += delegateResolver.doWork();
         }
 
         return workCount;
@@ -170,6 +258,17 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
     /**
      * {@inheritDoc}
      */
+    @Override
+    public void onClose()
+    {
+        delegateResolver.onClose();
+        CloseHelper.close(transport);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public InetAddress resolve(final String name, final String uriParamName, final boolean isReResolution)
     {
         DriverNameResolverCache.CacheEntry entry;
@@ -206,14 +305,13 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         {
         }
 
-        DefaultNameResolver.INSTANCE.resolveHook(this.getClass().getSimpleName(), name, resolvedAddress);
-
         return resolvedAddress;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public String lookup(final String name, final String uriParamName, final boolean isReLookup)
     {
         // here we would look up advertised endpoints/control IP:port pairs by name. Currently, we just return delegate.
@@ -223,62 +321,31 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
     /**
      * {@inheritDoc}
      */
+    @Override
     public int onFrame(
         final UnsafeBuffer unsafeBuffer, final int length, final InetSocketAddress srcAddress, final long nowMs)
     {
-        if (headerFlyweight.headerType() == HDR_TYPE_RES)
-        {
-            int offset = MIN_HEADER_LENGTH;
+        int offset = MIN_HEADER_LENGTH;
+        int workCount = 0;
 
-            while (length > offset)
+        while (length > offset)
+        {
+            resolutionEntryFlyweight.wrap(unsafeBuffer, offset, length - offset);
+            if (resolutionEntryFlyweight.isValid())
             {
-                resolutionEntryFlyweight.wrap(unsafeBuffer, offset, length - offset);
-
-                if ((length - offset) < resolutionEntryFlyweight.entryLength())
-                {
-                    invalidPackets.increment();
-                    return 0;
-                }
-
                 onResolutionEntry(resolutionEntryFlyweight, srcAddress, nowMs);
-
                 offset += resolutionEntryFlyweight.entryLength();
+                workCount++;
             }
-
-            return length;
+            else
+            {
+                invalidPackets.increment();
+                break;
+            }
         }
 
-        return 0;
+        return workCount;
     }
-
-    static String getCanonicalName()
-    {
-        String canonicalName = null;
-
-        try
-        {
-            canonicalName = InetAddress.getLocalHost().getHostName();
-        }
-        catch (final UnknownHostException ex)
-        {
-            LangUtil.rethrowUnchecked(ex);
-        }
-
-        return canonicalName;
-    }
-
-    static String getCanonicalName(final String fallback)
-    {
-        try
-        {
-            return InetAddress.getLocalHost().getHostName();
-        }
-        catch (final UnknownHostException ignore)
-        {
-            return fallback;
-        }
-    }
-
 
     private void openDatagramChannel()
     {
@@ -289,23 +356,18 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         {
             localSocketAddress = boundAddress;
             localAddress = boundAddress.getAddress().getAddress();
-
-            neighborsCounter.appendToLabel(buildNeighborsCounterLabel(""));
         }
     }
 
-    private String buildNeighborsCounterLabel(final String prefix)
+    private String buildNeighborsCounterLabel()
     {
-        final StringBuilder builder = new StringBuilder(prefix);
-        builder.append(": bound ").append(transport.bindAddressAndPort());
+        return RESOLVER_NEIGHBORS_COUNTER_LABEL + ": bound " + transport.bindAddressAndPort();
+    }
 
-        if (null != bootstrapNeighborAddress)
-        {
-            builder.append(" bootstrap ").append(
-                formatAddressAndPort(bootstrapNeighborAddress.getAddress(), bootstrapNeighborAddress.getPort()));
-        }
-
-        return builder.toString();
+    private String buildBootstrapNeighborCounterLabel(final String neighbor, final InetSocketAddress socketAddress)
+    {
+        return BOOTSTRAP_NEIGHBOR_COUNTER_LABEL + ": name=" + neighbor + " resolved=" + ((socketAddress == null) ? "" :
+            NetworkUtil.formatAddressAndPort(socketAddress.getAddress(), socketAddress.getPort()));
     }
 
     private int timeoutNeighbors(final long nowMs)
@@ -317,7 +379,7 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         {
             final Neighbor neighbor = neighborList.get(i);
 
-            if (nowMs > (neighbor.timeOfLastActivityMs + neighborTimeoutMs))
+            if ((neighbor.timeOfLastActivityMs + neighborTimeoutMs) <= nowMs)
             {
                 Neighbor.neighborRemoved(nowMs, neighbor.socketAddress);
                 ArrayListUtil.fastUnorderedRemove(neighborList, i, lastIndex--);
@@ -326,9 +388,9 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         }
 
         final int neighborCount = neighborList.size();
-        if (neighborsCounter.getWeak() != neighborCount)
+        if (neighborsCounter.getPlain() != neighborCount)
         {
-            neighborsCounter.setOrdered(neighborCount);
+            neighborsCounter.setRelease(neighborCount);
         }
 
         return workCount;
@@ -336,6 +398,11 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
 
     private void sendSelfResolutions(final long nowMs)
     {
+        if (0 == bootstrapNeighborAddresses.length && neighborList.isEmpty())
+        {
+            return;
+        }
+
         byteBuffer.clear();
 
         final int currentOffset = HeaderFlyweight.MIN_HEADER_LENGTH;
@@ -360,45 +427,40 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
 
         byteBuffer.limit(length);
 
-        boolean sendToBootstrap = null != bootstrapNeighborAddress;
-        for (final Neighbor neighbor : neighborList)
+        for (final InetSocketAddress bootstrapNeighbor : bootstrapNeighborAddresses)
         {
-            sendResolutionFrameTo(byteBuffer, neighbor.socketAddress);
-
-            if (sendToBootstrap && neighbor.socketAddress.equals(bootstrapNeighborAddress))
+            if (null != bootstrapNeighbor)
             {
-                sendToBootstrap = false;
+                sendResolutionFrameTo(byteBuffer, bootstrapNeighbor);
             }
         }
 
-        if (sendToBootstrap)
+        bootstrapNeighborConnected.clear();
+        for (final Neighbor neighbor : neighborList)
         {
-            if (nowMs > bootstrapNeighborResolveDeadlineMs)
+            boolean isBootstrapNeighbor = false;
+
+            for (int i = 0, n = bootstrapNeighborAddresses.length; i < n; i++)
             {
-                final InetSocketAddress oldAddress = this.bootstrapNeighborAddress;
-                bootstrapNeighborAddress = resolveBootstrapNeighbor();
-                bootstrapNeighborResolveDeadlineMs = nowMs + TIMEOUT_MS;
-
-                if (!oldAddress.equals(bootstrapNeighborAddress))
+                final InetSocketAddress bootstrapNeighborAddress = bootstrapNeighborAddresses[i];
+                if (neighbor.socketAddress.equals(bootstrapNeighborAddress))
                 {
-                    neighborsCounter.updateLabel(buildNeighborsCounterLabel(RESOLVER_NEIGHBORS_COUNTER_LABEL));
-
-                    // avoid sending resolution frame if new bootstrap is in the neighbors list
-                    for (final Neighbor neighbor : neighborList)
-                    {
-                        if (neighbor.socketAddress.equals(bootstrapNeighborAddress))
-                        {
-                            sendToBootstrap = false;
-                            break;
-                        }
-                    }
+                    isBootstrapNeighbor = true;
+                    bootstrapNeighborConnected.set(i, true);
+                    break;
                 }
             }
 
-            if (sendToBootstrap)
+            if (!isBootstrapNeighbor)
             {
-                sendResolutionFrameTo(byteBuffer, bootstrapNeighborAddress);
+                sendResolutionFrameTo(byteBuffer, neighbor.socketAddress);
             }
+        }
+
+        for (int i = 0, n = bootstrapNeighborAddresses.length; i < n; i++)
+        {
+            final long value = bootstrapNeighborConnected.get(i) ? 1L : 0L;
+            bootstrapNeighborCounters[i].setRelease(value);
         }
 
         selfResolutionDeadlineMs = nowMs + selfResolutionIntervalMs;
@@ -425,7 +487,7 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         byte[] addr = addressTempBuffer;
 
         final int addressLength = resolutionEntryFlyweight.getAddress(addressTempBuffer);
-        if (isSelf && ResolutionEntryFlyweight.isAnyLocalAddress(addressTempBuffer, addressLength))
+        if (isSelf && isAnyLocalAddress(addressTempBuffer, addressLength))
         {
             addr = srcAddress.getAddress().getAddress();
         }
@@ -435,7 +497,7 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         final int port = resolutionEntryFlyweight.udpPort();
 
         // use name and port to indicate it is from this resolver instead of searching interfaces
-        if (port == localSocketAddress.getPort() && byteSubsetEquals(nameTempBuffer, localName, nameLength))
+        if (port == localSocketAddress.getPort() && fullLengthMatch(localName, nameTempBuffer, nameLength))
         {
             return;
         }
@@ -443,18 +505,19 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         cache.addOrUpdateEntry(
             nameTempBuffer, nameLength, timeOfLastActivity, resType, addr, port, cacheEntriesCounter);
 
-        final int neighborIndex = findNeighborByAddress(addr, addressLength, port);
-        if (-1 == neighborIndex)
+        Neighbor neighbor = findNeighborByAddress(addr, addressLength, port);
+        if (null == neighbor)
         {
-            final byte[] neighborAddress = Arrays.copyOf(addr, addressLength);
-
             try
             {
-                final Neighbor neighbor = new Neighbor(new InetSocketAddress(
-                    InetAddress.getByAddress(neighborAddress), port), timeOfLastActivity);
+                final byte[] neighborAddress = Arrays.copyOf(addr, addressLength);
+                neighbor = new Neighbor(
+                    new InetSocketAddress(InetAddress.getByAddress(neighborAddress), port),
+                    neighborAddress,
+                    timeOfLastActivity);
                 Neighbor.neighborAdded(nowMs, neighbor.socketAddress);
                 neighborList.add(neighbor);
-                neighborsCounter.setOrdered(neighborList.size());
+                neighborsCounter.setRelease(neighborList.size());
             }
             catch (final Exception ex)
             {
@@ -463,24 +526,22 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         }
         else if (isSelf)
         {
-            neighborList.get(neighborIndex).timeOfLastActivityMs = timeOfLastActivity;
+            neighbor.timeOfLastActivityMs = timeOfLastActivity;
         }
     }
 
-    private int findNeighborByAddress(final byte[] address, final int addressLength, final int port)
+    private Neighbor findNeighborByAddress(final byte[] address, final int addressLength, final int port)
     {
-        for (int i = 0, size = neighborList.size(); i < size; i++)
+        for (final Neighbor neighbor : neighborList)
         {
-            final InetSocketAddress socketAddress = neighborList.get(i).socketAddress;
-
-            if (byteSubsetEquals(address, socketAddress.getAddress().getAddress(), addressLength) &&
-                port == socketAddress.getPort())
+            if (port == neighbor.socketAddress.getPort() &&
+                fullLengthMatch(neighbor.neighborAddress, address, addressLength))
             {
-                return i;
+                return neighbor;
             }
         }
 
-        return -1;
+        return null;
     }
 
     private void sendNeighborResolutions(final long nowMs)
@@ -521,9 +582,8 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
             headerFlyweight.frameLength(currentOffset);
             byteBuffer.limit(currentOffset);
 
-            for (int i = 0, size = neighborList.size(); i < size; i++)
+            for (final Neighbor neighbor : neighborList)
             {
-                final Neighbor neighbor = neighborList.get(i);
                 sendResolutionFrameTo(byteBuffer, neighbor.socketAddress);
             }
         }
@@ -531,31 +591,43 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
         neighborResolutionDeadlineMs = nowMs + neighborResolutionIntervalMs;
     }
 
-    private InetSocketAddress resolveBootstrapNeighbor()
+    private void reresolveBootstrapNeighbors()
     {
-        Exception t = null;
-        for (final String neighbor : bootstrapNeighbors)
+        for (int i = 0; i < bootstrapNeighborAddresses.length; ++i)
         {
-            try
+            final InetSocketAddress bootstrapNeighborAddress = bootstrapNeighborAddresses[i];
+            boolean inNeighborList = false;
+
+            for (final Neighbor neighbor : neighborList)
             {
-                return UdpNameResolutionTransport.getInetSocketAddress(neighbor, bootstrapNameResolver);
+                if (neighbor.socketAddress.equals(bootstrapNeighborAddress))
+                {
+                    inNeighborList = true;
+                    break;
+                }
             }
-            catch (final Exception ex)
+
+            if (!inNeighborList)
             {
-                if (null == t)
-                {
-                    t = ex;
-                }
-                else
-                {
-                    t.addSuppressed(ex);
-                }
+                final String bootstrapNeighbor = bootstrapNeighbors[i];
+                final InetSocketAddress reresolvedAddress = resolveBootstrapNeighbor(bootstrapNeighbor);
+                bootstrapNeighborAddresses[i] = reresolvedAddress;
+
+                final String neighborLabel = buildBootstrapNeighborCounterLabel(bootstrapNeighbor, reresolvedAddress);
+                bootstrapNeighborCounters[i].updateLabel(neighborLabel);
             }
         }
+    }
 
-        if (null != t)
+    private InetSocketAddress resolveBootstrapNeighbor(final String neighbor)
+    {
+        try
         {
-            LangUtil.rethrowUnchecked(t);
+            return UdpNameResolutionTransport.getInetSocketAddress(neighbor, delegateResolver);
+        }
+        catch (final Exception ex)
+        {
+            countedErrorHandler.onError(ex);
         }
 
         return null;
@@ -564,22 +636,33 @@ final class DriverNameResolver implements AutoCloseable, UdpNameResolutionTransp
     static class Neighbor
     {
         final InetSocketAddress socketAddress;
+        final byte[] neighborAddress;
         long timeOfLastActivityMs;
 
-        Neighbor(final InetSocketAddress socketAddress, final long nowMs)
+        Neighbor(final InetSocketAddress socketAddress, final byte[] neighborAddress, final long nowMs)
         {
             this.socketAddress = socketAddress;
+            this.neighborAddress = neighborAddress;
             this.timeOfLastActivityMs = nowMs;
         }
 
         static void neighborAdded(final long nowMs, final InetSocketAddress address)
         {
-//            System.out.println(nowMs + " neighbour added: " + address);
+            DriverTracing.traceNeighborAdded(address);
         }
 
         static void neighborRemoved(final long nowMs, final InetSocketAddress address)
         {
-//            System.out.println(nowMs + " neighbour removed: " + address);
+            DriverTracing.traceNeighborRemoved(address);
         }
+    }
+
+    interface UdpNameResolutionTransportFactory
+    {
+        UdpNameResolutionTransport newInstance(
+            UdpChannel udpChannel,
+            InetSocketAddress resolverAddress,
+            UnsafeBuffer unsafeBuffer,
+            MediaDriver.Context context);
     }
 }

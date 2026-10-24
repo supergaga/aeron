@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,10 +24,11 @@
 #include <memory.h>
 #include <errno.h>
 
+#include "aeronc.h"
+#include "aeron_client_error.h"
+#include "aeron_archive_client_error.h"
 #include "concurrent/aeron_thread.h"
 #include "util/aeron_error.h"
-#include "aeron_alloc.h"
-#include "command/aeron_control_protocol.h"
 
 #define AERON_ERR_TRAILER "...\n"
 #define AERON_ERR_DESCRIPTION_UNAVAILABLE "<Unable to get error description>";
@@ -37,7 +38,7 @@
 const char *aeron_strerror_r(int errcode, char *buffer, size_t length)
 {
     int result = strerror_r(errcode, buffer, length);
-    if (result < 0)
+    if (result != 0)
     {
         return AERON_ERR_DESCRIPTION_UNAVAILABLE;
     }
@@ -46,6 +47,11 @@ const char *aeron_strerror_r(int errcode, char *buffer, size_t length)
 }
 
 #elif defined(AERON_COMPILER_MSVC)
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <windows.h>
 
 const char *aeron_strerror_r(int errcode, char *buffer, size_t length)
@@ -90,7 +96,7 @@ static void initialize_per_thread_error(void)
 {
     if (aeron_thread_key_create(&error_key, free))
     {
-        fprintf(stderr, "could not create per thread error key, exiting.\n");
+        AERON_FPRINTF(stderr, "could not create per thread error key, exiting.\n");
         exit(EXIT_FAILURE);
     }
 }
@@ -145,15 +151,16 @@ static aeron_per_thread_error_t *get_required_error_state(void)
 
     if (NULL == error_state)
     {
-        if (aeron_alloc_no_err((void **)&error_state, sizeof(aeron_per_thread_error_t)) < 0)
+        error_state = malloc(sizeof(aeron_per_thread_error_t));
+        if (NULL == error_state)
         {
-            fprintf(stderr, "could not create per thread error state, exiting.\n");
+            AERON_FPRINTF(stderr, "could not create per thread error state, exiting.\n");
             exit(EXIT_FAILURE);
         }
 
         if (aeron_thread_set_specific(error_key, error_state))
         {
-            fprintf(stderr, "could not associate per thread error key, exiting.\n");
+            AERON_FPRINTF(stderr, "could not associate per thread error key, exiting.\n");
             exit(EXIT_FAILURE);
         }
     }
@@ -226,6 +233,78 @@ const char *aeron_error_code_str(int errcode)
         case AERON_ERROR_CODE_STORAGE_SPACE:
             return "insufficient storage space";
 
+        case AERON_ERROR_CODE_IMAGE_REJECTED:
+            return "image rejected";
+
+        case AERON_ERROR_CODE_PUBLICATION_REVOKED:
+            return "publication revoked";
+
+        case AERON_CLIENT_ERROR_DRIVER_TIMEOUT:
+            return "driver timeout";
+
+        case AERON_CLIENT_ERROR_CLIENT_TIMEOUT:
+            return "client timeout";
+
+        case AERON_CLIENT_ERROR_CONDUCTOR_SERVICE_TIMEOUT:
+            return "client service timeout";
+
+        case AERON_CLIENT_ERROR_BUFFER_FULL:
+            return "client command buffer full";
+
+        case AERON_CLIENT_ERROR_DRIVER_BUFFER_FULL:
+            return "driver command buffer full";
+
+        case AERON_ARCHIVE_ERROR_CODE_GENERIC:
+            return "generic error, see message";
+
+        case AERON_ARCHIVE_ERROR_CODE_ACTIVE_LISTING:
+            return "an active listing is already running";
+
+        case AERON_ARCHIVE_ERROR_CODE_ACTIVE_RECORDING:
+            return "an active recording is already running";
+
+        case AERON_ARCHIVE_ERROR_CODE_ACTIVE_SUBSCRIPTION:
+            return "an active subscription is already running";
+
+        case AERON_ARCHIVE_ERROR_CODE_UNKNOWN_SUBSCRIPTION:
+            return "unknown subscription";
+
+        case AERON_ARCHIVE_ERROR_CODE_UNKNOWN_RECORDING:
+            return "unknown recording";
+
+        case AERON_ARCHIVE_ERROR_CODE_UNKNOWN_REPLAY:
+            return "unknown replay";
+
+        case AERON_ARCHIVE_ERROR_CODE_MAX_REPLAYS:
+            return "max replays exceeded";
+
+        case AERON_ARCHIVE_ERROR_CODE_MAX_RECORDINGS:
+            return "max recordings exceeded";
+
+        case AERON_ARCHIVE_ERROR_CODE_INVALID_EXTENSION:
+            return "invalid recording extension";
+
+        case AERON_ARCHIVE_ERROR_CODE_AUTHENTICATION_REJECTED:
+            return "authentication rejected";
+
+        case AERON_ARCHIVE_ERROR_CODE_STORAGE_SPACE:
+            return "insufficient storage space";
+
+        case AERON_ARCHIVE_ERROR_CODE_UNKNOWN_REPLICATION:
+            return "unknown replication";
+
+        case AERON_ARCHIVE_ERROR_CODE_UNAUTHORISED_ACTION:
+            return "unauthorised action";
+
+        case AERON_ARCHIVE_ERROR_CODE_REPLICATION_CONNECTION_FAILURE:
+            return "failed to connect for replication";
+
+        case AERON_ARCHIVE_ERROR_CODE_EMPTY_RECORDING:
+            return "recording is empty";
+
+        case AERON_ARCHIVE_ERROR_CODE_INVALID_POSITION:
+            return "invalid position";
+
         default:
             return "unknown error code";
     }
@@ -246,7 +325,7 @@ static void aeron_err_vprintf(
 
     if (result < 0)
     {
-        fprintf(stderr, "Failed to update err_msg: %d\n", result);
+        AERON_FPRINTF(stderr, "Failed to update err_msg: %d\n", result);
     }
 
     error_state->offset += result;
@@ -318,6 +397,7 @@ void aeron_err_clear(void)
 
     aeron_set_errno(0);
     error_state->errcode = 0;
+    error_state->offset = 0;
     strcpy(error_state->errmsg, "no error");
 }
 
@@ -364,6 +444,45 @@ void aeron_error_dll_process_detach()
     error_key = TLS_OUT_OF_INDEXES;
 }
 
+// Render a system error code into `err_buf` and return a pointer to a printable
+// description (either err_buf or a static fallback). Negative codes are aeron's
+// internal codes; positive codes are looked up via FormatMessage.
+static const char *aeron_format_system_err(int errcode, char *err_buf, size_t err_buf_len)
+{
+    if (errcode <= 0)
+    {
+        return aeron_error_code_str(-errcode);
+    }
+
+    DWORD num_chars = FormatMessage(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        errcode,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR)err_buf,
+        (DWORD)err_buf_len,
+        NULL);
+
+    if (0 == num_chars)
+    {
+        return "<error text unavailable>";
+    }
+
+    for (int i = (int)num_chars; i > -1; i--)
+    {
+        if ('\0' == err_buf[i] || isspace(err_buf[i]))
+        {
+            err_buf[i] = '\0';
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    return err_buf;
+}
+
 void aeron_err_set_windows(int errcode, const char *function, const char *filename, int line_number, const char *format, ...)
 {
     aeron_per_thread_error_t *error_state = get_required_error_state();
@@ -372,47 +491,27 @@ void aeron_err_set_windows(int errcode, const char *function, const char *filena
     error_state->offset = 0;
 
     char err_buf[1024] = { 0 };
-    const char *system_err_message;
-    const int error_code = aeron_errcode();
+    const char *system_err_message = aeron_format_system_err(errcode, err_buf, sizeof(err_buf));
 
-    if (error_code <= 0)
-    {
-        system_err_message = aeron_error_code_str(-error_code);
-    }
-    else
-    {
-        DWORD num_chars = FormatMessage(
-            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL,
-            error_code,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPTSTR)err_buf,
-            1024,
-            NULL);
+    aeron_err_printf(error_state, "(%d) %s\n", errcode, system_err_message);
+    va_list args;
+    va_start(args, format);
+    aeron_err_update_entry(error_state, function, filename, line_number, format, args);
+    va_end(args);
+}
 
-        if (0 == num_chars)
-        {
-            system_err_message = "<error text unavailable>";
-        }
-        else
-        {
-            for (int i = (int)num_chars; i > -1; i--)
-            {
-                if ('\0' == err_buf[i] || isspace(err_buf[i]))
-                {
-                    err_buf[i] = '\0';
-                }
-                else
-                {
-                    break;
-                }
-            }
+// Append a Windows error to the existing per-thread error buffer without resetting it
+// or changing error_state->errcode. Mirrors aeron_err_append's POSIX semantics: the
+// buffer accumulates chained context, and aeron_errcode() keeps reflecting whatever
+// the most recent SET call recorded.
+void aeron_err_append_windows(int errcode, const char *function, const char *filename, int line_number, const char *format, ...)
+{
+    aeron_per_thread_error_t *error_state = get_required_error_state();
 
-            system_err_message = err_buf;
-        }
-    }
+    char err_buf[1024] = { 0 };
+    const char *system_err_message = aeron_format_system_err(errcode, err_buf, sizeof(err_buf));
 
-    aeron_err_printf(error_state, "(%d) %s\n", error_code, system_err_message);
+    aeron_err_printf(error_state, "(%d) %s\n", errcode, system_err_message);
     va_list args;
     va_start(args, format);
     aeron_err_update_entry(error_state, function, filename, line_number, format, args);

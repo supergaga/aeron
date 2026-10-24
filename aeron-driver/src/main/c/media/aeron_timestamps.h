@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,9 +21,6 @@
 #include <time.h>
 
 void aeron_timestamps_set_timestamp(
-    struct timespec *timestamp,
-    int32_t offset,
-    uint8_t *frame,
-    size_t frame_length);
+    struct timespec *timestamp, int32_t timestamp_offset, aeron_data_header_t *data_header);
 
 #endif // AERON_TIMESTAMPS_H

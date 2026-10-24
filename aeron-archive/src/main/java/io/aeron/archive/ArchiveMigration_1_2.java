@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,6 +43,7 @@ class ArchiveMigration_1_2 implements ArchiveMigrationStep
     /**
      * {@inheritDoc}
      */
+    @Override
     public int minimumVersion()
     {
         return MINIMUM_VERSION;
@@ -51,6 +52,7 @@ class ArchiveMigration_1_2 implements ArchiveMigrationStep
     /**
      * {@inheritDoc}
      */
+    @Override
     @SuppressWarnings("try")
     public void migrate(
         final PrintStream stream,
@@ -177,6 +179,7 @@ class ArchiveMigration_1_2 implements ArchiveMigrationStep
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return "to " + fullVersionString(minimumVersion());

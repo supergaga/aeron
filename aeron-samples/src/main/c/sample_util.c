@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,10 +32,12 @@ void print_available_image(void *clientd, aeron_subscription_t *subscription, ae
     else
     {
         printf(
-            "Available image on %s streamId=%" PRId32 " sessionId=%" PRId32 " from %s\n",
+            "Available image on %s streamId=%" PRId32 " sessionId=%" PRId32 " mtu=%" PRId32 " term-length=%" PRId32 " from %s\n",
             subscription_constants.channel,
             subscription_constants.stream_id,
             image_constants.session_id,
+            (int32_t)image_constants.mtu_length,
+            (int32_t)image_constants.term_buffer_length,
             image_constants.source_identity);
     }
 }
@@ -73,8 +75,8 @@ int rate_reporter_do_work(void *state)
     int64_t current_timestamp_ns, duration_ns;
     double mps, bps;
 
-    AERON_GET_VOLATILE(current_total_bytes, reporter->polling_fields.total_bytes);
-    AERON_GET_VOLATILE(current_total_messages, reporter->polling_fields.total_messages);
+    AERON_GET_ACQUIRE(current_total_bytes, reporter->polling_fields.total_bytes);
+    AERON_GET_ACQUIRE(current_total_messages, reporter->polling_fields.total_messages);
     current_timestamp_ns = aeron_nano_clock();
     duration_ns = current_timestamp_ns - reporter->last_timestamp_ns;
     mps = ((double)(current_total_messages - reporter->last_total_messages) *

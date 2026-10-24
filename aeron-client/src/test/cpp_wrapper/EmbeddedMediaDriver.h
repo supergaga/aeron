@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,14 +44,23 @@ class EmbeddedMediaDriver
 public:
     ~EmbeddedMediaDriver()
     {
-        if (0 != aeron_driver_close(m_driver))
-        {
-            fprintf(stderr, "ERROR: driver close (%d) %s\n", aeron_errcode(), aeron_errmsg());
-        }
+        closeDriver();
+    }
 
-        if (0 != aeron_driver_context_close(m_context))
+    void closeDriver()
+    {
+        bool closed = false;
+        if (m_closed.compare_exchange_strong(closed, true))
         {
-            fprintf(stderr, "ERROR: driver context close (%d) %s\n", aeron_errcode(), aeron_errmsg());
+            if (0 != aeron_driver_close(m_driver))
+            {
+                fprintf(stderr, "ERROR: driver close (%d) %s\n", aeron_errcode(), aeron_errmsg());
+            }
+
+            if (0 != aeron_driver_context_close(m_context))
+            {
+                fprintf(stderr, "ERROR: driver context close (%d) %s\n", aeron_errcode(), aeron_errmsg());
+            }
         }
     }
 
@@ -65,10 +74,13 @@ public:
 
     void stop()
     {
-        m_running = false;
-        if (m_thread.joinable())
+        bool running = true;
+        if (m_running.compare_exchange_strong(running, false))
         {
-            m_thread.join();
+            if (m_thread.joinable())
+            {
+                m_thread.join();
+            }
         }
     }
 
@@ -91,6 +103,21 @@ public:
         m_livenessTimeoutNs = livenessTimeoutNs;
     }
 
+    std::uint64_t livenessTimeoutNs()
+    {
+        return m_livenessTimeoutNs;
+    }
+
+    void aeronDir(std::string aeronDir)
+    {
+        m_aeronDir = aeronDir;
+    }
+
+    std::string aeronDir()
+    {
+        return m_aeronDir;
+    }
+
 protected:
     int init()
     {
@@ -100,14 +127,22 @@ protected:
             return -1;
         }
 
-        aeron_driver_context_set_threading_mode(m_context, AERON_THREADING_MODE_SHARED);
+        if (!m_aeronDir.empty())
+        {
+            aeron_driver_context_set_dir(m_context, m_aeronDir.c_str());
+        }
         aeron_driver_context_set_dir_delete_on_start(m_context, true);
         aeron_driver_context_set_dir_delete_on_shutdown(m_context, true);
+        aeron_driver_context_set_threading_mode(m_context, AERON_THREADING_MODE_SHARED);
         aeron_driver_context_set_shared_idle_strategy(m_context, "sleep-ns");
         aeron_driver_context_set_term_buffer_sparse_file(m_context, true);
         aeron_driver_context_set_term_buffer_length(m_context, 64 * 1024);
-        aeron_driver_context_set_timer_interval_ns(m_context, m_livenessTimeoutNs / 10);
+        aeron_driver_context_set_ipc_term_buffer_length(m_context, 64 * 1024);
+        aeron_driver_context_set_timer_interval_ns(m_context, m_livenessTimeoutNs / 100);
         aeron_driver_context_set_client_liveness_timeout_ns(m_context, m_livenessTimeoutNs);
+        aeron_driver_context_set_publication_linger_timeout_ns(m_context, m_livenessTimeoutNs / 10);
+        aeron_driver_context_set_image_liveness_timeout_ns(m_context, m_livenessTimeoutNs / 10);
+        aeron_driver_context_set_enable_experimental_features(m_context, true);
 
         long long debugTimeoutMs;
         if (0 != (debugTimeoutMs = EmbeddedMediaDriver::getDebugTimeoutMs()))
@@ -135,7 +170,9 @@ protected:
 
 private:
     std::uint64_t m_livenessTimeoutNs = 5 * 1000 * 1000 * 1000LL;
+    std::string m_aeronDir;
     std::atomic<bool> m_running = { true };
+    std::atomic<bool> m_closed = { false };
     std::thread m_thread;
     aeron_driver_context_t *m_context = nullptr;
     aeron_driver_t *m_driver = nullptr;

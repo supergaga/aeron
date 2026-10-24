@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,11 @@
  */
 package io.aeron.archive;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.ChannelUriStringBuilder;
+import io.aeron.CommonContext;
+import io.aeron.Publication;
+import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.driver.MediaDriver;
@@ -24,6 +28,7 @@ import io.aeron.security.Authenticator;
 import io.aeron.security.AuthenticatorSupplier;
 import io.aeron.security.CredentialsSupplier;
 import io.aeron.security.SessionProxy;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
@@ -35,21 +40,22 @@ import org.agrona.SystemUtil;
 import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 
-import static io.aeron.archive.ArchiveSystemTests.*;
+import static io.aeron.archive.ArchiveSystemTests.CATALOG_CAPACITY;
+import static io.aeron.archive.ArchiveSystemTests.consume;
+import static io.aeron.archive.ArchiveSystemTests.offer;
 import static io.aeron.archive.codecs.SourceLocation.LOCAL;
 import static io.aeron.security.NullCredentialsSupplier.NULL_CREDENTIAL;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.spy;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class ArchiveAuthenticationTest
 {
     private static final int RECORDED_STREAM_ID = 1033;
@@ -75,11 +81,6 @@ class ArchiveAuthenticationTest
 
     @RegisterExtension
     final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
-
-    @BeforeEach
-    void setUp()
-    {
-    }
 
     @AfterEach
     void after()
@@ -358,7 +359,8 @@ class ArchiveAuthenticationTest
             .termBufferSparseFile(true)
             .threadingMode(ThreadingMode.SHARED)
             .spiesSimulateConnection(false)
-            .dirDeleteOnStart(true);
+            .dirDeleteOnStart(true)
+            .dirDeleteOnShutdown(true);
 
         final Archive.Context archiveCtx = TestContexts.localhostArchive()
             .catalogCapacity(CATALOG_CAPACITY)
@@ -369,16 +371,10 @@ class ArchiveAuthenticationTest
             .authenticatorSupplier(authenticatorSupplier)
             .threadingMode(ArchiveThreadingMode.SHARED);
 
-        try
-        {
-            driver = TestMediaDriver.launch(mediaDriverCtx, systemTestWatcher);
-            archive = Archive.launch(archiveCtx);
-        }
-        finally
-        {
-            systemTestWatcher.dataCollector().add(mediaDriverCtx.aeronDirectory());
-            systemTestWatcher.dataCollector().add(archiveCtx.archiveDir());
-        }
+        driver = TestMediaDriver.launch(mediaDriverCtx, systemTestWatcher);
+        systemTestWatcher.dataCollector().add(mediaDriverCtx.aeronDirectory());
+        archive = Archive.launch(archiveCtx);
+        systemTestWatcher.dataCollector().add(archiveCtx.archiveDir());
     }
 
     private void createRecording()
@@ -392,7 +388,8 @@ class ArchiveAuthenticationTest
             Publication publication = aeron.addPublication(RECORDED_CHANNEL, RECORDED_STREAM_ID))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = Tests.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId = Tests.awaitRecordingCounterId(
+                counters, publication.sessionId(), aeronArchive.archiveId());
 
             offer(publication, messageCount, messagePrefix);
             consume(subscription, messageCount, messagePrefix);

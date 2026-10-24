@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,15 +20,15 @@ import java.util.Map;
 
 public interface DriverOutputConsumer
 {
-    default void outputFiles(String aeronDirectoryName, File stdoutFile, File stderrFile)
+    default void outputFiles(final String aeronDirectoryName, final File stdoutFile, final File stderrFile)
     {
     }
 
-    default void exitCode(String aeronDirectoryName, int exitValue)
+    default void exitCode(final String aeronDirectoryName, final int exitValue, final String exitMessage)
     {
     }
 
-    default void environmentVariables(String aeronDirectoryName, Map<String, String> environment)
+    default void environmentVariables(final String aeronDirectoryName, final Map<String, String> environment)
     {
     }
 }

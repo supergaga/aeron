@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,53 @@
 package io.aeron.archive.client;
 
 import io.aeron.Aeron;
+import io.aeron.AvailableImageHandler;
+import io.aeron.ChannelUri;
+import io.aeron.ErrorCode;
+import io.aeron.ExclusivePublication;
 import io.aeron.Publication;
 import io.aeron.Subscription;
+import io.aeron.UnavailableImageHandler;
 import io.aeron.archive.client.AeronArchive.Context;
+import io.aeron.exceptions.ConfigurationException;
+import io.aeron.exceptions.RegistrationException;
+import org.agrona.BitUtil;
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.NanoClock;
 import org.agrona.concurrent.NoOpIdleStrategy;
 import org.agrona.concurrent.NoOpLock;
 import org.agrona.concurrent.SystemNanoClock;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import java.util.concurrent.TimeUnit;
+
+import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.CommonContext.MTU_LENGTH_PARAM_NAME;
+import static io.aeron.CommonContext.SESSION_ID_PARAM_NAME;
+import static io.aeron.CommonContext.SPARSE_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_LENGTH_PARAM_NAME;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.argThat;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.nullable;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 class AeronArchiveTest
 {
@@ -37,9 +72,198 @@ class AeronArchiveTest
     private final ErrorHandler errorHandler = mock(ErrorHandler.class);
 
     @Test
+    void asyncConnectedShouldConcludeContext()
+    {
+        final Context ctx = mock(Context.class);
+        final IllegalStateException expectedException = new IllegalStateException("test");
+        doThrow(expectedException).when(ctx).conclude();
+
+        final IllegalStateException actualException =
+            assertThrowsExactly(IllegalStateException.class, () -> AeronArchive.asyncConnect(ctx));
+        assertSame(expectedException, actualException);
+
+        verify(ctx).conclude();
+        verifyNoMoreInteractions(ctx);
+    }
+
+    @Test
+    void asyncConnectedShouldCloseResourceInCaseOfExceptionUponStartup()
+    {
+        final Context ctx = mock(Context.class);
+        when(ctx.aeron()).thenReturn(aeron);
+        final Aeron.Context aeronCtx = mock(Aeron.Context.class);
+        when(aeron.context()).thenReturn(aeronCtx);
+        final NanoClock nanoClock = mock(NanoClock.class);
+        when(aeronCtx.nanoClock()).thenReturn(nanoClock);
+        final RuntimeException expectedException = new RuntimeException("TEST");
+        when(nanoClock.nanoTime()).thenThrow(expectedException);
+
+        final RuntimeException actualException = assertThrowsExactly(RuntimeException.class, () ->
+        {
+            //noinspection resource
+            AeronArchive.asyncConnect(ctx);
+        });
+
+        assertSame(expectedException, actualException);
+
+        final InOrder inOrder = inOrder(ctx, nanoClock);
+        inOrder.verify(nanoClock).nanoTime();
+        inOrder.verify(ctx).close();
+        inOrder.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void shouldReleasePendingSubscriptionWhenClosedBeforeConnected()
+    {
+        final String responseChannel = "aeron:udp?endpoint=localhost:0";
+        final int responseStreamId = 42;
+        final long registrationId = 43L;
+
+        final Context ctx = mock(Context.class);
+        when(ctx.aeron()).thenReturn(aeron);
+        when(ctx.controlResponseChannel()).thenReturn(responseChannel);
+        when(ctx.controlResponseStreamId()).thenReturn(responseStreamId);
+        when(ctx.messageTimeoutNs()).thenReturn(TimeUnit.MINUTES.toNanos(1));
+        when(ctx.ownsAeronClient()).thenReturn(false);
+
+        final Aeron.Context aeronContext = mock(Aeron.Context.class);
+        when(aeronContext.nanoClock()).thenReturn(SystemNanoClock.INSTANCE);
+        when(aeron.context()).thenReturn(aeronContext);
+
+        when(aeron.asyncAddSubscription(
+            eq(responseChannel),
+            eq(responseStreamId),
+            nullable(AvailableImageHandler.class),
+            any(UnavailableImageHandler.class))).thenReturn(registrationId);
+
+        when(aeron.getSubscription(registrationId)).thenReturn(null);
+
+        try (AeronArchive.AsyncConnect asyncConnect = AeronArchive.asyncConnect(ctx))
+        {
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.AWAIT_SUBSCRIPTION, asyncConnect.state());
+        }
+
+        verify(aeron, times(1)).asyncRemoveSubscription(registrationId);
+        verify(ctx, times(1)).close();
+    }
+
+    @Test
+    void shouldReleasePendingPublicationWhenClosedBeforeConnected()
+    {
+        final String responseChannel = "aeron:udp?endpoint=localhost:0";
+        final int responseStreamId = 42;
+        final String requestChannel = "aeron:udp?endpoint=localhost:1234";
+        final int requestStreamId = 43;
+        final long pubRegistrationId = 45L;
+
+        final Context ctx = mock(Context.class);
+        when(ctx.aeron()).thenReturn(aeron);
+        when(ctx.controlResponseChannel()).thenReturn(responseChannel);
+        when(ctx.controlResponseStreamId()).thenReturn(responseStreamId);
+        when(ctx.controlRequestChannel()).thenReturn(requestChannel);
+        when(ctx.controlRequestStreamId()).thenReturn(requestStreamId);
+        when(ctx.messageTimeoutNs()).thenReturn(TimeUnit.MINUTES.toNanos(1));
+        when(ctx.ownsAeronClient()).thenReturn(false);
+
+        final Aeron.Context aeronContext = mock(Aeron.Context.class);
+        when(aeronContext.nanoClock()).thenReturn(SystemNanoClock.INSTANCE);
+        when(aeron.context()).thenReturn(aeronContext);
+
+        when(aeron.asyncAddSubscription(
+            eq(responseChannel),
+            eq(responseStreamId),
+            nullable(AvailableImageHandler.class),
+            any(UnavailableImageHandler.class))).thenReturn(44L);
+        final Subscription subscription = mock(Subscription.class);
+        when(aeron.getSubscription(anyLong())).thenReturn(subscription);
+        when(aeron.asyncAddExclusivePublication(requestChannel, requestStreamId)).thenReturn(pubRegistrationId);
+        when(aeron.getExclusivePublication(anyLong())).thenReturn(null);
+
+        try (AeronArchive.AsyncConnect asyncConnect = AeronArchive.asyncConnect(ctx))
+        {
+            assertEquals(AeronArchive.AsyncConnect.State.AWAIT_SUBSCRIPTION, asyncConnect.state());
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.ADD_PUBLICATION, asyncConnect.state());
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.ADD_PUBLICATION, asyncConnect.state());
+        }
+
+        verify(subscription, times(1)).close();
+        verify(aeron, times(1)).asyncRemovePublication(pubRegistrationId);
+        verify(ctx, times(1)).close();
+    }
+
+    @Test
+    void shouldRetryAddingResourcesWhenResourceTemporarilyUnavailable()
+    {
+        final String responseChannel = "aeron:udp?endpoint=localhost:0";
+        final int responseStreamId = 42;
+        final String requestChannel = "aeron:udp?endpoint=localhost:1234";
+        final int requestStreamId = 43;
+
+        final Context ctx = mock(Context.class);
+        when(ctx.aeron()).thenReturn(aeron);
+        when(ctx.controlResponseChannel()).thenReturn(responseChannel);
+        when(ctx.controlResponseStreamId()).thenReturn(responseStreamId);
+        when(ctx.controlRequestChannel()).thenReturn(requestChannel);
+        when(ctx.controlRequestStreamId()).thenReturn(requestStreamId);
+        when(ctx.messageTimeoutNs()).thenReturn(TimeUnit.MINUTES.toNanos(1));
+        when(ctx.ownsAeronClient()).thenReturn(false);
+
+        final Aeron.Context aeronContext = mock(Aeron.Context.class);
+        when(aeronContext.nanoClock()).thenReturn(SystemNanoClock.INSTANCE);
+        when(aeron.context()).thenReturn(aeronContext);
+
+        final RegistrationException resourceUnavailable = new RegistrationException(
+            1,
+            ErrorCode.RESOURCE_TEMPORARILY_UNAVAILABLE.value(),
+            ErrorCode.RESOURCE_TEMPORARILY_UNAVAILABLE,
+            "WARN - resource temporarily unavailable, please retry");
+
+        when(aeron.asyncAddSubscription(
+            eq(responseChannel),
+            eq(responseStreamId),
+            nullable(AvailableImageHandler.class),
+            any(UnavailableImageHandler.class))).thenReturn(1L, 44L);
+        final Subscription subscription = mock(Subscription.class);
+        when(aeron.getSubscription(anyLong())).thenThrow(resourceUnavailable).thenReturn(subscription);
+        when(aeron.asyncAddExclusivePublication(requestChannel, requestStreamId)).thenReturn(3L, 45L);
+        final ExclusivePublication publication = mock(ExclusivePublication.class);
+        when(aeron.getExclusivePublication(anyLong())).thenThrow(resourceUnavailable).thenReturn(publication);
+
+        try (AeronArchive.AsyncConnect asyncConnect = AeronArchive.asyncConnect(ctx))
+        {
+            assertEquals(AeronArchive.AsyncConnect.State.AWAIT_SUBSCRIPTION, asyncConnect.state());
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.AWAIT_SUBSCRIPTION, asyncConnect.state());
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.ADD_PUBLICATION, asyncConnect.state());
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.ADD_PUBLICATION, asyncConnect.state());
+            assertNull(asyncConnect.poll());
+            assertEquals(AeronArchive.AsyncConnect.State.AWAIT_PUBLICATION_CONNECTED, asyncConnect.state());
+
+            verify(aeron, times(2)).asyncAddSubscription(
+                eq(responseChannel),
+                eq(responseStreamId),
+                nullable(AvailableImageHandler.class),
+                any(UnavailableImageHandler.class));
+            verify(aeron, times(2)).getSubscription(anyLong());
+            verify(aeron, times(2)).asyncAddExclusivePublication(requestChannel, requestStreamId);
+            verify(aeron, times(2)).getExclusivePublication(anyLong());
+        }
+
+        verify(subscription, times(1)).close();
+        verify(publication, times(1)).close();
+        verify(ctx, times(1)).close();
+    }
+
+    @Test
     void closeNotOwningAeronClient()
     {
         final long controlSessionId = 42;
+        final long archiveId = -190;
 
         final Aeron.Context aeronContext = mock(Aeron.Context.class);
         when(aeronContext.nanoClock()).thenReturn(SystemNanoClock.INSTANCE);
@@ -69,7 +293,7 @@ class AeronArchiveTest
             .errorHandler(errorHandler)
             .ownsAeronClient(false);
         final AeronArchive aeronArchive =
-            new AeronArchive(context, controlResponsePoller, archiveProxy, controlSessionId);
+            new AeronArchive(context, controlResponsePoller, archiveProxy, controlSessionId, archiveId);
 
         aeronArchive.close();
 
@@ -91,6 +315,7 @@ class AeronArchiveTest
     void closeOwningAeronClient()
     {
         final long controlSessionId = 42;
+        final long archiveId = 555;
 
         final Aeron.Context aeronContext = mock(Aeron.Context.class);
         when(aeronContext.nanoClock()).thenReturn(SystemNanoClock.INSTANCE);
@@ -118,7 +343,7 @@ class AeronArchiveTest
             .errorHandler(errorHandler)
             .ownsAeronClient(true);
         final AeronArchive aeronArchive =
-            new AeronArchive(context, controlResponsePoller, archiveProxy, controlSessionId);
+            new AeronArchive(context, controlResponsePoller, archiveProxy, controlSessionId, archiveId);
 
         final IndexOutOfBoundsException ex = assertThrows(IndexOutOfBoundsException.class, aeronArchive::close);
 
@@ -146,5 +371,207 @@ class AeronArchiveTest
         assertEquals(previousException, ex);
         assertEquals(thrownException, ex.getSuppressed()[0]);
         assertEquals(thrownException, AeronArchive.quietClose(null, throwingCloseable));
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = { NULL_VALUE, Long.MAX_VALUE, Long.MIN_VALUE, 0, 4468236482L })
+    void shouldReturnAssignedArchiveId(final long archiveId)
+    {
+        final long controlSessionId = -3924293;
+        when(aeron.context()).thenReturn(new Aeron.Context());
+        final Context context = new Context()
+            .aeron(aeron)
+            .idleStrategy(NoOpIdleStrategy.INSTANCE)
+            .messageTimeoutNs(100)
+            .lock(NoOpLock.INSTANCE)
+            .errorHandler(errorHandler)
+            .ownsAeronClient(true);
+
+        final AeronArchive aeronArchive =
+            new AeronArchive(context, controlResponsePoller, archiveProxy, controlSessionId, archiveId);
+
+        assertEquals(archiveId, aeronArchive.archiveId());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "aeron:udp?endpoint=localhost:3388|mtu=2048, " +
+            "aeron:udp?session-id=5|endpoint=localhost:0|sparse=true|mtu=1024",
+        "aeron:udp?endpoint=localhost:3388, " +
+            "aeron:udp?control=localhost:10000|control-mode=dynamic",
+        "aeron:udp?endpoint=localhost:3388, aeron:udp?control-mode=manual",
+        "aeron:ipc?alias=request|ssc=false|linger=0|session-id=42|sparse=false, " +
+            "aeron:ipc?term-length=64k|alias=response",
+    })
+    void shouldAddAUniqueSessionIdParameterToBothRequestAndResponseChannels(
+        final String requestChannel, final String responseChannel)
+    {
+        final int requestStreamId = 42;
+        final int responseStreamId = -19;
+        final int sessionId = BitUtil.generateRandomisedId();
+        when(aeron.nextSessionId(requestStreamId)).thenReturn(sessionId);
+
+        final Context context = new Context()
+            .aeron(aeron)
+            .ownsAeronClient(false)
+            .errorHandler(errorHandler)
+            .controlRequestChannel(requestChannel)
+            .controlRequestStreamId(requestStreamId)
+            .controlResponseChannel(responseChannel)
+            .controlResponseStreamId(responseStreamId)
+            .controlTermBufferSparse(false)
+            .controlTermBufferLength(128 * 1024)
+            .controlMtuLength(4096);
+
+        assertEquals(requestChannel, context.controlRequestChannel());
+        assertEquals(requestStreamId, context.controlRequestStreamId());
+        assertEquals(responseChannel, context.controlResponseChannel());
+        assertEquals(responseStreamId, context.controlResponseStreamId());
+
+        context.conclude();
+
+        verify(aeron).nextSessionId(requestStreamId);
+        assertEquals(requestStreamId, context.controlRequestStreamId());
+        assertEquals(responseStreamId, context.controlResponseStreamId());
+
+        final ChannelUri actualRequestChannel = ChannelUri.parse(context.controlRequestChannel());
+        final ChannelUri actualResponseChannel = ChannelUri.parse(context.controlResponseChannel());
+        assertTrue(actualRequestChannel.containsKey(SESSION_ID_PARAM_NAME), "session-id was not added");
+        assertEquals(Integer.toString(sessionId), actualRequestChannel.get(SESSION_ID_PARAM_NAME));
+        assertEquals(Integer.toString(sessionId), actualResponseChannel.get(SESSION_ID_PARAM_NAME));
+
+        ChannelUri.parse(requestChannel).forEachParameter((key, value) ->
+        {
+            if (!SESSION_ID_PARAM_NAME.equals(key))
+            {
+                assertEquals(value, actualRequestChannel.get(key));
+            }
+        });
+
+        ChannelUri.parse(responseChannel).forEachParameter((key, value) ->
+        {
+            if (!SESSION_ID_PARAM_NAME.equals(key))
+            {
+                assertEquals(value, actualResponseChannel.get(key));
+            }
+        });
+    }
+
+    @Test
+    void shouldNotAddASessionIdIfControlModeResponseIsSpecifiedOnTheResponseChannel()
+    {
+        final int requestStreamId = 100;
+        final int responseStreamId = 200;
+        final String requestChannel = "aeron:udp?endpoint=localhost:8080";
+        final String responseChannel = "aeron:udp?control-mode=response|control=localhost:10002";
+        final Context context = new Context()
+            .aeron(aeron)
+            .ownsAeronClient(false)
+            .errorHandler(errorHandler)
+            .controlRequestChannel(requestChannel)
+            .controlRequestStreamId(requestStreamId)
+            .controlResponseChannel(responseChannel)
+            .controlResponseStreamId(responseStreamId);
+
+        assertEquals(requestChannel, context.controlRequestChannel());
+        assertEquals(requestStreamId, context.controlRequestStreamId());
+        assertEquals(responseChannel, context.controlResponseChannel());
+        assertEquals(responseStreamId, context.controlResponseStreamId());
+
+        context.conclude();
+
+        assertEquals(requestStreamId, context.controlRequestStreamId());
+        assertEquals(responseStreamId, context.controlResponseStreamId());
+
+        final ChannelUri actualRequestChannel = ChannelUri.parse(context.controlRequestChannel());
+        final ChannelUri actualResponseChannel = ChannelUri.parse(context.controlResponseChannel());
+        assertNull(actualRequestChannel.get(SESSION_ID_PARAM_NAME), "unexpected session-id on request channel");
+        assertNull(actualResponseChannel.get(SESSION_ID_PARAM_NAME), "unexpected session-id on response channel");
+
+        ChannelUri.parse(requestChannel)
+            .forEachParameter((key, value) -> assertEquals(value, actualRequestChannel.get(key)));
+
+        ChannelUri.parse(responseChannel)
+            .forEachParameter((key, value) -> assertEquals(value, actualResponseChannel.get(key)));
+    }
+
+    @Test
+    void shouldAddDefaultUriParametersIfNotSpecified()
+    {
+        final int requestStreamId = 10;
+        final int responseStreamId = 20;
+        final String requestChannel = "aeron:udp?endpoint=localhost:8080";
+        final String responseChannel = "aeron:udp?endpoint=localhost:0";
+        final Context context = new Context()
+            .aeron(aeron)
+            .ownsAeronClient(false)
+            .errorHandler(errorHandler)
+            .controlRequestChannel(requestChannel)
+            .controlRequestStreamId(requestStreamId)
+            .controlResponseChannel(responseChannel)
+            .controlResponseStreamId(responseStreamId)
+            .controlMtuLength(2048)
+            .controlTermBufferLength(256 * 1024)
+            .controlTermBufferSparse(true);
+
+        assertEquals(requestChannel, context.controlRequestChannel());
+        assertEquals(requestStreamId, context.controlRequestStreamId());
+        assertEquals(responseChannel, context.controlResponseChannel());
+        assertEquals(responseStreamId, context.controlResponseStreamId());
+
+        context.conclude();
+
+        assertEquals(requestStreamId, context.controlRequestStreamId());
+        assertEquals(responseStreamId, context.controlResponseStreamId());
+
+        final ChannelUri actualRequestChannel = ChannelUri.parse(context.controlRequestChannel());
+        final ChannelUri actualResponseChannel = ChannelUri.parse(context.controlResponseChannel());
+        assertEquals(String.valueOf(context.controlMtuLength()), actualRequestChannel.get(MTU_LENGTH_PARAM_NAME));
+        assertEquals(String.valueOf(context.controlMtuLength()), actualResponseChannel.get(MTU_LENGTH_PARAM_NAME));
+        assertEquals(
+            String.valueOf(context.controlTermBufferLength()), actualRequestChannel.get(TERM_LENGTH_PARAM_NAME));
+        assertEquals(
+            String.valueOf(context.controlTermBufferLength()), actualResponseChannel.get(TERM_LENGTH_PARAM_NAME));
+        assertEquals(String.valueOf(context.controlTermBufferSparse()), actualRequestChannel.get(SPARSE_PARAM_NAME));
+        assertEquals(String.valueOf(context.controlTermBufferSparse()), actualResponseChannel.get(SPARSE_PARAM_NAME));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = { Integer.MIN_VALUE, -1, 0 })
+    void shouldRejectInvalidRetryAttempts(final int retryAttempts)
+    {
+        final Context context = new Context()
+            .aeron(aeron)
+            .controlRequestChannel("aeron:udp")
+            .controlResponseChannel("aeron:udp")
+            .messageRetryAttempts(retryAttempts);
+        assertEquals(retryAttempts, context.messageRetryAttempts());
+
+        final ConfigurationException exception = assertThrowsExactly(ConfigurationException.class, context::conclude);
+        assertEquals(
+            "ERROR - AeronArchive.Context.messageRetryAttempts must be > 0, got: " + retryAttempts,
+            exception.getMessage());
+    }
+
+    @Test
+    void maxRetryAttemptsDefaultValue()
+    {
+        final Context context = new Context();
+        assertEquals(AeronArchive.Configuration.MESSAGE_RETRY_ATTEMPTS_DEFAULT, context.messageRetryAttempts());
+    }
+
+    @Test
+    void maxRetryAttemptsSystemProperty()
+    {
+        System.setProperty(AeronArchive.Configuration.MESSAGE_RETRY_ATTEMPTS_PROP_NAME, "111");
+        try
+        {
+            final Context context = new Context();
+            assertEquals(111, context.messageRetryAttempts());
+        }
+        finally
+        {
+            System.clearProperty(AeronArchive.Configuration.MESSAGE_RETRY_ATTEMPTS_PROP_NAME);
+        }
     }
 }

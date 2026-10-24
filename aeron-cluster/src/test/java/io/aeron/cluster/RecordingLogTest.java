@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,9 @@ package io.aeron.cluster;
 
 import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.RecordingDescriptorConsumer;
 import io.aeron.cluster.client.ClusterException;
+import io.aeron.test.Tests;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -27,17 +29,20 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Predicate;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.cluster.ConsensusModule.Configuration.SERVICE_ID;
-import static io.aeron.cluster.RecordingLog.ENTRY_TYPE_SNAPSHOT;
-import static io.aeron.cluster.RecordingLog.ENTRY_TYPE_TERM;
+import static io.aeron.cluster.RecordingLog.*;
 import static java.util.Arrays.asList;
 import static java.util.Objects.requireNonNull;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -61,7 +66,7 @@ class RecordingLogTest
     void shouldAppendAndThenReloadLatestSnapshot()
     {
         final RecordingLog.Entry entry = new RecordingLog.Entry(
-            1, 3, 2, 777, 4, NULL_VALUE, ENTRY_TYPE_SNAPSHOT, true, 0);
+            1, 3, 2, 777, 4, NULL_VALUE, ENTRY_TYPE_SNAPSHOT, null, true, 0);
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
         {
@@ -101,13 +106,13 @@ class RecordingLogTest
             assertEquals(3, recordingLog.entries().size());
 
             final AeronArchive mockArchive = mock(AeronArchive.class);
-            final RecordingLog.RecoveryPlan recoveryPlan = recordingLog.createRecoveryPlan(mockArchive, serviceCount,
-                Aeron.NULL_VALUE);
-            assertEquals(2, recoveryPlan.snapshots.size());
-            assertEquals(SERVICE_ID, recoveryPlan.snapshots.get(0).serviceId);
-            assertEquals(2L, recoveryPlan.snapshots.get(0).recordingId);
-            assertEquals(0, recoveryPlan.snapshots.get(1).serviceId);
-            assertEquals(1L, recoveryPlan.snapshots.get(1).recordingId);
+            final RecordingLog.RecoveryPlan recoveryPlan = recordingLog.createRecoveryPlan(
+                mockArchive, serviceCount, Aeron.NULL_VALUE);
+            assertEquals(2, recoveryPlan.snapshots().size());
+            assertEquals(SERVICE_ID, recoveryPlan.snapshots().get(0).serviceId());
+            assertEquals(2L, recoveryPlan.snapshots().get(0).recordingId());
+            assertEquals(0, recoveryPlan.snapshots().get(1).serviceId());
+            assertEquals(1L, recoveryPlan.snapshots().get(1).recordingId());
         }
     }
 
@@ -125,20 +130,20 @@ class RecordingLogTest
             recordingLog.appendSnapshot(5, 1L, 0, 999L, 0, 0);
             recordingLog.appendSnapshot(6, 1L, 0, 999L, 0, SERVICE_ID);
 
-            recordingLog.invalidateEntry(1L, 2);
-            recordingLog.invalidateEntry(1L, 3);
+            recordingLog.invalidateEntry(2);
+            recordingLog.invalidateEntry(3);
         }
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
         {
             final AeronArchive mockArchive = mock(AeronArchive.class);
-            final RecordingLog.RecoveryPlan recoveryPlan = recordingLog.createRecoveryPlan(mockArchive, serviceCount,
-                Aeron.NULL_VALUE);
-            assertEquals(2, recoveryPlan.snapshots.size());
-            assertEquals(SERVICE_ID, recoveryPlan.snapshots.get(0).serviceId);
-            assertEquals(6L, recoveryPlan.snapshots.get(0).recordingId);
-            assertEquals(0, recoveryPlan.snapshots.get(1).serviceId);
-            assertEquals(5L, recoveryPlan.snapshots.get(1).recordingId);
+            final RecordingLog.RecoveryPlan recoveryPlan = recordingLog.createRecoveryPlan(
+                mockArchive, serviceCount, Aeron.NULL_VALUE);
+            assertEquals(2, recoveryPlan.snapshots().size());
+            assertEquals(SERVICE_ID, recoveryPlan.snapshots().get(0).serviceId());
+            assertEquals(6L, recoveryPlan.snapshots().get(0).recordingId());
+            assertEquals(0, recoveryPlan.snapshots().get(1).serviceId());
+            assertEquals(5L, recoveryPlan.snapshots().get(1).recordingId());
         }
     }
 
@@ -163,7 +168,7 @@ class RecordingLogTest
             assertNotNull(lastTerm);
             assertEquals(999L, lastTerm.termBaseLogPosition);
 
-            recordingLog.invalidateEntry(removedLeadershipTerm, 6);
+            recordingLog.invalidateEntry(6);
         }
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
@@ -171,11 +176,11 @@ class RecordingLogTest
             final AeronArchive mockArchive = mock(AeronArchive.class);
             when(mockArchive.listRecording(anyLong(), any())).thenReturn(1);
 
-            final RecordingLog.RecoveryPlan recoveryPlan = recordingLog.createRecoveryPlan(mockArchive, serviceCount,
-                Aeron.NULL_VALUE);
-            assertEquals(0L, recoveryPlan.log.recordingId);
-            assertEquals(10L, recoveryPlan.log.leadershipTermId);
-            assertEquals(666, recoveryPlan.log.termBaseLogPosition);
+            final RecordingLog.RecoveryPlan recoveryPlan = recordingLog.createRecoveryPlan(
+                mockArchive, serviceCount, Aeron.NULL_VALUE);
+            assertEquals(0L, recoveryPlan.log().recordingId());
+            assertEquals(10L, recoveryPlan.log().leadershipTermId());
+            assertEquals(666, recoveryPlan.log().termBaseLogPosition());
 
             final RecordingLog.Entry lastTerm = recordingLog.findLastTerm();
             assertNotNull(lastTerm);
@@ -219,12 +224,12 @@ class RecordingLogTest
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
         {
             final RecordingLog.Entry entryOne = new RecordingLog.Entry(
-                1L, 3, 2, NULL_POSITION, 4, 0, ENTRY_TYPE_TERM, true, 0);
+                1L, 3, 2, NULL_POSITION, 4, 0, ENTRY_TYPE_TERM, null, true, 0);
             recordingLog.appendTerm(
                 entryOne.recordingId, entryOne.leadershipTermId, entryOne.termBaseLogPosition, entryOne.timestamp);
 
             final RecordingLog.Entry entryTwo = new RecordingLog.Entry(
-                1L, 4, 3, NULL_POSITION, 5, 0, ENTRY_TYPE_TERM, true, 0);
+                1L, 4, 3, NULL_POSITION, 5, 0, ENTRY_TYPE_TERM, null, true, 0);
             recordingLog.appendTerm(
                 entryTwo.recordingId, entryTwo.leadershipTermId, entryTwo.termBaseLogPosition, entryTwo.timestamp);
 
@@ -254,10 +259,10 @@ class RecordingLogTest
         RecordingLog.addSnapshots(snapshots, entries, 3, entries.size() - 1);
 
         assertEquals(4, snapshots.size());
-        assertEquals(ConsensusModule.Configuration.SERVICE_ID, snapshots.get(0).serviceId);
-        assertEquals(0, snapshots.get(1).serviceId);
-        assertEquals(1, snapshots.get(2).serviceId);
-        assertEquals(2, snapshots.get(3).serviceId);
+        assertEquals(ConsensusModule.Configuration.SERVICE_ID, snapshots.get(0).serviceId());
+        assertEquals(0, snapshots.get(1).serviceId());
+        assertEquals(1, snapshots.get(2).serviceId());
+        assertEquals(2, snapshots.get(3).serviceId());
     }
 
     @Test
@@ -345,8 +350,8 @@ class RecordingLogTest
             recordingLog.appendSnapshot(5L, 1L, 10, 888L, 0, 0);
             recordingLog.appendSnapshot(6L, 1L, 10, 888L, 0, SERVICE_ID);
 
-            recordingLog.invalidateEntry(1L, 2);
-            recordingLog.invalidateEntry(1L, 3);
+            recordingLog.invalidateEntry(2);
+            recordingLog.invalidateEntry(3);
         }
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
@@ -450,19 +455,26 @@ class RecordingLogTest
             recordingLog.appendSnapshot(9, 1L, 500, 999L, 0, 42);
 
             final List<RecordingLog.Entry> entries = recordingLog.entries();
-            assertEquals(new RecordingLog.Entry(8, 1, 500, 998, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, true, 11),
+            assertEquals(
+                new RecordingLog.Entry(8, 1, 500, 998, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, true, 11),
                 entries.get(6));
-            assertEquals(new RecordingLog.Entry(9, 1, 500, 999, 0, 42, ENTRY_TYPE_SNAPSHOT, true, 12),
+            assertEquals(
+                new RecordingLog.Entry(9, 1, 500, 999, 0, 42, ENTRY_TYPE_SNAPSHOT, null, true, 12),
                 entries.get(7));
-            assertEquals(new RecordingLog.Entry(4, 1, 500, 999, 0, 0, ENTRY_TYPE_SNAPSHOT, false, 6),
+            assertEquals(
+                new RecordingLog.Entry(4, 1, 500, 999, 0, 0, ENTRY_TYPE_SNAPSHOT, null, false, 6),
                 entries.get(8));
-            assertEquals(new RecordingLog.Entry(5, 1, 500, 999, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, false, 7),
+            assertEquals(
+                new RecordingLog.Entry(5, 1, 500, 999, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, false, 7),
                 entries.get(9));
-            assertEquals(new RecordingLog.Entry(7, 1, 501, 999, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, true, 10),
+            assertEquals(
+                new RecordingLog.Entry(7, 1, 501, 999, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, true, 10),
                 entries.get(10));
-            assertEquals(new RecordingLog.Entry(10, 2, 1000, NULL_POSITION, 5, NULL_VALUE, ENTRY_TYPE_TERM, true, 8),
+            assertEquals(
+                new RecordingLog.Entry(6, 2, 500, 999, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, true, 9),
                 entries.get(11));
-            assertEquals(new RecordingLog.Entry(6, 2, 500, 999, 0, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, true, 9),
+            assertEquals(
+                new RecordingLog.Entry(10, 2, 1000, NULL_POSITION, 5, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 8),
                 entries.get(12));
             final RecordingLog.Entry latestSnapshot = recordingLog.getLatestSnapshot(SERVICE_ID);
             assertNotNull(latestSnapshot);
@@ -471,13 +483,59 @@ class RecordingLogTest
     }
 
     @Test
+    void shouldFindSnapshotAtOrBeforeOrLowest()
+    {
+        try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
+        {
+            long recordingId = 0;
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 777L, 0, 0);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 777L, 0, 1);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 777L, 0, SERVICE_ID);
+            recordingLog.appendStandbySnapshot(recordingId++, 1L, 500, 888L, 0, 0, "localhost:8080");
+            recordingLog.appendStandbySnapshot(recordingId++, 1L, 500, 888L, 0, 1, "localhost:8080");
+            recordingLog.appendStandbySnapshot(recordingId++, 1L, 500, 888L, 0, SERVICE_ID, "localhost:8080");
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 888L, 0, 0);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 888L, 0, 1);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 888L, 0, SERVICE_ID);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 890L, 0, 0);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 890L, 0, SERVICE_ID); // Missing one service snapshot
+            recordingLog.appendStandbySnapshot(recordingId++, 1L, 500, 990L, 0, 0, "localhost:8080");
+            recordingLog.appendStandbySnapshot(recordingId++, 1L, 500, 990L, 0, 1, "localhost:8080");
+            recordingLog.appendStandbySnapshot(recordingId++, 1L, 500, 990L, 0, SERVICE_ID, "localhost:8080");
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 999L, 0, 0);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 999L, 0, 1);
+            recordingLog.appendSnapshot(recordingId++, 1L, 500, 999L, 0, SERVICE_ID);
+
+            final int serviceCount = 2;
+
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(777L, serviceCount), serviceCount, 777L);
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(888L, serviceCount), serviceCount, 888L);
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(999L, serviceCount), serviceCount, 999L);
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(890L, serviceCount), serviceCount, 888L);
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(990L, serviceCount), serviceCount, 888L);
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(750L, serviceCount), serviceCount, 777L);
+            assertSnapshot(recordingLog.findSnapshotAtOrBeforeOrLowest(1000L, serviceCount), serviceCount, 999L);
+        }
+    }
+
+    private static void assertSnapshot(
+        final List<Snapshot> snapshot,
+        final int serviceCount,
+        final long logPosition)
+    {
+        assertNotNull(snapshot);
+        assertEquals(serviceCount + 1, snapshot.size());
+        snapshot.forEach((s) -> assertEquals(logPosition, s.logPosition()));
+    }
+
+    @Test
     void shouldAppendTermWithLeadershipTermIdOutOfOrder()
     {
         final List<RecordingLog.Entry> sortedEntries = asList(
-            new RecordingLog.Entry(0, 0, 0, 700, 0, NULL_VALUE, ENTRY_TYPE_TERM, true, 0),
-            new RecordingLog.Entry(0, 1, 700, 2048, 0, NULL_VALUE, ENTRY_TYPE_TERM, true, 3),
-            new RecordingLog.Entry(0, 2, 2048, 5000, 0, NULL_VALUE, ENTRY_TYPE_TERM, true, 1),
-            new RecordingLog.Entry(0, 3, 5000, NULL_POSITION, 100, NULL_VALUE, ENTRY_TYPE_TERM, true, 2));
+            new RecordingLog.Entry(0, 0, 0, 700, 0, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 0),
+            new RecordingLog.Entry(0, 1, 700, 2048, 0, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 3),
+            new RecordingLog.Entry(0, 2, 2048, 5000, 0, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 1),
+            new RecordingLog.Entry(0, 3, 5000, NULL_POSITION, 100, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 2));
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
         {
@@ -506,18 +564,18 @@ class RecordingLogTest
     void shouldAppendSnapshotWithLeadershipTermIdOutOfOrder()
     {
         final List<RecordingLog.Entry> sortedEntries = asList(
-            new RecordingLog.Entry(3, 1, 0, 200, 0, NULL_VALUE, ENTRY_TYPE_TERM, true, 0),
-            new RecordingLog.Entry(10, 1, 0, 56, 42, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, true, 1),
-            new RecordingLog.Entry(3, 2, 200, 2048, 555, NULL_VALUE, ENTRY_TYPE_TERM, true, 2),
-            new RecordingLog.Entry(11, 2, 200, 250, 100, 1, ENTRY_TYPE_SNAPSHOT, true, 4),
-            new RecordingLog.Entry(100, 2, 200, 250, 100, 0, ENTRY_TYPE_SNAPSHOT, true, 5),
-            new RecordingLog.Entry(3, 3, 2048, NULL_POSITION, 0, NULL_VALUE, ENTRY_TYPE_TERM, true, 3));
+            new RecordingLog.Entry(3, 1, 0, 200, 0, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 0),
+            new RecordingLog.Entry(10, 1, 0, 56, 42, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, true, 1),
+            new RecordingLog.Entry(3, 2, 200, 2048, 555, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 2),
+            new RecordingLog.Entry(11, 2, 200, 250, 100, 1, ENTRY_TYPE_SNAPSHOT, null, true, 4),
+            new RecordingLog.Entry(100, 2, 200, 250, 100, 0, ENTRY_TYPE_SNAPSHOT, null, true, 5),
+            new RecordingLog.Entry(3, 3, 2048, NULL_POSITION, 0, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 3));
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
         {
             recordingLog.appendTerm(3, 1, 0, 0);
             recordingLog.appendSnapshot(10, 1, 0, 56, 42, SERVICE_ID);
-            recordingLog.invalidateEntry(1, 1);
+            recordingLog.invalidateEntry(1);
 
             recordingLog.commitLogPosition(1, 200);
             recordingLog.appendTerm(3, 2, 200, 555);
@@ -600,7 +658,7 @@ class RecordingLogTest
             recordingLog.appendTerm(8, 0, 0, 0);
             recordingLog.appendTerm(8, 1, 1, 1);
 
-            recordingLog.invalidateEntry(0, 0);
+            recordingLog.invalidateEntry(0);
             recordingLog.appendTerm(8, 0, 100, 100);
 
             final ClusterException exception = assertThrows(ClusterException.class,
@@ -613,45 +671,70 @@ class RecordingLogTest
     @Test
     void entriesInTheRecordingLogShouldBeSorted()
     {
+        final String archiveEndpoint = "aeron:udp?endpoint=localhost:8080";
         final List<RecordingLog.Entry> sortedList = new ArrayList<>();
-        sortedList.add(new RecordingLog.Entry(0, 0, 0, 90, 0, NULL_VALUE, ENTRY_TYPE_TERM, true, 0));
-        sortedList.add(new RecordingLog.Entry(0, 1, 100, 1_000_000, 10, NULL_VALUE, ENTRY_TYPE_TERM, false, 1));
-        sortedList.add(new RecordingLog.Entry(0, 1, 90, 400, 9, NULL_VALUE, ENTRY_TYPE_TERM, true, 8));
-        sortedList.add(new RecordingLog.Entry(0, 1, 111, 222, 12, 1, ENTRY_TYPE_SNAPSHOT, false, 2));
-        sortedList.add(new RecordingLog.Entry(0, 1, 111, 222, 12, 0, ENTRY_TYPE_SNAPSHOT, false, 4));
-        sortedList.add(new RecordingLog.Entry(0, 1, 111, 222, 12, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, false, 3));
-        sortedList.add(new RecordingLog.Entry(0, 1, 0, 777, 42, 2, ENTRY_TYPE_SNAPSHOT, true, 11));
-        sortedList.add(new RecordingLog.Entry(0, 2, 1_000_000, 500, 1_000_000, NULL_VALUE, ENTRY_TYPE_TERM, false, 6));
-        sortedList.add(new RecordingLog.Entry(0, 2, 400, 500, 20, NULL_VALUE, ENTRY_TYPE_TERM, true, 7));
-        sortedList.add(new RecordingLog.Entry(0, 2, 400, 1400, 200, 1, ENTRY_TYPE_SNAPSHOT, false, 10));
-        sortedList.add(new RecordingLog.Entry(0, 2, 400, 1400, 200, 0, ENTRY_TYPE_SNAPSHOT, true, 12));
-        sortedList.add(new RecordingLog.Entry(0, 2, 400, 1400, 200, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, true, 9));
-        sortedList.add(new RecordingLog.Entry(0, 3, 500, NULL_VALUE, 30, NULL_VALUE, ENTRY_TYPE_TERM, true, 5));
+        sortedList.add(new RecordingLog.Entry(0, 0, 0, 90, 0, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 0));
+        sortedList.add(new RecordingLog.Entry(0, 1, 0, 777, 42, 2, ENTRY_TYPE_SNAPSHOT, null, true, 10));
+        sortedList.add(new RecordingLog.Entry(0, 1, 90, 400, 9, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 7));
+        sortedList.add(new RecordingLog.Entry(0, 1, 111, 222, 12, 1, ENTRY_TYPE_SNAPSHOT, null, false, 1));
+        sortedList.add(new RecordingLog.Entry(0, 1, 111, 222, 12, 0, ENTRY_TYPE_SNAPSHOT, null, false, 3));
+        sortedList.add(new RecordingLog.Entry(0, 1, 111, 222, 12, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, false, 2));
+        sortedList.add(new RecordingLog.Entry(0, 2, 400, 2500, 1_000_000, NULL_VALUE, ENTRY_TYPE_TERM, null, false, 5));
+        sortedList.add(new RecordingLog.Entry(0, 2, 400, 2500, 20, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 6));
+        sortedList.add(new RecordingLog.Entry(
+            15, 2, 400, 800, 200, 1, ENTRY_TYPE_STANDBY_SNAPSHOT, archiveEndpoint, true, 18));
+        sortedList.add(new RecordingLog.Entry(
+            16, 2, 400, 800, 200, 0, ENTRY_TYPE_STANDBY_SNAPSHOT, archiveEndpoint, true, 19));
+        sortedList.add(new RecordingLog.Entry(
+            17, 2, 400, 800, 200, SERVICE_ID, ENTRY_TYPE_STANDBY_SNAPSHOT, archiveEndpoint, true, 20));
+        sortedList.add(new RecordingLog.Entry(400, 2, 400, 800, 200, 1, ENTRY_TYPE_SNAPSHOT, null, true, 15));
+        sortedList.add(new RecordingLog.Entry(401, 2, 400, 800, 200, 0, ENTRY_TYPE_SNAPSHOT, null, true, 16));
+        sortedList.add(new RecordingLog.Entry(402, 2, 400, 800, 200, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, true, 17));
+        sortedList.add(new RecordingLog.Entry(
+            50, 2, 400, 1400, 300, 1, ENTRY_TYPE_STANDBY_SNAPSHOT, archiveEndpoint, true, 13));
+        sortedList.add(new RecordingLog.Entry(
+            51, 2, 400, 1400, 300, 0, ENTRY_TYPE_STANDBY_SNAPSHOT, archiveEndpoint, true, 14));
+        sortedList.add(new RecordingLog.Entry(
+            52, 2, 400, 1400, 300, SERVICE_ID, ENTRY_TYPE_STANDBY_SNAPSHOT, archiveEndpoint, true, 12));
+        sortedList.add(new RecordingLog.Entry(652, 2, 400, 1400, 300, 1, ENTRY_TYPE_SNAPSHOT, null, false, 9));
+        sortedList.add(new RecordingLog.Entry(650, 2, 400, 1400, 300, 0, ENTRY_TYPE_SNAPSHOT, null, true, 11));
+        sortedList.add(new RecordingLog.Entry(651, 2, 400, 1400, 300, SERVICE_ID, ENTRY_TYPE_SNAPSHOT, null, true, 8));
+        sortedList.add(new RecordingLog.Entry(0, 3, 2500, NULL_VALUE, 30, NULL_VALUE, ENTRY_TYPE_TERM, null, true, 4));
 
         try (RecordingLog recordingLog = new RecordingLog(tempDir, true))
         {
             recordingLog.appendTerm(0, 0, 0, 0);
-            recordingLog.appendTerm(0, 1, 100, 10);
             recordingLog.appendSnapshot(0, 1, 111, 222, 12, 1);
             recordingLog.appendSnapshot(0, 1, 111, 222, 12, SERVICE_ID);
             recordingLog.appendSnapshot(0, 1, 111, 222, 12, 0);
-            recordingLog.appendTerm(0, 3, 500, 30);
-            recordingLog.appendTerm(0, 2, 1_000_000, 1_000_000);
+            recordingLog.appendTerm(0, 3, 2500, 30);
+            recordingLog.appendTerm(0, 2, 400, 1_000_000);
 
-            recordingLog.invalidateEntry(1, 1);
-            recordingLog.invalidateEntry(2, 6);
+            recordingLog.invalidateEntry(1);
+            recordingLog.invalidateEntry(4);
 
             recordingLog.appendTerm(0, 2, 400, 20);
             recordingLog.appendTerm(0, 1, 90, 9);
 
             assertTrue(recordingLog.invalidateLatestSnapshot());
 
-            recordingLog.appendSnapshot(0, 2, 400, 1400, 200, SERVICE_ID);
-            recordingLog.appendSnapshot(0, 2, 400, 1400, 200, 1);
+            recordingLog.appendSnapshot(651, 2, 400, 1400, 300, SERVICE_ID);
+            recordingLog.appendSnapshot(652, 2, 400, 1400, 300, 1);
             recordingLog.appendSnapshot(0, 1, 0, 777, 42, 2);
-            recordingLog.appendSnapshot(0, 2, 400, 1400, 200, 0);
+            recordingLog.appendSnapshot(650, 2, 400, 1400, 300, 0);
 
-            recordingLog.invalidateEntry(2, 10);
+            recordingLog.invalidateEntry(8);
+
+            recordingLog.appendStandbySnapshot(52, 2, 400, 1400, 300, SERVICE_ID, archiveEndpoint);
+            recordingLog.appendStandbySnapshot(50, 2, 400, 1400, 300, 1, archiveEndpoint);
+            recordingLog.appendStandbySnapshot(51, 2, 400, 1400, 300, 0, archiveEndpoint);
+
+            recordingLog.appendSnapshot(400, 2, 400, 800, 200, 1);
+            recordingLog.appendSnapshot(401, 2, 400, 800, 200, 0);
+            recordingLog.appendSnapshot(402, 2, 400, 800, 200, SERVICE_ID);
+            recordingLog.appendStandbySnapshot(15, 2, 400, 800, 200, 1, archiveEndpoint);
+            recordingLog.appendStandbySnapshot(16, 2, 400, 800, 200, 0, archiveEndpoint);
+            recordingLog.appendStandbySnapshot(17, 2, 400, 800, 200, SERVICE_ID, archiveEndpoint);
 
             assertEquals(sortedList, recordingLog.entries()); // in memory view
 
@@ -818,8 +901,7 @@ class RecordingLogTest
     }
 
     @Test
-    void shouldBackFillPriorTerm(
-        @TempDir final Path tempDir)
+    void shouldBackFillPriorTerm(@TempDir final Path tempDir)
     {
         final long initialLogLeadershipTermId = 0;
         final long initialTermBaseLogPosition = 0;
@@ -880,17 +962,295 @@ class RecordingLogTest
     void entryToString()
     {
         final RecordingLog.Entry entry = new RecordingLog.Entry(
-            42, 5, 1024, 701, 1_000_000_000_000L, 16, ENTRY_TYPE_SNAPSHOT, true, 2);
+            42, 5, 1024, 701, 1_000_000_000_000L, 16, ENTRY_TYPE_SNAPSHOT, null, true, 2);
         assertEquals(
             "Entry{recordingId=42, leadershipTermId=5, termBaseLogPosition=1024, logPosition=701, " +
             "timestamp=1000000000000, serviceId=16, type=SNAPSHOT, isValid=true, entryIndex=2}",
             entry.toString());
     }
 
+    @Test
+    void shouldDetermineIfSnapshotIsInvalid()
+    {
+        final RecordingLog.Entry validSnapshot = new RecordingLog.Entry(
+            42, 5, 1024, 701, 1_000_000_000_000L, 16, ENTRY_TYPE_SNAPSHOT, null, true, 2);
+        final RecordingLog.Entry invalidSnapshot = new RecordingLog.Entry(
+            42, 5, 1024, 701, 1_000_000_000_000L, 16, ENTRY_TYPE_SNAPSHOT, null, false, 2);
+        final RecordingLog.Entry term = new RecordingLog.Entry(
+            42, 5, 1024, 701, 1_000_000_000_000L, 16, ENTRY_TYPE_TERM, null, true, 2);
+
+        assertFalse(RecordingLog.isInvalidSnapshot(validSnapshot));
+        assertTrue(RecordingLog.isInvalidSnapshot(invalidSnapshot));
+        assertFalse(RecordingLog.isInvalidSnapshot(term));
+    }
+
+    @Test
+    void shouldInsertStandbySnapshotInRecordingLog(@TempDir final File tempDir)
+    {
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            log.appendSnapshot(1, 1, 0, 1000, 1_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(2, 1, 0, 1000, 1_000_000_000L, 0);
+
+            log.appendStandbySnapshot(3, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, "remotehost.aeron.io:20002");
+            log.appendStandbySnapshot(4, 2, 1000, 2000, 1_000_000_000L, 0, "remotehost.aeron.io:20002");
+
+            log.appendSnapshot(5, 3, 2000, 3000, 1_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(6, 3, 2000, 3000, 1_000_000_000L, 0);
+        }
+
+        try (RecordingLog log = new RecordingLog(tempDir, false))
+        {
+            assertLogEntry(log, 1, ENTRY_TYPE_SNAPSHOT, null);
+            assertLogEntry(log, 2, ENTRY_TYPE_SNAPSHOT, null);
+            assertLogEntry(log, 3, ENTRY_TYPE_STANDBY_SNAPSHOT, "remotehost.aeron.io:20002");
+            assertLogEntry(log, 4, ENTRY_TYPE_STANDBY_SNAPSHOT, "remotehost.aeron.io:20002");
+            assertLogEntry(log, 5, ENTRY_TYPE_SNAPSHOT, null);
+            assertLogEntry(log, 6, ENTRY_TYPE_SNAPSHOT, null);
+        }
+    }
+
+    int nextSnapshotIndex(final RecordingLog recordingLog)
+    {
+        for (int i = recordingLog.entries().size() - 1; i >= 0; i--)
+        {
+            final Entry entry = recordingLog.entries().get(i);
+            if (RecordingLog.isValidAnySnapshot(entry))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    @Test
+    void shouldInvalidateLatestAnySnapshots(@TempDir final File tempDir)
+    {
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            log.appendTerm(1, 1, 0, 1_000_000_000L);
+            log.appendTerm(1, 2, 0, 1_000_000_000L);
+            log.appendTerm(1, 3, 0, 1_000_000_000L);
+            log.appendTerm(1, 4, 0, 1_000_000_000L);
+
+            // 1
+            log.appendSnapshot(1, 1, 0, 1000, 1_000_000_000L, 0);
+            log.appendSnapshot(2, 1, 0, 1000, 1_000_000_000L, SERVICE_ID);
+
+            // 2
+            log.appendStandbySnapshot(3, 2, 1000, 2000, 1_000_000_000L, 0, "remotehost.aeron.io:20002");
+            log.appendStandbySnapshot(4, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, "remotehost.aeron.io:20002");
+
+            // 3
+            log.appendSnapshot(5, 3, 2000, 3000, 1_000_000_000L, 0);
+            log.appendSnapshot(6, 3, 2000, 3000, 1_000_000_000L, SERVICE_ID);
+
+            // 4
+            log.appendStandbySnapshot(7, 4, 1000, 4000, 1_000_000_000L, 0, "remotehost.aeron.io:20002");
+            log.appendStandbySnapshot(8, 4, 1000, 4000, 1_000_000_000L, SERVICE_ID, "remotehost.aeron.io:20002");
+            log.appendSnapshot(9, 4, 2000, 4000, 1_000_000_000L, 0);
+            log.appendSnapshot(10, 4, 2000, 4000, 1_000_000_000L, SERVICE_ID);
+
+            assertEquals(13, nextSnapshotIndex(log));
+        }
+
+        try (RecordingLog log = new RecordingLog(tempDir, false))
+        {
+            log.invalidateLatestSnapshot();
+            assertEquals(8, nextSnapshotIndex(log));
+
+            log.invalidateLatestSnapshot();
+            assertEquals(5, nextSnapshotIndex(log));
+
+            log.invalidateLatestSnapshot();
+            assertEquals(2, nextSnapshotIndex(log));
+        }
+    }
+
+    @Test
+    void shouldNotIncludeStandbySnapshotInRecoveryPlan(@TempDir final File tempDir)
+    {
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            log.appendSnapshot(1, 1, 0, 1000, 1_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(2, 1, 0, 1000, 1_000_000_000L, 0);
+
+            log.appendStandbySnapshot(3, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, "remotehost.aeron.io:20002");
+            log.appendStandbySnapshot(4, 2, 1000, 2000, 1_000_000_000L, 0, "remotehost.aeron.io:20002");
+        }
+
+        final AeronArchive mockArchive = mock(AeronArchive.class);
+        mockExtent(mockArchive, 1);
+        mockExtent(mockArchive, 2);
+        mockExtent(mockArchive, 3);
+        mockExtent(mockArchive, 4);
+
+        try (RecordingLog log = new RecordingLog(tempDir, false))
+        {
+            final RecordingLog.RecoveryPlan recoveryPlan = log.createRecoveryPlan(mockArchive, 1, NULL_VALUE);
+
+            assertEquals(2, recoveryPlan.snapshots().size());
+            assertEquals(2, recoveryPlan.snapshots().size());
+            assertTrue(recoveryPlan.snapshots().stream().anyMatch((s) -> s.recordingId() == 1));
+            assertTrue(recoveryPlan.snapshots().stream().anyMatch((s) -> s.recordingId() == 2));
+        }
+    }
+
+    @Test
+    void shouldGetLatestStandbySnapshotsGroupedByEndpoint(@TempDir final File tempDir)
+    {
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            log.appendSnapshot(1, 1, 0, 1000, 1_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(2, 1, 0, 1000, 1_000_000_000L, 0);
+
+            log.appendStandbySnapshot(5, 2, 500, 800, 1_000_000_000L, SERVICE_ID, "remotehost0.aeron.io:20002");
+            log.appendStandbySnapshot(6, 2, 500, 800, 1_000_000_000L, 0, "remotehost0.aeron.io:20002");
+
+            log.appendStandbySnapshot(3, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, "remotehost0.aeron.io:20002");
+            log.appendStandbySnapshot(4, 2, 1000, 2000, 1_000_000_000L, 0, "remotehost0.aeron.io:20002");
+
+            log.appendStandbySnapshot(3, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, "remotehost1.aeron.io:20002");
+            log.appendStandbySnapshot(4, 2, 1000, 2000, 1_000_000_000L, 0, "remotehost1.aeron.io:20002");
+
+            log.appendStandbySnapshot(10, 2, 3000, 4000, 1_000_000_000L, 0, "remotehost0.aeron.io:20002");
+            log.appendStandbySnapshot(11, 2, 3000, 4000, 1_000_000_000L, 0, "remotehost1.aeron.io:20002");
+        }
+
+        try (RecordingLog log = new RecordingLog(tempDir, false))
+        {
+            assertLogEntry(log, 1, ENTRY_TYPE_SNAPSHOT, null);
+            assertLogEntry(log, 2, ENTRY_TYPE_SNAPSHOT, null);
+            assertLogEntry(log, 3, ENTRY_TYPE_STANDBY_SNAPSHOT, "remotehost0.aeron.io:20002");
+            assertLogEntry(log, 4, ENTRY_TYPE_STANDBY_SNAPSHOT, "remotehost0.aeron.io:20002");
+            assertLogEntry(log, 3, ENTRY_TYPE_STANDBY_SNAPSHOT, "remotehost1.aeron.io:20002");
+            assertLogEntry(log, 4, ENTRY_TYPE_STANDBY_SNAPSHOT, "remotehost1.aeron.io:20002");
+
+            final int serviceCount = 1;
+            final Map<String, List<RecordingLog.Entry>> standbySnapshots = log.latestStandbySnapshots(serviceCount);
+            assertNotNull(standbySnapshots);
+
+            assertEquals(2, standbySnapshots.get("remotehost0.aeron.io:20002").size());
+            assertEquals(2, standbySnapshots.get("remotehost1.aeron.io:20002").size());
+        }
+    }
+
+    @Test
+    void shouldInvalidateLatestSnapshotIgnoringStandbySnapshots(@TempDir final File tempDir)
+    {
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            log.appendTerm(1, 0, 0, 1_000_000_000L);
+
+            log.appendSnapshot(2, 0, 0, 1000, 1_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(3, 0, 0, 1000, 1_000_000_000L, 0);
+
+            log.appendSnapshot(4, 0, 2, 2000, 1_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(5, 0, 2, 2000, 1_000_000_000L, 0);
+
+            log.appendStandbySnapshot(15, 0, 500, 800, 1_000_000_000L, SERVICE_ID, "remotehost0.aeron.io:20002");
+            log.appendStandbySnapshot(16, 0, 500, 800, 1_000_000_000L, 0, "remotehost0.aeron.io:20002");
+        }
+
+        try (RecordingLog log = new RecordingLog(tempDir, false))
+        {
+            assertEquals(4, requireNonNull(log.getLatestSnapshot(SERVICE_ID)).recordingId);
+            final Map<String, List<RecordingLog.Entry>> preInvalidate = log.latestStandbySnapshots(2);
+
+            log.invalidateLatestSnapshot();
+
+            assertEquals(2, requireNonNull(log.getLatestSnapshot(SERVICE_ID)).recordingId);
+            assertEquals(preInvalidate, log.latestStandbySnapshots(2));
+        }
+    }
+
+    @Test
+    void shouldHandleEntriesStraddlingPageBoundary(@TempDir final File tempDir)
+    {
+        final String endpoint = Tests.generateStringWithSuffix("a", "x", 3079);
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            log.appendStandbySnapshot(1, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, endpoint);
+            log.appendStandbySnapshot(2, 2, 1000, 2000, 1_000_000_000L, 0, endpoint);
+            log.appendStandbySnapshot(3, 2, 1000, 2000, 1_000_000_000L, 1, endpoint);
+            log.append(ENTRY_TYPE_TERM, 4, 3, 10000, 11111, 2_000_000_000L, SERVICE_ID, RECORDING_LOG_FILE_NAME);
+            log.appendSnapshot(5, 4, 20000, 22222, 3_000_000_000L, SERVICE_ID);
+            log.appendSnapshot(6, 4, 20000, 22222, 3_000_000_000L, 0);
+        }
+
+        try (RecordingLog log = new RecordingLog(tempDir, false))
+        {
+            assertLogEntry(log, 1, ENTRY_TYPE_STANDBY_SNAPSHOT, endpoint);
+            assertLogEntry(log, 2, ENTRY_TYPE_STANDBY_SNAPSHOT, endpoint);
+            assertLogEntry(log, 3, ENTRY_TYPE_STANDBY_SNAPSHOT, endpoint);
+            assertLogEntry(log, 4, ENTRY_TYPE_TERM, null);
+            assertLogEntry(log, 5, ENTRY_TYPE_SNAPSHOT, null);
+            assertLogEntry(log, 6, ENTRY_TYPE_SNAPSHOT, null);
+        }
+    }
+
+    @Test
+    void shouldRejectSnapshotEntryIfEndpointIsTooLong(@TempDir final File tempDir)
+    {
+        final String endpoint = Tests.generateStringWithSuffix("a", "x", 5000);
+        try (RecordingLog log = new RecordingLog(tempDir, true))
+        {
+            final ClusterException exception = assertThrowsExactly(ClusterException.class,
+                () -> log.appendStandbySnapshot(1, 2, 1000, 2000, 1_000_000_000L, SERVICE_ID, endpoint));
+            assertEquals("ERROR - Endpoint is too long: " + endpoint.length() + " vs " + MAX_ENDPOINT_LENGTH,
+                exception.getMessage());
+        }
+    }
+
+    private void mockExtent(final AeronArchive mockArchive, final long recordingId)
+    {
+        when(mockArchive.listRecording(eq(recordingId), any())).thenAnswer(
+            invocation ->
+            {
+                final RecordingDescriptorConsumer consumer = invocation.getArgument(
+                    1, RecordingDescriptorConsumer.class);
+
+                consumer.onRecordingDescriptor(
+                    recordingId + 1_000_000,
+                    recordingId + 2_000_000,
+                    recordingId,
+                    0,
+                    0,
+                    0,
+                    50_000,
+                    0,
+                    128 * 1024 * 1024,
+                    256 * 1024,
+                    1408,
+                    0,
+                    0,
+                    "",
+                    "",
+                    "");
+
+                return 1;
+            });
+    }
+
+    private static void assertLogEntry(
+        final RecordingLog log,
+        final long recordingId,
+        final int type,
+        final String endpoint)
+    {
+        final Predicate<RecordingLog.Entry> entryPredicate = (entry) ->
+            entry.recordingId == recordingId &&
+            entry.type == type &&
+            Objects.equals(entry.archiveEndpoint, endpoint);
+
+        assertTrue(log.entries().stream().anyMatch(entryPredicate));
+    }
+
     private static void addRecordingLogEntry(
         final ArrayList<RecordingLog.Entry> entries, final int serviceId, final int recordingId, final int entryType)
     {
         entries.add(new RecordingLog.Entry(
-            recordingId, 1, 1440, 2880, 0L, serviceId, entryType, true, entries.size()));
+            recordingId, 1, 1440, 2880, 0L, serviceId, entryType, null, true, entries.size()));
     }
 }

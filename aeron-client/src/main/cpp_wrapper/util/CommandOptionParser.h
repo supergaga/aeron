@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ public:
                     if (m_options.end() == opt)
                     {
                         throw CommandOptionException(
-                            std::string("-") + currentOption + " is not a valid command option", SOURCEINFO);
+                            std::string("-") + currentOption + " is not a valid command option", SOURCEINFO, EINVAL);
                     }
                     else
                     {
@@ -89,7 +89,7 @@ public:
         if (m_options.end() == opt)
         {
             throw CommandOptionException(
-                std::string("CommandOptionParser::getOption invalid option lookup: ") + optionChar, SOURCEINFO);
+                std::string("CommandOptionParser::getOption invalid option lookup: ") + optionChar, SOURCEINFO, EINVAL);
         }
 
         return opt->second;

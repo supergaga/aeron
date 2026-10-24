@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,12 +23,16 @@ import org.agrona.concurrent.status.CountersManager;
 /**
  * The sending end of a local socket address, i.e. control endpoint of a publication.
  */
-public class SendLocalSocketAddress
+public final class SendLocalSocketAddress
 {
     /**
      * The human-readable name for the beginning of a label.
      */
     public static final String NAME = "snd-local-sockaddr";
+
+    private SendLocalSocketAddress()
+    {
+    }
 
     /**
      * Allocate a counter to represent a local socket address associated with a sending channel endpoint.

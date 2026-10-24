@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,11 @@ import io.aeron.Image;
 import io.aeron.archive.Archive.Context;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.logbuffer.LogBufferDescriptor;
+import org.agrona.BitUtil;
 import org.agrona.IoUtil;
+import org.agrona.collections.MutableLong;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.SystemNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,8 +45,7 @@ import static java.nio.file.Files.delete;
 import static java.nio.file.Files.readAllBytes;
 import static java.util.Arrays.fill;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 class RecordingWriterTest
 {
@@ -68,7 +71,7 @@ class RecordingWriterTest
     {
         final Image image = mockImage(0L);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir), null);
         final File segmentFile = segmentFile(1, 0);
         assertFalse(segmentFile.exists());
 
@@ -91,7 +94,7 @@ class RecordingWriterTest
 
         final Image image = mockImage(0L);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(notADirectory));
+            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(notADirectory), null);
 
         assertThrows(IOException.class, recordingWriter::init);
     }
@@ -101,7 +104,7 @@ class RecordingWriterTest
     {
         final Image image = mockImage(0L);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir), null);
         recordingWriter.init();
 
         recordingWriter.close();
@@ -116,7 +119,12 @@ class RecordingWriterTest
     {
         final Image image = mockImage(0L);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            1,
+            0,
+            SEGMENT_LENGTH,
+            image,
+            new Context().archiveDir(archiveDir),
+            mock(ArchiveConductor.Recorder.class));
 
         assertThrows(
             NullPointerException.class,
@@ -128,7 +136,8 @@ class RecordingWriterTest
     {
         final Image image = mockImage(0L);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir)
+            .nanoClock(SystemNanoClock.INSTANCE), mock(ArchiveConductor.Recorder.class));
         recordingWriter.init();
 
         assertFalse(Thread.interrupted());
@@ -151,8 +160,12 @@ class RecordingWriterTest
     void onBlockShouldWriteHeaderAndContentsOfTheNonPaddingFrame() throws IOException
     {
         final Image image = mockImage(0L);
+        final NanoClock clock = mock(NanoClock.class);
+        when(clock.nanoTime()).thenReturn(3L, 150L, 200L, 999L);
+        final ArchiveConductor.Recorder mockRecorder = mock(ArchiveConductor.Recorder.class);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            1, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir)
+            .nanoClock(clock), mockRecorder);
         recordingWriter.init();
         final UnsafeBuffer termBuffer = new UnsafeBuffer(allocate(128));
         frameType(termBuffer, 0, HDR_TYPE_DATA);
@@ -164,6 +177,10 @@ class RecordingWriterTest
         recordingWriter.onBlock(termBuffer, 0, 128, -1, -1);
 
         recordingWriter.close();
+
+        verify(mockRecorder).bytesWritten(128);
+        verify(mockRecorder).writeTimeNs(147);
+
         final File segmentFile = segmentFile(1, 0);
         assertTrue(segmentFile.exists());
         assertEquals(SEGMENT_LENGTH, segmentFile.length());
@@ -186,7 +203,12 @@ class RecordingWriterTest
         final long startPosition = 7 * TERM_LENGTH + segmentOffset;
         final Image image = mockImage(startPosition);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            5, startPosition, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            5,
+            startPosition,
+            SEGMENT_LENGTH,
+            image,
+            new Context().archiveDir(archiveDir).nanoClock(SystemNanoClock.INSTANCE),
+            mock(ArchiveConductor.Recorder.class));
         recordingWriter.init();
         final UnsafeBuffer termBuffer = new UnsafeBuffer(allocate(1024));
         frameType(termBuffer, 0, HDR_TYPE_PAD);
@@ -223,8 +245,14 @@ class RecordingWriterTest
     void onBlockShouldRollOverToTheNextSegmentFile() throws IOException
     {
         final Image image = mockImage(0L);
+        final NanoClock clock = mock(NanoClock.class);
+        final MutableLong time = new MutableLong(100);
+        doAnswer((invocation) ->
+            time.addAndGet(BitUtil.isEven(time.get()) ? 111 : 224)).when(clock).nanoTime();
+        final ArchiveConductor.Recorder mockRecorder = mock(ArchiveConductor.Recorder.class);
         final RecordingWriter recordingWriter = new RecordingWriter(
-            13, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir));
+            13, 0, SEGMENT_LENGTH, image, new Context().archiveDir(archiveDir)
+            .nanoClock(clock), mockRecorder);
         recordingWriter.init();
 
         final byte[] data1 = new byte[992];
@@ -280,9 +308,11 @@ class RecordingWriterTest
         final Context ctx = new Context()
             .archiveDir(archiveDir)
             .recordChecksumBuffer(new UnsafeBuffer(allocateDirect(512)))
-            .recordChecksum(crc32());
+            .recordChecksum(crc32())
+            .nanoClock(SystemNanoClock.INSTANCE);
 
-        final RecordingWriter recordingWriter = new RecordingWriter(1, 0, SEGMENT_LENGTH, image, ctx);
+        final RecordingWriter recordingWriter = new RecordingWriter(
+            1, 0, SEGMENT_LENGTH, image, ctx, mock(ArchiveConductor.Recorder.class));
 
         recordingWriter.init();
 
@@ -331,8 +361,10 @@ class RecordingWriterTest
         final Context ctx = new Context()
             .archiveDir(archiveDir)
             .recordChecksumBuffer(new UnsafeBuffer(allocateDirect(512)))
-            .recordChecksum(crc32());
-        final RecordingWriter recordingWriter = new RecordingWriter(1, 0, SEGMENT_LENGTH, image, ctx);
+            .recordChecksum(crc32())
+            .nanoClock(SystemNanoClock.INSTANCE);
+        final RecordingWriter recordingWriter = new RecordingWriter(
+            1, 0, SEGMENT_LENGTH, image, ctx, mock(ArchiveConductor.Recorder.class));
 
         recordingWriter.init();
 

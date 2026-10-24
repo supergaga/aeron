@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,10 +44,7 @@ public:
 
     ~AtomicCounter()
     {
-        if (nullptr != m_counter)
-        {
-            aeron_counter_close(m_counter, nullptr, nullptr);
-        }
+        close();
     }
 
     inline std::int32_t id() const
@@ -118,6 +115,15 @@ protected:
     aeron_counter_t *counter() const
     {
         return m_counter;
+    }
+
+    void close()
+    {
+        if (nullptr != m_counter)
+        {
+            aeron_counter_close(m_counter, nullptr, nullptr);
+            m_counter = nullptr;
+        }
     }
 
 private:

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ protected:
 
 TEST_F(DriverConductorCounterTest, shouldBeAbleToAddSingleCounter)
 {
-    int64_t client_id = nextCorrelationId();
+    int64_t client_id = 66;
     int64_t reg_id = nextCorrelationId();
 
     memcpy(m_key, &reg_id, sizeof(reg_id));
@@ -56,7 +56,7 @@ TEST_F(DriverConductorCounterTest, shouldBeAbleToAddSingleCounter)
     EXPECT_CALL(m_mockCallbacks, onCounter(_, COUNTER_TYPE_ID, _, _, _, _)).
         With(IsIdCounter(reg_id, m_label));
     EXPECT_CALL(m_mockCallbacks, onCounter(_, AERON_COUNTER_CLIENT_HEARTBEAT_TIMESTAMP_TYPE_ID, _, _, _, _)).
-        With(IsIdCounter(client_id, std::string("client-heartbeat: 0")));
+        With(IsIdCounter(client_id, std::string("client-heartbeat: id=66")));
     readCounters(mock_counter_handler);
 }
 
@@ -132,6 +132,7 @@ TEST_F(DriverConductorCounterTest, shouldRemoveMultipleCountersOnClientTimeout)
     ASSERT_EQ(addCounter(client_id, reg_id1, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
     ASSERT_EQ(addCounter(client_id, reg_id2, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
     doWork();
+    doWork();
 
     readAllBroadcastsFromConductor(mock_broadcast_handler);
     testing::Mock::VerifyAndClear(&m_mockCallbacks);
@@ -204,9 +205,9 @@ TEST_F(DriverConductorCounterTest, shouldNotRemoveCounterOnClientKeepalive)
 
 TEST_F(DriverConductorCounterTest, shouldIncrementCounterOnConductorThresholdExceeded)
 {
-    int64_t *maxCycleTimeCounter = aeron_counters_manager_addr(
+    volatile int64_t *maxCycleTimeCounter = aeron_counters_manager_addr(
         &m_conductor.m_conductor.counters_manager, AERON_SYSTEM_COUNTER_CONDUCTOR_MAX_CYCLE_TIME);
-    int64_t *thresholdExceededCounter = aeron_counters_manager_addr(
+    volatile int64_t *thresholdExceededCounter = aeron_counters_manager_addr(
         &m_conductor.m_conductor.counters_manager, AERON_SYSTEM_COUNTER_CONDUCTOR_CYCLE_TIME_THRESHOLD_EXCEEDED);
 
     nano_time = 0;
@@ -223,12 +224,12 @@ TEST_F(DriverConductorCounterTest, shouldIncrementCounterOnConductorThresholdExc
     doWork();
 
     int64_t maxCycleTime;
-    AERON_GET_VOLATILE(maxCycleTime, *maxCycleTimeCounter);
+    AERON_GET_ACQUIRE(maxCycleTime, *maxCycleTimeCounter);
 
     ASSERT_EQ(1000 * 1000 * 1000, maxCycleTime);
 
     int64_t thresholdExceeded;
-    AERON_GET_VOLATILE(thresholdExceeded, *thresholdExceededCounter);
+    AERON_GET_ACQUIRE(thresholdExceeded, *thresholdExceededCounter);
 
     ASSERT_EQ(3, thresholdExceeded);
 }

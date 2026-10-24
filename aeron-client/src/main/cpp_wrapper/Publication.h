@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <mutex>
 
 #include "concurrent/AtomicBuffer.h"
 #include "concurrent/logbuffer/BufferClaim.h"
@@ -39,11 +40,11 @@ using namespace aeron::concurrent::logbuffer;
 using namespace aeron::concurrent;
 using namespace aeron::util;
 
-static const std::int64_t NOT_CONNECTED = -1;
-static const std::int64_t BACK_PRESSURED = -2;
-static const std::int64_t ADMIN_ACTION = -3;
-static const std::int64_t PUBLICATION_CLOSED = -4;
-static const std::int64_t MAX_POSITION_EXCEEDED = -5;
+static constexpr std::int64_t NOT_CONNECTED = -1;
+static constexpr std::int64_t BACK_PRESSURED = -2;
+static constexpr std::int64_t ADMIN_ACTION = -3;
+static constexpr std::int64_t PUBLICATION_CLOSED = -4;
+static constexpr std::int64_t MAX_POSITION_EXCEEDED = -5;
 
 /**
  * Supplies the reserved value field for a data frame header. The returned value will be set in the header as
@@ -62,12 +63,14 @@ typedef std::function<std::int64_t(
     util::index_t length)> on_reserved_value_supplier_t;
 
 static const on_reserved_value_supplier_t DEFAULT_RESERVED_VALUE_SUPPLIER =
-    [](AtomicBuffer &, util::index_t, util::index_t) -> std::int64_t
+    [](AtomicBuffer &, util::index_t, util::index_t) noexcept -> std::int64_t
     {
         return 0;
     };
 
 using AsyncDestination = aeron_async_destination_t;
+
+class Aeron;
 
 /**
  * @example BasicPublisher.cpp
@@ -88,7 +91,8 @@ class Publication
 public:
 
     /// @cond HIDDEN_SYMBOLS
-    Publication(aeron_t *aeron, aeron_publication_t *publication) :
+    Publication(const std::shared_ptr<Aeron> &aeronRef, aeron_t *aeron, aeron_publication_t *publication) :
+        m_aeronRef(aeronRef),
         m_aeron(aeron),
         m_publication(publication)
     {
@@ -103,6 +107,7 @@ public:
     ~Publication()
     {
         aeron_publication_close(m_publication, nullptr, nullptr);
+        m_pendingDestinations.clear();
     }
 
     /**
@@ -190,13 +195,13 @@ public:
     /**
      * Maximum length of a message payload that fits within a message fragment.
      *
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      *
      * @return maximum message fragment payload length.
      */
     inline util::index_t maxPayloadLength() const
     {
-        return static_cast<util::index_t>(m_constants.max_message_length);
+        return static_cast<util::index_t>(m_constants.max_payload_length);
     }
 
     /**
@@ -352,12 +357,16 @@ public:
         iov.iov_base = buffer;
         iov.iov_len = sizeof(buffer);
 
-        if (aeron_publication_local_sockaddrs(m_publication, &iov, 1) < 0)
+        const int addressCount = aeron_publication_local_sockaddrs(m_publication, &iov, 1);
+        if (addressCount < 0)
         {
             AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
         }
 
-        localAddresses.push_back(std::string(reinterpret_cast<char *>(buffer)));
+        if (addressCount > 0)
+        {
+            localAddresses.push_back(std::string(reinterpret_cast<char *>(buffer)));
+        }
 
         return localAddresses;
     }
@@ -369,8 +378,8 @@ public:
      * @param offset offset in the buffer at which the encoded message begins.
      * @param length in bytes of the encoded message.
      * @param reservedValueSupplier for the frame.
-     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
-     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
      */
     inline std::int64_t offer(
         const concurrent::AtomicBuffer &buffer,
@@ -398,8 +407,8 @@ public:
      * @param buffer containing message.
      * @param offset offset in the buffer at which the encoded message begins.
      * @param length in bytes of the encoded message.
-     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
-     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
      */
     inline std::int64_t offer(const concurrent::AtomicBuffer &buffer, util::index_t offset, util::index_t length)
     {
@@ -423,15 +432,18 @@ public:
      * @param startBuffer containing part of the message.
      * @param lastBuffer after the message.
      * @param reservedValueSupplier for the frame.
-     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
-     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
      */
     template<class BufferIterator> std::int64_t offer(
         BufferIterator startBuffer,
         BufferIterator lastBuffer,
         const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
     {
-        std::vector<aeron_iovec_t> iov;
+        static constexpr std::size_t IOVEC_STACK_CAPACITY = 16;
+        std::array<aeron_iovec_t, IOVEC_STACK_CAPACITY> stackIov;
+        std::vector<aeron_iovec_t> overflowIov;
+        std::size_t iovCount = 0;
         std::size_t length = 0;
         for (BufferIterator it = startBuffer; it != lastBuffer; ++it)
         {
@@ -439,18 +451,33 @@ public:
             {
                 throw aeron::util::IllegalStateException(
                     "length overflow: " + std::to_string(length) + " + " + std::to_string(it->capacity()) +
-                    " > " + std::to_string(length + it->capacity()),
-                    SOURCEINFO);
+                        " > " + std::to_string(length + it->capacity()),
+                    SOURCEINFO, EINVAL);
             }
 
             aeron_iovec_t buf;
             buf.iov_base = it->buffer();
             buf.iov_len = it->capacity();
-            iov.push_back(buf);
+
+            if (iovCount < IOVEC_STACK_CAPACITY)
+            {
+                stackIov[iovCount] = buf;
+            }
+            else
+            {
+                if (overflowIov.empty())
+                {
+                    overflowIov.reserve(IOVEC_STACK_CAPACITY * 2);
+                    overflowIov.insert(overflowIov.end(), stackIov.begin(), stackIov.end());
+                }
+                overflowIov.push_back(buf);
+            }
+            iovCount++;
         }
 
+        aeron_iovec_t *iov = iovCount <= IOVEC_STACK_CAPACITY ? stackIov.data() : overflowIov.data();
         const std::int64_t position = aeron_publication_offerv(
-            m_publication, iov.data(), iov.size(), reservedValueSupplierCallback, (void *)&reservedValueSupplier);
+            m_publication, iov, iovCount, reservedValueSupplierCallback, (void *)&reservedValueSupplier);
 
         if (AERON_PUBLICATION_ERROR == position)
         {
@@ -466,11 +493,11 @@ public:
      * @param buffers containing parts of the message.
      * @param length of the array of buffers.
      * @param reservedValueSupplier for the frame.
-     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
-     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
      */
     std::int64_t offer(
-        const concurrent::AtomicBuffer buffers[],
+        const concurrent::AtomicBuffer *buffers,
         std::size_t length,
         const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
     {
@@ -482,14 +509,44 @@ public:
      *
      * @param buffers containing parts of the message.
      * @param reservedValueSupplier for the frame.
-     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
-     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
      */
-    template<std::size_t N> std::int64_t offer(
+    template<std::size_t N>
+    std::int64_t offer(
         const std::array<concurrent::AtomicBuffer, N> &buffers,
         const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
     {
         return offer(buffers.begin(), buffers.end(), reservedValueSupplier);
+    }
+
+    /**
+     * Non-blocking publish of a simple const data buffer and length containing a message
+     *
+     * @param buffer contain the message.
+     * @param length of the message.
+     * @param reservedValueSupplier for the frame.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
+     */
+    std::int64_t offer(
+        const std::uint8_t *buffer,
+        std::size_t length,
+        const on_reserved_value_supplier_t &reservedValueSupplier = DEFAULT_RESERVED_VALUE_SUPPLIER)
+    {
+        std::int64_t position = aeron_publication_offer(
+            m_publication,
+            buffer,
+            static_cast<std::size_t>(length),
+            reservedValueSupplierCallback,
+            (void *)&reservedValueSupplier);
+
+        if (AERON_PUBLICATION_ERROR == position)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
+
+        return position;
     }
 
     /**
@@ -519,8 +576,8 @@ public:
      *
      * @param length      of the range to claim, in bytes..
      * @param bufferClaim to be populate if the claim succeeds.
-     * @return The new stream position, otherwise {@link #NOT_CONNECTED}, {@link #BACK_PRESSURED},
-     * {@link #ADMIN_ACTION} or {@link #CLOSED}.
+     * @return The new stream position, otherwise {@link aeron#NOT_CONNECTED}, {@link aeron#BACK_PRESSURED},
+     * {@link aeron#ADMIN_ACTION} or {@link aeron#PUBLICATION_CLOSED}.
      * @throws IllegalArgumentException if the length is greater than max payload length within an MTU.
      * @see BufferClaim::commit
      */
@@ -550,7 +607,7 @@ public:
     AsyncDestination *addDestinationAsync(const std::string &endpointChannel)
     {
         AsyncDestination *async = nullptr;
-        if (aeron_publication_async_add_destination(&async, m_aeron, m_publication, endpointChannel.c_str()))
+        if (aeron_publication_async_add_destination(&async, m_aeron, m_publication, endpointChannel.c_str()) < 0)
         {
             AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
         }
@@ -601,6 +658,41 @@ public:
     std::int64_t removeDestination(const std::string &endpointChannel)
     {
         AsyncDestination *async = removeDestinationAsync(endpointChannel);
+        std::int64_t correlationId = aeron_async_destination_get_registration_id(async);
+
+        std::lock_guard<std::recursive_mutex> lock(m_adminLock);
+        m_pendingDestinations[correlationId] = async;
+
+        return correlationId;
+    }
+
+    /**
+     * Remove a previously added destination manually from a multi-destination-cast Publication.
+     *
+     * @param destinationRegistrationId for the destination to remove
+     * @return async object to track the progress of the command
+     */
+    AsyncDestination *removeDestinationAsync(std::int64_t destinationRegistrationId)
+    {
+        AsyncDestination *async = nullptr;
+        if (aeron_publication_async_remove_destination_by_id(
+            &async, m_aeron, m_publication, destinationRegistrationId) < 0)
+        {
+            AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
+        }
+
+        return async;
+    }
+
+    /**
+     * Remove a previously added destination manually from a multi-destination-cast Publication by destinationRegistrationId.
+     *
+     * @param destinationRegistrationId for the destination to remove
+     * @return correlation id for the remove command
+     */
+    std::int64_t removeDestination(std::int64_t destinationRegistrationId)
+    {
+        AsyncDestination *async = removeDestinationAsync(destinationRegistrationId);
         std::int64_t correlationId = aeron_async_destination_get_registration_id(async);
 
         std::lock_guard<std::recursive_mutex> lock(m_adminLock);
@@ -664,13 +756,35 @@ public:
         auto search = m_pendingDestinations.find(correlationId);
         if (search == m_pendingDestinations.end())
         {
-            throw IllegalArgumentException("Unknown correlation id", SOURCEINFO);
+            throw IllegalArgumentException("Unknown correlation id", SOURCEINFO, EINVAL);
         }
 
-        return findDestinationResponse(search->second);
+        auto async = search->second;
+        try
+        {
+            bool result = findDestinationResponse(async);
+            if (result)
+            {
+                m_pendingDestinations.erase(correlationId);
+            }
+            return result;
+        }
+        catch (...)
+        {
+            m_pendingDestinations.erase(correlationId);
+            throw;
+        }
     }
 
+    /// @cond HIDDEN_SYMBOLS
+    aeron_publication_t *publication()
+    {
+        return m_publication;
+    }
+    /// @endcond
+
 private:
+    std::shared_ptr<Aeron> m_aeronRef; // ensure Aeron instance is being deleted after its children
     aeron_t *m_aeron = nullptr;
     aeron_publication_t *m_publication = nullptr;
     aeron_publication_constants_t m_constants = {};
@@ -678,7 +792,8 @@ private:
     std::unordered_map<std::int64_t, AsyncDestination *> m_pendingDestinations = {};
     std::recursive_mutex m_adminLock = {};
 
-    static std::int64_t reservedValueSupplierCallback(void *clientd, std::uint8_t *buffer, std::size_t frame_length)
+    static std::int64_t reservedValueSupplierCallback(
+        void *clientd, std::uint8_t *buffer, std::size_t frame_length) noexcept
     {
         on_reserved_value_supplier_t &supplier = *static_cast<on_reserved_value_supplier_t *>(clientd);
         AtomicBuffer atomicBuffer(buffer, frame_length);

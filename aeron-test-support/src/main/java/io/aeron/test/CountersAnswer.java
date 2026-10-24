@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,14 +36,15 @@ public final class CountersAnswer implements Answer<Counter>
     /**
      * {@inheritDoc}
      */
+    @Override
     public Counter answer(final InvocationOnMock invocation)
     {
         final int counterId;
         if (2 == invocation.getArguments().length)
         {
             counterId = countersManager.allocate(
-                invocation.getArgument(0, String.class),
-                invocation.getArgument(1, Integer.class));
+                invocation.getArgument(1, String.class),
+                invocation.getArgument(0, Integer.class));
         }
         else if (7 == invocation.getArguments().length)
         {
@@ -59,11 +60,11 @@ public final class CountersAnswer implements Answer<Counter>
         else
         {
             throw new RuntimeException(
-                "Unexpected number of arguments, should be used for Aeron::addCounter(String, int) or " +
+                "Unexpected number of arguments, should be used for Aeron::addCounter(int, String) or " +
                 "Aeron::addCounter(int, DirectBuffer, int, int, DirectBuffer, int, int)");
         }
 
-        return new Counter(countersManager, 0, counterId);
+        return new Counter(countersManager, counterId);
     }
 
     /**
@@ -71,7 +72,7 @@ public final class CountersAnswer implements Answer<Counter>
      * Aeron instance).
      *
      * @param countersManager delegate to pass addCounter requests to.
-     * @return an Answer that will use the supplied counters manager.
+     * @return an Answer that will use the supplied {@link CountersManager}.
      */
     public static CountersAnswer mapTo(final CountersManager countersManager)
     {

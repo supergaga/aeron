@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,13 @@ import static org.agrona.BitUtil.align;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.core.Is.is;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
 
 class SenderTest
 {
@@ -76,6 +82,7 @@ class SenderTest
 
     private final FlowControl flowControl = spy(new UnicastFlowControl());
     private final RetransmitHandler mockRetransmitHandler = mock(RetransmitHandler.class);
+    private final DriverConductorProxy mockDriverConductorProxy = mock(DriverConductorProxy.class);
 
     private final CachedNanoClock nanoClock = new CachedNanoClock();
 
@@ -147,6 +154,7 @@ class SenderTest
             new AtomicLongPosition(),
             new AtomicLongPosition(),
             mock(AtomicCounter.class),
+            mock(AtomicCounter.class),
             SESSION_ID,
             STREAM_ID,
             INITIAL_TERM_ID,
@@ -155,7 +163,9 @@ class SenderTest
             new NetworkPublicationThreadLocals(),
             false);
 
-        senderCommandQueue.offer(() -> sender.onNewNetworkPublication(publication));
+        assertTrue(senderCommandQueue.offer(() -> sender.onNewNetworkPublication(publication)));
+
+        sender.doWork(); // process command
     }
 
     @AfterEach
@@ -211,7 +221,7 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(0);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
         sender.doWork();
 
         assertThat(receivedFrames.size(), is(1));
@@ -241,7 +251,7 @@ class SenderTest
         assertThat(receivedFrames.size(), is(1)); // setup frame
         receivedFrames.remove();
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
@@ -252,7 +262,7 @@ class SenderTest
         assertThat(receivedFrames.size(), is(1)); // data
         receivedFrames.remove();
 
-        publication.triggerSendSetupFrame();
+        publication.triggerSendSetupFrame(msg, rcvAddress);
 
         sender.doWork();
         assertThat(receivedFrames.size(), is(0)); // setup has been sent already, have to wait
@@ -277,14 +287,14 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         sender.doWork();
 
         assertThat(receivedFrames.size(), is(1)); // heartbeat
         receivedFrames.remove();
 
-        publication.triggerSendSetupFrame();
+        publication.triggerSendSetupFrame(msg, rcvAddress);
         nanoClock.advance(Configuration.PUBLICATION_SETUP_TIMEOUT_NS + 10);
         sender.doWork();
 
@@ -305,7 +315,7 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
@@ -334,7 +344,7 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(2 * ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
@@ -388,7 +398,7 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
         sender.doWork();
 
         assertThat(receivedFrames.size(), is(1));
@@ -417,7 +427,7 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         sender.doWork();
 
@@ -448,7 +458,7 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
@@ -482,24 +492,24 @@ class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
 
         appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
 
-        sender.doWork();
+        assertNotEquals(0, sender.doWork());
 
         assertThat(receivedFrames.size(), is(1));  // should send ticks
         receivedFrames.remove();                   // skip data (heartbeat) frame
 
         nanoClock.advance(Configuration.PUBLICATION_HEARTBEAT_TIMEOUT_NS - 1);
-        sender.doWork();
+        assertEquals(1, sender.doWork());
         assertThat(receivedFrames.size(), is(0));  // should not send yet
 
         nanoClock.advance(10);
-        sender.doWork();
+        assertNotEquals(0, sender.doWork());
         assertThat(receivedFrames.size(), greaterThanOrEqualTo(1));  // should send ticks
 
         dataHeader.wrap(receivedFrames.remove());
@@ -507,11 +517,11 @@ class SenderTest
         assertThat(dataHeader.termOffset(), is(offsetOfMessage(2)));
 
         nanoClock.advance(Configuration.PUBLICATION_HEARTBEAT_TIMEOUT_NS - 1);
-        sender.doWork();
+        assertEquals(0, sender.doWork());
         assertThat(receivedFrames.size(), is(0));  // should not send yet
 
         nanoClock.advance(10);
-        sender.doWork();
+        assertNotEquals(0, sender.doWork());
         assertThat(receivedFrames.size(), greaterThanOrEqualTo(1));  // should send ticks
 
         dataHeader.wrap(receivedFrames.remove());

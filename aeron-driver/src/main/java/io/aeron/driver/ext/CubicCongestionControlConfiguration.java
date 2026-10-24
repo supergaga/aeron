@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * Configuration options to be applied when {@link CubicCongestionControl} is loaded.
  */
-public class CubicCongestionControlConfiguration
+public final class CubicCongestionControlConfiguration
 {
+    private CubicCongestionControlConfiguration()
+    {
+    }
+
     /**
      * Property name for measuring RTT or using static constant based on initial value.
      *

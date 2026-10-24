@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -69,6 +69,7 @@ public final class ConcurrentPublication extends Publication
     /**
      * {@inheritDoc}
      */
+    @Override
     public long availableWindow()
     {
         if (isClosed)
@@ -391,17 +392,14 @@ public final class ConcurrentPublication extends Publication
         final int length,
         final ReservedValueSupplier reservedValueSupplier)
     {
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-        final int requiredLength = (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
-        final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, requiredLength);
+        final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, framedLength);
         final int termId = termId(rawTail);
         final int termOffset = termOffset(rawTail, termLength);
 
-        final int resultingOffset = termOffset + requiredLength;
+        final int resultingOffset = termOffset + framedLength;
         final long position = computePosition(termId, resultingOffset, positionBitsToShift, initialTermId);
         if (resultingOffset > termLength)
         {
@@ -506,17 +504,14 @@ public final class ConcurrentPublication extends Publication
         final ReservedValueSupplier reservedValueSupplier)
     {
         final int length = lengthOne + lengthTwo;
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-        final int requiredLength = (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
-        final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, requiredLength);
+        final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, framedLength);
         final int termId = termId(rawTail);
         final int termOffset = termOffset(rawTail, termLength);
 
-        final int resultingOffset = termOffset + requiredLength;
+        final int resultingOffset = termOffset + framedLength;
         final long position = computePosition(termId, resultingOffset, positionBitsToShift, initialTermId);
         if (resultingOffset > termLength)
         {
@@ -640,17 +635,14 @@ public final class ConcurrentPublication extends Publication
         final int length,
         final ReservedValueSupplier reservedValueSupplier)
     {
-        final int numMaxPayloads = length / maxPayloadLength;
-        final int remainingPayload = length % maxPayloadLength;
-        final int lastFrameLength = remainingPayload > 0 ? align(remainingPayload + HEADER_LENGTH, FRAME_ALIGNMENT) : 0;
-        final int requiredLength = (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
+        final int framedLength = computeFragmentedFrameLength(length, maxPayloadLength);
         final int termLength = termBuffer.capacity();
 
-        final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, requiredLength);
+        final long rawTail = logMetaDataBuffer.getAndAddLong(tailCounterOffset, framedLength);
         final int termId = termId(rawTail);
         final int termOffset = termOffset(rawTail, termLength);
 
-        final int resultingOffset = termOffset + requiredLength;
+        final int resultingOffset = termOffset + framedLength;
         final long position = computePosition(termId, resultingOffset, positionBitsToShift, initialTermId);
         if (resultingOffset > termLength)
         {

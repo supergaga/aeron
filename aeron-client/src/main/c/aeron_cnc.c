@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ int aeron_cnc_init(aeron_cnc_t **aeron_cnc, const char *base_path, int64_t timeo
     int64_t deadline_ms = aeron_epoch_clock() + timeout_ms;
     while (true)
     {
-        aeron_cnc_load_result_t result = aeron_cnc_map_file_and_load_metadata(
+        aeron_cnc_load_result_t result = aeron_cnc_map_readonly_file_and_load_metadata(
             base_path, &_aeron_cnc->cnc_mmap, &_aeron_cnc->metadata);
 
         if (AERON_CNC_LOAD_SUCCESS == result)
@@ -70,7 +70,7 @@ int aeron_cnc_init(aeron_cnc_t **aeron_cnc, const char *base_path, int64_t timeo
             if (deadline_ms <= aeron_epoch_clock())
             {
                 AERON_SET_ERR(
-                    AERON_CLIENT_ERROR_DRIVER_TIMEOUT,
+                    -AERON_CLIENT_ERROR_DRIVER_TIMEOUT,
                     "Timed out waiting for CnC file to become available after %" PRId64 "ms",
                     timeout_ms);
                 goto error;
@@ -123,6 +123,7 @@ int aeron_cnc_constants(aeron_cnc_t *aeron_cnc, aeron_cnc_constants_t *constants
     constants->client_liveness_timeout = aeron_cnc->metadata->client_liveness_timeout;
     constants->start_timestamp = aeron_cnc->metadata->start_timestamp;
     constants->pid = aeron_cnc->metadata->pid;
+    constants->file_page_size = aeron_cnc->metadata->file_page_size;
 
     return 0;
 }
@@ -171,7 +172,7 @@ int aeron_cnc_loss_reporter_read(
     }
 
     aeron_mapped_file_t loss_mmap;
-    if (aeron_map_existing_file(&loss_mmap, loss_report_filename) < 0) 
+    if (aeron_map_readonly_file(&loss_mmap, loss_report_filename) < 0)
     {
         AERON_APPEND_ERR("%s", "Failed to map loss report");
         return -1;

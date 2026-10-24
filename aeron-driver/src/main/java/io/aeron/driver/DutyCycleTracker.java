@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,6 +39,13 @@ public class DutyCycleTracker extends DutyCycleTrackerFields
     byte p112, p113, p114, p115, p116, p117, p118, p119, p120, p121, p122, p123, p124, p125, p126, p127;
 
     /**
+     * Default constructor.
+     */
+    public DutyCycleTracker()
+    {
+    }
+
+    /**
      * Update the last known clock time.
      *
      * @param nowNs to update with.
@@ -68,5 +75,16 @@ public class DutyCycleTracker extends DutyCycleTrackerFields
      */
     public void reportMeasurement(final long durationNs)
     {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "DutyCycleTracker{" +
+            "timeOfLastUpdateNs=" + timeOfLastUpdateNs +
+            '}';
     }
 }

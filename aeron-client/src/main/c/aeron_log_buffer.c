@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ int aeron_log_buffer_create(
     if (aeron_raw_log_map_existing(&_log_buffer->mapped_raw_log, log_file, pre_touch) < 0)
     {
         AERON_APPEND_ERR("Unable to map raw log for log buffer, correlation_id: %" PRId64, correlation_id);
+        aeron_free(_log_buffer);
         return -1;
     }
 
@@ -51,7 +52,7 @@ int aeron_log_buffer_delete(aeron_log_buffer_t *log_buffer)
 {
     if (NULL != log_buffer)
     {
-        aeron_raw_log_close(&log_buffer->mapped_raw_log, NULL);
+        aeron_raw_log_free(&log_buffer->mapped_raw_log, NULL);
         aeron_free(log_buffer);
     }
 

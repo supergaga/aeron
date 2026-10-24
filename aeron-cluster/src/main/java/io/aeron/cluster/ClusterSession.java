@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,73 +15,133 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.Counter;
+import io.aeron.ErrorCode;
+import io.aeron.Image;
+import io.aeron.Publication;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.codecs.EventCode;
+import io.aeron.cluster.logging.ClusterTracing;
+import io.aeron.cluster.service.ClusterCounters;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.RegistrationException;
 import io.aeron.logbuffer.BufferClaim;
-import org.agrona.*;
+import io.aeron.logbuffer.Header;
+import org.agrona.BitUtil;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
+import org.agrona.MutableDirectBuffer;
+import org.agrona.Strings;
 import org.agrona.collections.ArrayUtil;
+import org.agrona.concurrent.errors.DistinctErrorLog;
 
-import java.util.Arrays;
+import static io.aeron.Aeron.NULL_VALUE;
 
-final class ClusterSession
+final class ClusterSession implements ClusterClientSession
 {
     static final byte[] NULL_PRINCIPAL = ArrayUtil.EMPTY_BYTE_ARRAY;
     static final int MAX_ENCODED_PRINCIPAL_LENGTH = 4 * 1024;
     static final int MAX_ENCODED_MEMBERSHIP_QUERY_LENGTH = 4 * 1024;
 
+    @SuppressWarnings("JavadocVariable")
     enum State
     {
         INIT, CONNECTING, CONNECTED, CHALLENGED, AUTHENTICATED, REJECTED, OPEN, CLOSING, INVALID, CLOSED
     }
 
+    @SuppressWarnings("JavadocVariable")
     enum Action
     {
-        CLIENT, BACKUP, HEARTBEAT
+        CLIENT, BACKUP, HEARTBEAT, STANDBY_SNAPSHOT
     }
 
+    private final long id;
+    private final int clusterMemberId;
+    private final int responseStreamId;
+    private final String responseChannel;
+    private final String sessionInfo;
     private boolean hasNewLeaderEventPending = false;
     private boolean hasOpenEventPending = true;
-    private final long id;
     private long correlationId;
     private long openedLogPosition = AeronArchive.NULL_POSITION;
     private long closedLogPosition = AeronArchive.NULL_POSITION;
-    private long timeOfLastActivityNs;
-    private long responsePublicationId = Aeron.NULL_VALUE;
-    private final int responseStreamId;
-    private final String responseChannel;
+    private transient long timeOfLastActivityNs;
+    private transient long ingressImageCorrelationId = NULL_VALUE;
+    private long responsePublicationId = NULL_VALUE;
+    private long counterRegistrationId = NULL_VALUE;
     private Publication responsePublication;
+    private Counter counter;
     private State state;
     private String responseDetail = null;
     private EventCode eventCode = null;
     private CloseReason closeReason = CloseReason.NULL_VAL;
     private byte[] encodedPrincipal = NULL_PRINCIPAL;
     private Action action = Action.CLIENT;
-
-    ClusterSession(final long sessionId, final int responseStreamId, final String responseChannel)
-    {
-        this.id = sessionId;
-        this.responseStreamId = responseStreamId;
-        this.responseChannel = responseChannel;
-        state(State.INIT);
-    }
+    private Object requestInput = null;
 
     ClusterSession(
-        final long id,
+        final int clusterMemberId,
+        final long sessionId,
+        final int responseStreamId,
+        final String responseChannel,
+        final String sessionInfo)
+    {
+        this.id = sessionId;
+        this.clusterMemberId = clusterMemberId;
+        this.responseStreamId = responseStreamId;
+        this.responseChannel = responseChannel;
+        this.sessionInfo = sessionInfo;
+        state(State.INIT, "");
+    }
+
+    public void close(final Aeron aeron, final ErrorHandler errorHandler, final String reason)
+    {
+        disconnect(aeron, errorHandler);
+        state(State.CLOSED, reason);
+    }
+
+    public long id()
+    {
+        return id;
+    }
+
+    public byte[] encodedPrincipal()
+    {
+        return encodedPrincipal;
+    }
+
+    public boolean isOpen()
+    {
+        return State.OPEN == state;
+    }
+
+    public Publication responsePublication()
+    {
+        return responsePublication;
+    }
+
+    public long timeOfLastActivityNs()
+    {
+        return timeOfLastActivityNs;
+    }
+
+    public void timeOfLastActivityNs(final long timeNs)
+    {
+        timeOfLastActivityNs = timeNs;
+    }
+
+    void loadSnapshotState(
         final long correlationId,
         final long openedLogPosition,
         final long timeOfLastActivityNs,
-        final int responseStreamId,
-        final String responseChannel,
         final CloseReason closeReason)
     {
-        this.id = id;
-        this.responseStreamId = responseStreamId;
-        this.responseChannel = responseChannel;
         this.openedLogPosition = openedLogPosition;
         this.timeOfLastActivityNs = timeOfLastActivityNs;
         this.correlationId = correlationId;
@@ -89,32 +149,12 @@ final class ClusterSession
 
         if (CloseReason.NULL_VAL != closeReason)
         {
-            state(State.CLOSING);
+            state(State.CLOSING, closeReason.name());
         }
         else
         {
-            state(State.OPEN);
+            state(State.OPEN, "openedLogPosition=" + openedLogPosition);
         }
-    }
-
-    public void close(final Aeron aeron, final ErrorHandler errorHandler)
-    {
-        if (null == responsePublication)
-        {
-            aeron.asyncRemovePublication(responsePublicationId);
-        }
-        else
-        {
-            CloseHelper.close(errorHandler, responsePublication);
-            responsePublication = null;
-        }
-
-        state(State.CLOSED);
-    }
-
-    long id()
-    {
-        return id;
     }
 
     int responseStreamId()
@@ -133,7 +173,7 @@ final class ClusterSession
         this.hasOpenEventPending = false;
         this.hasNewLeaderEventPending = false;
         this.timeOfLastActivityNs = 0;
-        state(State.CLOSING);
+        state(State.CLOSING, closeReason.name());
     }
 
     CloseReason closeReason()
@@ -147,17 +187,24 @@ final class ClusterSession
         closeReason = CloseReason.NULL_VAL;
     }
 
-    void asyncConnect(final Aeron aeron)
+    void asyncConnect(final Aeron aeron, final MutableDirectBuffer tempBuffer, final int clusterId)
     {
+        counterRegistrationId = addSessionCounter(aeron, tempBuffer, clusterId);
         responsePublicationId = aeron.asyncAddPublication(responseChannel, responseStreamId);
     }
 
-    void connect(final ErrorHandler errorHandler, final Aeron aeron)
+    void connect(
+        final ErrorHandler errorHandler,
+        final Aeron aeron,
+        final MutableDirectBuffer tempBuffer,
+        final int clusterId)
     {
         if (null != responsePublication)
         {
             throw new ClusterException("response publication already added");
         }
+
+        counterRegistrationId = addSessionCounter(aeron, tempBuffer, clusterId);
 
         try
         {
@@ -172,14 +219,25 @@ final class ClusterSession
 
     void disconnect(final Aeron aeron, final ErrorHandler errorHandler)
     {
-        if (null == responsePublication)
+        if (NULL_VALUE != responsePublicationId)
         {
             aeron.asyncRemovePublication(responsePublicationId);
+            responsePublicationId = NULL_VALUE;
         }
         else
         {
             CloseHelper.close(errorHandler, responsePublication);
             responsePublication = null;
+        }
+        if (NULL_VALUE != counterRegistrationId)
+        {
+            aeron.asyncRemoveCounter(counterRegistrationId);
+            counterRegistrationId = NULL_VALUE;
+        }
+        else
+        {
+            CloseHelper.close(errorHandler, counter);
+            counter = null;
         }
     }
 
@@ -189,17 +247,46 @@ final class ClusterSession
         {
             if (!aeron.isCommandActive(responsePublicationId))
             {
-                responsePublication = aeron.getPublication(responsePublicationId);
+                try
+                {
+                    responsePublication = aeron.getPublication(responsePublicationId);
+                    responsePublicationId = NULL_VALUE;
+                }
+                catch (final RegistrationException ex)
+                {
+                    if (ErrorCode.RESOURCE_TEMPORARILY_UNAVAILABLE == ex.errorCode())
+                    {
+                        responsePublicationId = aeron.asyncAddPublication(responseChannel, responseStreamId);
+                        return false;
+                    }
+                    else
+                    {
+                        responsePublicationId = NULL_VALUE;
+                        throw ex;
+                    }
+                }
+
+                counter = aeron.getCounter(counterRegistrationId);
+                counterRegistrationId = NULL_VALUE;
+
                 if (null != responsePublication)
                 {
-                    responsePublicationId = Aeron.NULL_VALUE;
+                    if (null != counter)
+                    {
+                        AeronCounters.setReferenceId(
+                            aeron.context().countersMetaDataBuffer(),
+                            aeron.context().countersValuesBuffer(),
+                            counter.id(),
+                            responsePublication.registrationId());
+                        counter.setRelease(id);
+                    }
+
                     timeOfLastActivityNs = nowNs;
-                    state(State.CONNECTING);
+                    state(State.CONNECTING, "connecting");
                 }
                 else
                 {
-                    responsePublicationId = Aeron.NULL_VALUE;
-                    state(State.INVALID);
+                    state(State.INVALID, "responsePublication is null");
                 }
             }
         }
@@ -207,7 +294,7 @@ final class ClusterSession
         return null != responsePublication && responsePublication.isConnected();
     }
 
-    public long tryClaim(final int length, final BufferClaim bufferClaim)
+    long tryClaim(final int length, final BufferClaim bufferClaim)
     {
         if (null == responsePublication)
         {
@@ -219,7 +306,7 @@ final class ClusterSession
         }
     }
 
-    public long offer(final DirectBuffer buffer, final int offset, final int length)
+    long offer(final DirectBuffer buffer, final int offset, final int length)
     {
         if (null == responsePublication)
         {
@@ -236,10 +323,10 @@ final class ClusterSession
         return state;
     }
 
-    void state(final State newState)
+    void state(final State newState, final String reason)
     {
-        //System.out.println("ClusterSession " + id + " " + state + " -> " + newState);
-        this.state = newState;
+        logStateChange(clusterMemberId, id, action, state, newState, reason);
+        state = newState;
     }
 
     void authenticate(final byte[] encodedPrincipal)
@@ -249,19 +336,50 @@ final class ClusterSession
             this.encodedPrincipal = encodedPrincipal;
         }
 
-        state(State.AUTHENTICATED);
+        state(State.AUTHENTICATED, "authenticated");
     }
 
     void open(final long openedLogPosition)
     {
         this.openedLogPosition = openedLogPosition;
-        encodedPrincipal = null;
-        state(State.OPEN);
+        state(State.OPEN, "openedLogPosition=" + openedLogPosition);
     }
 
-    byte[] encodedPrincipal()
+    boolean appendSessionToLogAndSendOpen(
+        final LogPublisher logPublisher,
+        final EgressPublisher egressPublisher,
+        final long leadershipTermId,
+        final int memberId,
+        final long nowNs,
+        final long clusterTimestamp)
     {
-        return encodedPrincipal;
+        if (responsePublication.availableWindow() > 0)
+        {
+            final long resultingPosition = logPublisher.appendSessionOpen(this, leadershipTermId, clusterTimestamp);
+            if (resultingPosition > 0)
+            {
+                open(resultingPosition);
+                timeOfLastActivityNs(nowNs);
+                sendSessionOpenEvent(egressPublisher, leadershipTermId, memberId);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    int sendSessionOpenEvent(
+        final EgressPublisher egressPublisher,
+        final long leadershipTermId,
+        final int memberId)
+    {
+        if (egressPublisher.sendEvent(this, leadershipTermId, memberId, EventCode.OK, ""))
+        {
+            clearOpenEventPending();
+            return 1;
+        }
+
+        return 0;
     }
 
     void lastActivityNs(final long timeNs, final long correlationId)
@@ -270,11 +388,22 @@ final class ClusterSession
         this.correlationId = correlationId;
     }
 
-    void reject(final EventCode code, final String responseDetail)
+    void reject(final EventCode code, final String responseDetail, final DistinctErrorLog errorLog)
     {
         this.eventCode = code;
         this.responseDetail = responseDetail;
-        state(State.REJECTED);
+        state(State.REJECTED, Strings.isEmpty(responseDetail) ? code.name() : code.name() + ": " + responseDetail);
+        if (null != errorLog)
+        {
+            errorLog.record(new ClusterEvent(
+                code + " " + responseDetail + ", clusterMemberId=" + clusterMemberId + ", id=" + id));
+        }
+    }
+
+    void redirect(final String ingressEndpoints)
+    {
+        this.eventCode = EventCode.REDIRECT;
+        this.responseDetail = ingressEndpoints;
     }
 
     EventCode eventCode()
@@ -285,16 +414,6 @@ final class ClusterSession
     String responseDetail()
     {
         return responseDetail;
-    }
-
-    long timeOfLastActivityNs()
-    {
-        return timeOfLastActivityNs;
-    }
-
-    void timeOfLastActivityNs(final long timeNs)
-    {
-        timeOfLastActivityNs = timeNs;
     }
 
     long correlationId()
@@ -347,9 +466,72 @@ final class ClusterSession
         this.action = action;
     }
 
-    Publication responsePublication()
+    void requestInput(final Object requestInput)
     {
-        return responsePublication;
+        this.requestInput = requestInput;
+    }
+
+    Object requestInput()
+    {
+        return requestInput;
+    }
+
+    void linkIngressImage(final Header header)
+    {
+        if (NULL_VALUE == ingressImageCorrelationId)
+        {
+            ingressImageCorrelationId = ((Image)header.context()).correlationId();
+        }
+    }
+
+    void unlinkIngressImage()
+    {
+        ingressImageCorrelationId = NULL_VALUE;
+    }
+
+    long ingressImageCorrelationId()
+    {
+        return ingressImageCorrelationId;
+    }
+
+    boolean hasTimedOut(final long nowNs, final long sessionTimeoutNs)
+    {
+        return State.INIT != state() && (timeOfLastActivityNs() + sessionTimeoutNs) < nowNs;
+    }
+
+    private long addSessionCounter(final Aeron aeron, final MutableDirectBuffer tempBuffer, final int clusterId)
+    {
+        tempBuffer.putInt(0, clusterId);
+        tempBuffer.putLong(BitUtil.SIZE_OF_INT, id);
+
+        final int keyLength = BitUtil.SIZE_OF_INT + BitUtil.SIZE_OF_LONG;
+
+        int labelLength = 0;
+        labelLength += tempBuffer.putStringWithoutLengthAscii(keyLength + labelLength, "cluster-session: ");
+        labelLength += tempBuffer.putStringWithoutLengthAscii(keyLength + labelLength, sessionInfo);
+        labelLength += tempBuffer.putStringWithoutLengthAscii(
+            keyLength + labelLength, ClusterCounters.CLUSTER_ID_LABEL_SUFFIX);
+        labelLength += tempBuffer.putIntAscii(keyLength + labelLength, clusterId);
+
+        return aeron.asyncAddCounter(
+            AeronCounters.CLUSTER_SESSION_TYPE_ID,
+            tempBuffer,
+            0,
+            keyLength,
+            tempBuffer,
+            keyLength,
+            labelLength);
+    }
+
+    private static void logStateChange(
+        final int memberId,
+        final long sessionId,
+        final Action action,
+        final State oldState,
+        final State newState,
+        final String reason)
+    {
+        ClusterTracing.traceClusterSessionStateChange(memberId, sessionId, action, oldState, newState, reason);
     }
 
     static void checkEncodedPrincipalLength(final byte[] encodedPrincipal)
@@ -366,18 +548,27 @@ final class ClusterSession
     {
         return "ClusterSession{" +
             "id=" + id +
+            ", clusterMemberId=" + clusterMemberId +
+            ", responseStreamId=" + responseStreamId +
+            ", responseChannel='" + responseChannel + '\'' +
+            ", sessionInfo='" + sessionInfo + '\'' +
+            ", hasNewLeaderEventPending=" + hasNewLeaderEventPending +
+            ", hasOpenEventPending=" + hasOpenEventPending +
             ", correlationId=" + correlationId +
             ", openedLogPosition=" + openedLogPosition +
             ", closedLogPosition=" + closedLogPosition +
             ", timeOfLastActivityNs=" + timeOfLastActivityNs +
-            ", responseStreamId=" + responseStreamId +
-            ", responseChannel='" + responseChannel + '\'' +
+            ", ingressImageCorrelationId=" + ingressImageCorrelationId +
             ", responsePublicationId=" + responsePublicationId +
-            ", closeReason=" + closeReason +
+            ", counterRegistrationId=" + counterRegistrationId +
+            ", responsePublication=" + responsePublication +
+            ", counter=" + counter +
             ", state=" + state +
-            ", hasNewLeaderEventPending=" + hasNewLeaderEventPending +
-            ", hasOpenEventPending=" + hasOpenEventPending +
-            ", encodedPrincipal=" + Arrays.toString(encodedPrincipal) +
+            ", responseDetail='" + responseDetail + '\'' +
+            ", eventCode=" + eventCode +
+            ", closeReason=" + closeReason +
+            ", action=" + action +
+            ", requestInput=" + requestInput +
             '}';
     }
 }

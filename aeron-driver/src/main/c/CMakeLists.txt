@@ -1,4 +1,4 @@
-# Copyright 2014-2022 Real Logic Limited.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +26,15 @@ if (MSVC AND "${CMAKE_SYSTEM_NAME}" MATCHES "Windows")
     set(BUILD_SHARED_LIBS ON)
 endif ()
 
+if (NOT MSVC)
+    message(STATUS "Looking up: /dev/urandom")
+    execute_process(
+        COMMAND ls /dev/urandom
+        RESULT_VARIABLE DEV_URANDOM_EXISTS
+        OUTPUT_QUIET
+    )
+endif ()
+
 check_include_file("bsd/stdlib.h" BSDSTDLIB_H_EXISTS)
 check_include_file("uuid/uuid.h" UUID_H_EXISTS)
 find_library(LIBBSD_EXISTS NAMES bsd libbsd)
@@ -51,7 +60,7 @@ if (UUID_H_EXISTS)
 endif ()
 
 if (MSVC AND "${CMAKE_SYSTEM_NAME}" MATCHES "Windows")
-    set(AERON_LIB_WINSOCK_LIBS wsock32 ws2_32 Iphlpapi)
+    set(AERON_LIB_WINSOCK_LIBS ws2_32 Iphlpapi)
     set(WSAPOLL_PROTOTYPE_EXISTS True)
 endif ()
 
@@ -88,6 +97,11 @@ else ()
     message(WARNING "Could not find arc4random. If on Linux, is libbsd installed?")
 endif ()
 
+if (DEV_URANDOM_EXISTS EQUAL 0)
+    message(STATUS "Found: /dev/urandom")
+    add_definitions(-DHAVE_DEV_URANDOM)
+endif ()
+
 if (UUID_GENERATE_PROTOTYPE_EXISTS)
     add_definitions(-DHAVE_UUID_GENERATE)
 else ()
@@ -122,6 +136,11 @@ if (SENDMMSG_PROTOTYPE_EXISTS)
     add_definitions(-DHAVE_SENDMMSG)
 endif ()
 
+if (APPLE)
+    add_definitions(-DHAVE_SENDMSG_X)
+    add_definitions(-DHAVE_RECVMSG_X)
+endif ()
+
 SET(C_CLIENT_SOURCE
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_array_to_ptr_hash_map.c
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_bit_set.c
@@ -129,6 +148,7 @@ SET(C_CLIENT_SOURCE
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_int64_counter_map.c
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_int64_to_ptr_hash_map.c
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_int64_to_tagged_ptr_hash_map.c
+    ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_linked_queue.c
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_map.c
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_str_to_ptr_hash_map.c
     ${AERON_C_CLIENT_SOURCE_PATH}/concurrent/aeron_atomic.c
@@ -153,6 +173,7 @@ SET(C_CLIENT_SOURCE
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_arrayutil.c
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_bitutil.c
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_clock.c
+    ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_deque.c
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_dlopen.c
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_env.c
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_error.c
@@ -180,9 +201,9 @@ SET(C_CLIENT_SOURCE
     ${AERON_C_CLIENT_SOURCE_PATH}/aeron_publication.c
     ${AERON_C_CLIENT_SOURCE_PATH}/aeron_socket.c
     ${AERON_C_CLIENT_SOURCE_PATH}/aeron_subscription.c
-    ${AERON_C_CLIENT_SOURCE_PATH}/aeron_version.c
     ${AERON_C_CLIENT_SOURCE_PATH}/aeron_windows.c
-    ${AERON_C_CLIENT_SOURCE_PATH}/aeronc.c)
+    ${AERON_C_CLIENT_SOURCE_PATH}/aeronc.c
+    ${AERON_C_CLIENT_SOURCE_PATH}/aeron_version.c)
 
 set(C_CLIENT_HEADERS
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_array_to_ptr_hash_map.h
@@ -191,6 +212,7 @@ set(C_CLIENT_HEADERS
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_int64_counter_map.h
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_int64_to_ptr_hash_map.h
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_int64_to_tagged_ptr_hash_map.h
+    ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_linked_queue.h
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_map.h
     ${AERON_C_CLIENT_SOURCE_PATH}/collections/aeron_str_to_ptr_hash_map.h
     ${AERON_C_CLIENT_SOURCE_PATH}/command/aeron_control_protocol.h
@@ -220,6 +242,7 @@ set(C_CLIENT_HEADERS
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_arrayutil.h
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_bitutil.h
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_clock.h
+    ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_deque.h
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_dlopen.h
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_env.h
     ${AERON_C_CLIENT_SOURCE_PATH}/util/aeron_error.h
@@ -250,8 +273,7 @@ set(C_CLIENT_HEADERS
     ${AERON_C_CLIENT_SOURCE_PATH}/aeron_windows.h
     ${AERON_C_CLIENT_SOURCE_PATH}/aeronc.h)
 
-SET(SOURCE
-    ${C_CLIENT_SOURCE}
+SET(DRIVER_ONLY_SOURCE
     agent/aeron_driver_agent.c
     concurrent/aeron_logbuffer_unblocker.c
     media/aeron_receive_channel_endpoint.c
@@ -261,13 +283,23 @@ SET(SOURCE
     media/aeron_udp_channel.c
     media/aeron_udp_channel_transport.c
     media/aeron_udp_channel_transport_bindings.c
+    media/aeron_udp_channel_transport_fixed_loss.c
+    media/aeron_udp_channel_transport_multi_gap_loss.c
     media/aeron_udp_channel_transport_loss.c
+    media/aeron_random_loss_generator.c
+    media/aeron_fixed_loss_generator.c
+    media/aeron_multi_gap_loss_generator.c
+    media/aeron_debug_channel_endpoint_configuration.c
     media/aeron_udp_destination_tracker.c
     media/aeron_udp_transport_poller.c
     uri/aeron_driver_uri.c
+    aeron_driver_native_resource_agent.c
+    aeron_driver_native_resource_agent_proxy.c
     aeron_congestion_control.c
+    aeron_cpuset.c
     aeron_csv_table_name_resolver.c
     aeron_data_packet_dispatcher.c
+    aeron_driver_version.c
     aeron_driver.c
     aeron_driver_conductor.c
     aeron_driver_conductor_proxy.c
@@ -284,11 +316,17 @@ SET(SOURCE
     aeron_name_resolver.c
     aeron_name_resolver_cache.c
     aeron_network_publication.c
+    aeron_port_manager.c
     aeron_position.c
     aeron_publication_image.c
     aeron_retransmit_handler.c
     aeron_system_counters.c
-    aeron_termination_validator.c)
+    aeron_termination_validator.c
+    aeron_topology.c)
+
+SET(SOURCE
+    ${C_CLIENT_SOURCE}
+    ${DRIVER_ONLY_SOURCE})
 
 SET(HEADERS
     ${C_CLIENT_HEADERS}
@@ -301,11 +339,21 @@ SET(HEADERS
     media/aeron_udp_channel.h
     media/aeron_udp_channel_transport.h
     media/aeron_udp_channel_transport_bindings.h
+    media/aeron_udp_channel_transport_fixed_loss.h
+    media/aeron_udp_channel_transport_multi_gap_loss.h
     media/aeron_udp_channel_transport_loss.h
+    media/aeron_loss_generator.h
+    media/aeron_random_loss_generator.h
+    media/aeron_fixed_loss_generator.h
+    media/aeron_multi_gap_loss_generator.h
+    media/aeron_debug_channel_endpoint_configuration.h
     media/aeron_udp_destination_tracker.h
     media/aeron_udp_transport_poller.h
     uri/aeron_driver_uri.h
+    aeron_driver_native_resource_agent.h
+    aeron_driver_native_resource_agent_proxy.h
     aeron_congestion_control.h
+    aeron_cpuset.h
     aeron_csv_table_name_resolver.h
     aeron_data_packet_dispatcher.h
     aeron_driver.h
@@ -325,20 +373,27 @@ SET(HEADERS
     aeron_name_resolver.h
     aeron_name_resolver_cache.h
     aeron_network_publication.h
+    aeron_port_manager.h
     aeron_position.h
     aeron_publication_image.h
     aeron_retransmit_handler.h
     aeron_system_counters.h
     aeron_termination_validator.h
+    aeron_topology.h
+    aeron_driver_version.h
     aeronmd.h)
 
-add_library(aeron_driver SHARED ${SOURCE} ${HEADERS})
-target_include_directories(aeron_driver
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${AERON_C_CLIENT_SOURCE_PATH})
+add_library(aeron_driver SHARED ${DRIVER_ONLY_SOURCE} ${HEADERS})
+add_library(aeron::aeron_driver ALIAS aeron_driver)
+target_include_directories(aeron_driver PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR};${AERON_C_CLIENT_SOURCE_PATH}>"
+    "$<INSTALL_INTERFACE:include/aeronmd;include/aeron>")
 
 add_library(aeron_driver_static STATIC ${SOURCE} ${HEADERS})
-target_include_directories(aeron_driver_static
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${AERON_C_CLIENT_SOURCE_PATH})
+add_library(aeron::aeron_driver_static ALIAS aeron_driver_static)
+target_include_directories(aeron_driver_static PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR};${AERON_C_CLIENT_SOURCE_PATH}>"
+    "$<INSTALL_INTERFACE:include/aeronmd;include/aeron>")
 
 add_executable(aeronmd aeronmd.c)
 target_include_directories(aeronmd
@@ -374,6 +429,17 @@ endif ()
 
 target_link_libraries(
     aeron_driver
+    aeron
+    ${CMAKE_DL_LIBS}
+    ${AERON_LIB_BSD_LIBS}
+    ${AERON_LIB_UUID_LIBS}
+    ${AERON_LIB_M_LIBS}
+    ${AERON_LIB_ATOMIC_LIBS}
+    ${CMAKE_THREAD_LIBS_INIT}
+    ${AERON_LIB_WINSOCK_LIBS})
+
+target_link_libraries(
+    aeron_driver_static
     ${CMAKE_DL_LIBS}
     ${AERON_LIB_BSD_LIBS}
     ${AERON_LIB_UUID_LIBS}
@@ -408,11 +474,15 @@ target_compile_definitions(aeron_driver PRIVATE -DAERON_DRIVER)
 target_compile_definitions(aeron_driver_static PRIVATE -DAERON_DRIVER)
 
 if (AERON_INSTALL_TARGETS)
+    if ("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
+        set_target_properties(aeronmd PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+    endif ()
     install(
         TARGETS aeron_driver aeron_driver_static
+        EXPORT aeron-targets
         RUNTIME DESTINATION lib
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
     install(TARGETS aeronmd aeronmd_s DESTINATION bin)
-    install(DIRECTORY . DESTINATION include/aeronmd FILES_MATCHING PATTERN "*.h")
+    install(DIRECTORY ./ DESTINATION include/aeronmd FILES_MATCHING PATTERN "*.h")
 endif ()

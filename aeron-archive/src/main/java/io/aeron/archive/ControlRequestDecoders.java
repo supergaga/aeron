@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,49 @@
  */
 package io.aeron.archive;
 
-import io.aeron.archive.codecs.*;
+import io.aeron.archive.codecs.ArchiveIdRequestDecoder;
+import io.aeron.archive.codecs.AttachSegmentsRequestDecoder;
+import io.aeron.archive.codecs.AuthConnectRequestDecoder;
+import io.aeron.archive.codecs.BoundedReplayRequestDecoder;
+import io.aeron.archive.codecs.ChallengeResponseDecoder;
+import io.aeron.archive.codecs.CloseSessionRequestDecoder;
+import io.aeron.archive.codecs.DeleteDetachedSegmentsRequestDecoder;
+import io.aeron.archive.codecs.DetachSegmentsRequestDecoder;
+import io.aeron.archive.codecs.ExtendRecordingRequest2Decoder;
+import io.aeron.archive.codecs.ExtendRecordingRequestDecoder;
+import io.aeron.archive.codecs.FindLastMatchingRecordingRequestDecoder;
+import io.aeron.archive.codecs.KeepAliveRequestDecoder;
+import io.aeron.archive.codecs.ListRecordingRequestDecoder;
+import io.aeron.archive.codecs.ListRecordingSubscriptionsRequestDecoder;
+import io.aeron.archive.codecs.ListRecordingsForUriRequestDecoder;
+import io.aeron.archive.codecs.ListRecordingsRequestDecoder;
+import io.aeron.archive.codecs.MaxRecordedPositionRequestDecoder;
+import io.aeron.archive.codecs.MessageHeaderDecoder;
+import io.aeron.archive.codecs.MigrateSegmentsRequestDecoder;
+import io.aeron.archive.codecs.PurgeRecordingRequestDecoder;
+import io.aeron.archive.codecs.PurgeSegmentsRequestDecoder;
+import io.aeron.archive.codecs.RecordingPositionRequestDecoder;
+import io.aeron.archive.codecs.ReplayRequestDecoder;
+import io.aeron.archive.codecs.ReplayTokenRequestDecoder;
+import io.aeron.archive.codecs.ReplicateRequest2Decoder;
+import io.aeron.archive.codecs.ReplicateRequestDecoder;
+import io.aeron.archive.codecs.StartPositionRequestDecoder;
+import io.aeron.archive.codecs.StartRecordingRequest2Decoder;
+import io.aeron.archive.codecs.StartRecordingRequestDecoder;
+import io.aeron.archive.codecs.StopAllReplaysRequestDecoder;
+import io.aeron.archive.codecs.StopPositionRequestDecoder;
+import io.aeron.archive.codecs.StopRecordingByIdentityRequestDecoder;
+import io.aeron.archive.codecs.StopRecordingRequestDecoder;
+import io.aeron.archive.codecs.StopRecordingSubscriptionRequestDecoder;
+import io.aeron.archive.codecs.StopReplayRequestDecoder;
+import io.aeron.archive.codecs.StopReplicationRequestDecoder;
+import io.aeron.archive.codecs.TaggedReplicateRequestDecoder;
+import io.aeron.archive.codecs.TruncateRecordingRequestDecoder;
+import io.aeron.archive.codecs.UpdateChannelRequestDecoder;
 
 class ControlRequestDecoders
 {
     final MessageHeaderDecoder header = new MessageHeaderDecoder();
-    final ConnectRequestDecoder connectRequest = new ConnectRequestDecoder();
     final CloseSessionRequestDecoder closeSessionRequest = new CloseSessionRequestDecoder();
     final StartRecordingRequestDecoder startRecordingRequest = new StartRecordingRequestDecoder();
     final StartRecordingRequest2Decoder startRecordingRequest2 = new StartRecordingRequest2Decoder();
@@ -54,10 +91,15 @@ class ControlRequestDecoders
     final DeleteDetachedSegmentsRequestDecoder deleteDetachedSegmentsRequest =
         new DeleteDetachedSegmentsRequestDecoder();
     final PurgeSegmentsRequestDecoder purgeSegmentsRequest = new PurgeSegmentsRequestDecoder();
+    final MaxRecordedPositionRequestDecoder maxRecordedPositionRequest =
+        new MaxRecordedPositionRequestDecoder();
     final AttachSegmentsRequestDecoder attachSegmentsRequest = new AttachSegmentsRequestDecoder();
     final MigrateSegmentsRequestDecoder migrateSegmentsRequest = new MigrateSegmentsRequestDecoder();
     final AuthConnectRequestDecoder authConnectRequest = new AuthConnectRequestDecoder();
     final ChallengeResponseDecoder challengeResponse = new ChallengeResponseDecoder();
     final KeepAliveRequestDecoder keepAliveRequest = new KeepAliveRequestDecoder();
     final TaggedReplicateRequestDecoder taggedReplicateRequest = new TaggedReplicateRequestDecoder();
+    final ArchiveIdRequestDecoder archiveIdRequestDecoder = new ArchiveIdRequestDecoder();
+    final ReplayTokenRequestDecoder replayTokenRequestDecoder = new ReplayTokenRequestDecoder();
+    final UpdateChannelRequestDecoder updateChannelRequestDecoder = new UpdateChannelRequestDecoder();
 }

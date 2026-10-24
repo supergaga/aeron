@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package io.aeron.driver;
 import io.aeron.ChannelUri;
 import io.aeron.driver.media.ControlTransportPoller;
 import io.aeron.driver.media.SendChannelEndpoint;
-import io.aeron.driver.status.DutyCycleStallTracker;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.CachedNanoClock;
@@ -28,8 +27,10 @@ import org.agrona.concurrent.status.AtomicCounter;
 
 import java.net.InetSocketAddress;
 
-import static io.aeron.driver.status.SystemCounterDescriptor.BYTES_SENT;
-import static io.aeron.driver.status.SystemCounterDescriptor.RESOLUTION_CHANGES;
+import static io.aeron.CommonContext.threadName;
+import static io.aeron.driver.MediaDriver.AERON_DRIVER_SENDER_THREAD_NAME;
+import static io.aeron.driver.MediaDriver.AERON_DRIVER_SENDER_THREAD_NAME_CLASSIC;
+import static io.aeron.driver.status.SystemCounterDescriptor.*;
 
 class SenderLhsPadding
 {
@@ -70,52 +71,46 @@ public final class Sender extends SenderRhsPadding implements Agent
     private final OneToOneConcurrentArrayQueue<Runnable> commandQueue;
     private final AtomicCounter totalBytesSent;
     private final AtomicCounter resolutionChanges;
+    private final AtomicCounter shortSends;
     private final NanoClock nanoClock;
     private final CachedNanoClock cachedNanoClock;
     private final DriverConductorProxy conductorProxy;
     private final DutyCycleTracker dutyCycleTracker;
+    private final String roleName;
 
     Sender(final MediaDriver.Context ctx)
     {
-        this.controlTransportPoller = ctx.controlTransportPoller();
-        this.commandQueue = ctx.senderCommandQueue();
-        this.totalBytesSent = ctx.systemCounters().get(BYTES_SENT);
-        this.resolutionChanges = ctx.systemCounters().get(RESOLUTION_CHANGES);
-        this.nanoClock = ctx.nanoClock();
-        this.cachedNanoClock = ctx.senderCachedNanoClock();
-        this.statusMessageReadTimeoutNs = ctx.statusMessageTimeoutNs() >> 1;
-        this.reResolutionCheckIntervalNs = ctx.reResolutionCheckIntervalNs();
-        this.dutyCycleRatio = ctx.sendToStatusMessagePollRatio();
-        this.conductorProxy = ctx.driverConductorProxy();
-
-        this.dutyCycleTracker = ctx.senderDutyCycleTracker();
+        controlTransportPoller = ctx.controlTransportPoller();
+        commandQueue = ctx.senderCommandQueue();
+        totalBytesSent = ctx.systemCounters().get(BYTES_SENT);
+        resolutionChanges = ctx.systemCounters().get(RESOLUTION_CHANGES);
+        shortSends = ctx.systemCounters().get(SHORT_SENDS);
+        nanoClock = ctx.nanoClock();
+        cachedNanoClock = ctx.senderCachedNanoClock();
+        statusMessageReadTimeoutNs = ctx.statusMessageTimeoutNs() >> 1;
+        reResolutionCheckIntervalNs = ctx.reResolutionCheckIntervalNs();
+        dutyCycleRatio = ctx.sendToStatusMessagePollRatio();
+        conductorProxy = ctx.driverConductorProxy();
+        dutyCycleTracker = ctx.senderDutyCycleTracker();
+        roleName = threadName(AERON_DRIVER_SENDER_THREAD_NAME, AERON_DRIVER_SENDER_THREAD_NAME_CLASSIC);
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onStart()
     {
         final long nowNs = nanoClock.nanoTime();
         cachedNanoClock.update(nowNs);
         dutyCycleTracker.update(nowNs);
         reResolutionDeadlineNs = nowNs + reResolutionCheckIntervalNs;
-
-        if (dutyCycleTracker instanceof DutyCycleStallTracker)
-        {
-            final DutyCycleStallTracker dutyCycleStallTracker = (DutyCycleStallTracker)dutyCycleTracker;
-
-            dutyCycleStallTracker.maxCycleTime().appendToLabel(
-                ": " + conductorProxy.threadingMode().name());
-            dutyCycleStallTracker.cycleTimeThresholdExceededCount().appendToLabel(
-                ": threshold=" + dutyCycleStallTracker.cycleTimeThresholdNs() + "ns " +
-                conductorProxy.threadingMode().name());
-        }
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onClose()
     {
         controlTransportPoller.close();
@@ -124,51 +119,45 @@ public final class Sender extends SenderRhsPadding implements Agent
     /**
      * {@inheritDoc}
      */
+    @Override
     public int doWork()
     {
         final long nowNs = nanoClock.nanoTime();
         cachedNanoClock.update(nowNs);
         dutyCycleTracker.measureAndUpdate(nowNs);
 
-        final int workCount = commandQueue.drain(Runnable::run, Configuration.COMMAND_DRAIN_LIMIT);
-        final int bytesSent = doSend(nowNs);
+        final long shortSendsBefore = shortSends.getPlain();
+        int workCount = doSend(nowNs);
 
-        int bytesReceived = 0;
-        if (0 == bytesSent || ++dutyCycleCounter >= dutyCycleRatio || (controlPollDeadlineNs - nowNs < 0))
+        if (0 == workCount ||
+            ++dutyCycleCounter >= dutyCycleRatio ||
+            controlPollDeadlineNs <= nowNs ||
+            shortSendsBefore < shortSends.getPlain())
         {
-            bytesReceived = controlTransportPoller.pollTransports();
-
-            dutyCycleCounter = 0;
-            controlPollDeadlineNs = nowNs + statusMessageReadTimeoutNs;
+            workCount += slowTickWork(nowNs);
         }
 
-        if (reResolutionCheckIntervalNs > 0 && (reResolutionDeadlineNs - nowNs) < 0)
-        {
-            reResolutionDeadlineNs = nowNs + reResolutionCheckIntervalNs;
-            controlTransportPoller.checkForReResolutions(nowNs, conductorProxy);
-        }
-
-        return workCount + bytesSent + bytesReceived;
+        return workCount;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public String roleName()
     {
-        return "sender";
+        return roleName;
     }
 
     void onRegisterSendChannelEndpoint(final SendChannelEndpoint channelEndpoint)
     {
-        channelEndpoint.openChannel(conductorProxy);
-        channelEndpoint.registerForRead(controlTransportPoller);
-        channelEndpoint.indicateActive();
+        controlTransportPoller.registerForRead(channelEndpoint);
     }
 
     void onCloseSendChannelEndpoint(final SendChannelEndpoint channelEndpoint)
     {
-        channelEndpoint.close();
+        controlTransportPoller.cancelRead(channelEndpoint);
+        conductorProxy.sendChannelEndpointClosed(channelEndpoint);
     }
 
     void onNewNetworkPublication(final NetworkPublication publication)
@@ -185,9 +174,12 @@ public final class Sender extends SenderRhsPadding implements Agent
     }
 
     void onAddDestination(
-        final SendChannelEndpoint channelEndpoint, final ChannelUri channelUri, final InetSocketAddress address)
+        final SendChannelEndpoint channelEndpoint,
+        final ChannelUri channelUri,
+        final InetSocketAddress address,
+        final long registrationId)
     {
-        channelEndpoint.addDestination(channelUri, address);
+        channelEndpoint.addDestination(channelUri, address, registrationId);
     }
 
     void onRemoveDestination(
@@ -196,11 +188,16 @@ public final class Sender extends SenderRhsPadding implements Agent
         channelEndpoint.removeDestination(channelUri, address);
     }
 
+    void onRemoveDestination(final SendChannelEndpoint channelEndpoint, final long destinationRegistrationId)
+    {
+        channelEndpoint.removeDestination(destinationRegistrationId);
+    }
+
     void onResolutionChange(
         final SendChannelEndpoint channelEndpoint, final String endpoint, final InetSocketAddress newAddress)
     {
         channelEndpoint.resolutionChange(endpoint, newAddress);
-        resolutionChanges.getAndAddOrdered(1);
+        resolutionChanges.getAndAddRelease(1);
     }
 
     private int doSend(final long nowNs)
@@ -212,7 +209,8 @@ public final class Sender extends SenderRhsPadding implements Agent
         int startingIndex = roundRobinIndex++;
         if (startingIndex >= length)
         {
-            roundRobinIndex = startingIndex = 0;
+            startingIndex = 0;
+            roundRobinIndex = 1;
         }
 
         for (int i = startingIndex; i < length; i++)
@@ -225,8 +223,33 @@ public final class Sender extends SenderRhsPadding implements Agent
             bytesSent += publications[i].send(nowNs);
         }
 
-        totalBytesSent.getAndAddOrdered(bytesSent);
+        totalBytesSent.getAndAddRelease(bytesSent);
 
         return bytesSent;
+    }
+
+    private int slowTickWork(final long nowNs)
+    {
+        int workCount = 0;
+        final Runnable command = commandQueue.poll();
+        if (null != command)
+        {
+            command.run();
+            workCount++;
+        }
+
+        workCount += controlTransportPoller.pollTransports();
+
+        dutyCycleCounter = 0;
+        controlPollDeadlineNs = nowNs + statusMessageReadTimeoutNs;
+
+        if (reResolutionCheckIntervalNs > 0 && (reResolutionDeadlineNs - nowNs) < 0)
+        {
+            reResolutionDeadlineNs = nowNs + reResolutionCheckIntervalNs;
+            controlTransportPoller.checkForReResolutions(nowNs, conductorProxy);
+            workCount++;
+        }
+
+        return workCount;
     }
 }

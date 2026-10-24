@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -319,6 +319,96 @@ TEST_F(DriverUriTest, shouldDefaultMediaReceiveTimestampOffsetToAeronNullValue)
     EXPECT_EQ(AERON_NULL_VALUE, offset);
 }
 
+TEST_F(DriverUriTest, shouldParseAndDefaultResponseCorrelationId)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), 0);
+    EXPECT_EQ(INT64_C(-1), params.response_correlation_id);
+}
+
+TEST_F(DriverUriTest, shouldNotHaveMaxRetransmits)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), 0);
+    EXPECT_FALSE(params.has_max_resend);
+}
+
+TEST_F(DriverUriTest, shouldHaveMaxRetransmits)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|max-resend=100", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), 0);
+    EXPECT_TRUE(params.has_max_resend);
+    EXPECT_EQ(INT64_C(100), params.max_resend);
+}
+
+TEST_F(DriverUriTest, shouldFailWithNegativeMaxRetransmits)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|max-resend=-1234", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("could not parse max-resend"));
+}
+
+TEST_F(DriverUriTest, shouldFailWithZeroMaxRetransmits)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|max-resend=0", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("must be > 0"));
+}
+
+TEST_F(DriverUriTest, shouldFailWithTooBigMaxRetransmits)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|max-resend=10000", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("and <="));
+}
+
+TEST_F(DriverUriTest, shouldFailWithInvalidMaxRetransmits)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|max-resend=notanumber", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("could not parse max-resend"));
+}
+
+TEST_F(DriverUriTest, shouldFailWithPublicationWindowLessThanMtu)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|pub-wnd=2048|mtu=4096", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("pub-wnd=2048 cannot be less than the mtu=4096"));
+}
+
+TEST_F(DriverUriTest, shouldFailWithPublicationWindowMoreThanHalfTermLength)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|pub-wnd=262144|term-length=65536", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("pub-wnd=262144 must not exceed half the term-length=65536"));
+}
+
+TEST_F(DriverUriTest, ipcResponseChannels)
+{
+    EXPECT_EQ(0, AERON_URI_PARSE("aeron:ipc?control-mode=response|alias=client1", &m_uri));
+    aeron_driver_uri_subscription_params_t params = {};
+    aeron_driver_uri_subscription_params(&m_uri, &params, &m_conductor);
+    EXPECT_TRUE(params.is_response);
+}
+
 class UriResolverTest : public testing::Test
 {
 public:
@@ -331,7 +421,7 @@ public:
 
     static bool ipv4_match(const char *addr1_str, const char *addr2_str, size_t prefixlen)
     {
-        struct sockaddr_in addr1, addr2;
+        struct sockaddr_in addr1{}, addr2{};
 
         if (inet_pton(AF_INET, addr1_str, &addr1.sin_addr) != 1 || inet_pton(AF_INET, addr2_str, &addr2.sin_addr) != 1)
         {
@@ -343,7 +433,7 @@ public:
 
     static bool ipv6_match(const char *addr1_str, const char *addr2_str, size_t prefixlen)
     {
-        struct sockaddr_in6 addr1, addr2;
+        struct sockaddr_in6 addr1{}, addr2{};
 
         if (inet_pton(AF_INET6, addr1_str, &addr1.sin6_addr) != 1 ||
             inet_pton(AF_INET6, addr2_str, &addr2.sin6_addr) != 1)
@@ -356,7 +446,7 @@ public:
 
     static size_t ipv6_prefixlen(const char *aadr_str)
     {
-        struct sockaddr_in6 addr;
+        struct sockaddr_in6 addr{};
 
         if (inet_pton(AF_INET6, aadr_str, &addr.sin6_addr) != 1)
         {
@@ -368,7 +458,7 @@ public:
 
     static size_t ipv4_prefixlen(const char *addr_str)
     {
-        struct sockaddr_in addr;
+        struct sockaddr_in addr{};
 
         if (inet_pton(AF_INET, addr_str, &addr.sin_addr) != 1)
         {
@@ -394,7 +484,7 @@ protected:
 
 TEST_F(UriResolverTest, shouldResolveIpv4DottedDecimalAndPort)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_URI_MAX_LENGTH];
 
     ASSERT_EQ(resolve_host_and_port("192.168.1.20:55", &m_addr), 0) << aeron_errmsg();
     EXPECT_EQ(m_addr.ss_family, AF_INET);
@@ -405,7 +495,7 @@ TEST_F(UriResolverTest, shouldResolveIpv4DottedDecimalAndPort)
 
 TEST_F(UriResolverTest, shouldResolveIpv4MaxPort)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_URI_MAX_LENGTH];
 
     const std::string uri = std::string("127.0.0.1:") + std::to_string(UINT16_MAX);
     ASSERT_EQ(resolve_host_and_port(uri.c_str(), &m_addr), 0) << aeron_errmsg();
@@ -425,7 +515,7 @@ TEST_F(UriResolverTest, shouldResolveIpv4MulticastDottedDecimalAndPort)
 
 TEST_F(UriResolverTest, shouldResolveIpv6AndPort)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_URI_MAX_LENGTH];
 
     ASSERT_EQ(resolve_host_and_port("[::1]:1234", &m_addr), 0) << aeron_errmsg();
     EXPECT_EQ(m_addr.ss_family, AF_INET6);
@@ -453,7 +543,7 @@ TEST_F(UriResolverTest, shouldResolveIpv6MulticastAndPort)
 
 TEST_F(UriResolverTest, shouldResolveLocalhost)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_URI_MAX_LENGTH];
 
     ASSERT_EQ(resolve_host_and_port("localhost:1234", &m_addr), 0) << aeron_errmsg();
     EXPECT_EQ(m_addr.ss_family, AF_INET);
@@ -486,7 +576,7 @@ TEST_F(UriResolverTest, shouldNotResolvePortBeyoundMax)
 
 TEST_F(UriResolverTest, shouldResolveIpv4Interface)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_URI_MAX_LENGTH];
 
     ASSERT_EQ(aeron_interface_parse_and_resolve("192.168.1.20", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
     EXPECT_EQ(m_prefixlen, 32u);
@@ -510,11 +600,53 @@ TEST_F(UriResolverTest, shouldResolveIpv4Interface)
     EXPECT_EQ(m_addr.ss_family, AF_INET);
     EXPECT_EQ(addr_in->sin_family, AF_INET);
     EXPECT_STREQ(inet_ntop(AF_INET, &addr_in->sin_addr, buffer, sizeof(buffer)), "0.0.0.0");
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("127.0.0.1", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 32u);
+    EXPECT_EQ(m_addr.ss_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_family, AF_INET);
+    EXPECT_STREQ(inet_ntop(AF_INET, &addr_in->sin_addr, buffer, sizeof(buffer)), "127.0.0.1");
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("127.0.0.3/8", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 8u);
+    EXPECT_EQ(m_addr.ss_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_family, AF_INET);
+    EXPECT_STREQ(inet_ntop(AF_INET, &addr_in->sin_addr, buffer, sizeof(buffer)), "127.0.0.3");
+}
+
+TEST_F(UriResolverTest, shouldResolveHostNameInTheInterfaceSpecification)
+{
+#if defined(AERON_SANITIZE_ENABLED) && defined(_WIN32)
+    GTEST_SKIP() << "Windows hostname resolution fast-fails with MSVC's AddressSanitizer";
+#endif
+    char buffer[AERON_URI_MAX_LENGTH];
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("localhost:5551", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 32u);
+    EXPECT_EQ(m_addr.ss_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_port, htons(5551));
+    EXPECT_STREQ(inet_ntop(AF_INET, &addr_in->sin_addr, buffer, sizeof(buffer)), "127.0.0.1");
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("localhost:0/24", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 24u);
+    EXPECT_EQ(m_addr.ss_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_port, htons(0));
+    EXPECT_STREQ(inet_ntop(AF_INET, &addr_in->sin_addr, buffer, sizeof(buffer)), "127.0.0.1");
+
+    EXPECT_EQ(0, gethostname(buffer, sizeof(buffer)));
+    std::string host_name = std::string(buffer).append(":8989/16");
+    ASSERT_EQ(aeron_interface_parse_and_resolve(host_name.c_str(), &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 16u);
+    EXPECT_EQ(m_addr.ss_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_family, AF_INET);
+    EXPECT_EQ(addr_in->sin_port, htons(8989));
 }
 
 TEST_F(UriResolverTest, shouldResolveIpv6Interface)
 {
-    char buffer[AERON_MAX_PATH];
+    char buffer[AERON_URI_MAX_LENGTH];
 
     ASSERT_EQ(aeron_interface_parse_and_resolve("[::1]", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
     EXPECT_EQ(m_prefixlen, 128u);
@@ -532,6 +664,27 @@ TEST_F(UriResolverTest, shouldResolveIpv6Interface)
     ASSERT_EQ(aeron_interface_parse_and_resolve("[::1]:1234/48", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
     EXPECT_EQ(m_prefixlen, 48u);
     EXPECT_EQ(addr_in6->sin6_port, htons(1234));
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1111", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 128u);
+    EXPECT_EQ(addr_in6->sin6_port, htons(1111));
+    EXPECT_STREQ(inet_ntop(AF_INET6, &addr_in6->sin6_addr, buffer, sizeof(buffer)), "2001:db8:85a3::8a2e:370:7334");
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("[fe80:3::1ff:fe23:4567:890a]/24", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 24u);
+    EXPECT_EQ(addr_in6->sin6_port, htons(0));
+    EXPECT_STREQ(inet_ntop(AF_INET6, &addr_in6->sin6_addr, buffer, sizeof(buffer)), "fe80:3::1ff:fe23:4567:890a");
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("[64:ff9b::]/96", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 96u);
+    EXPECT_EQ(addr_in6->sin6_port, htons(0));
+    EXPECT_STREQ(inet_ntop(AF_INET6, &addr_in6->sin6_addr, buffer, sizeof(buffer)), "64:ff9b::");
+
+    ASSERT_EQ(aeron_interface_parse_and_resolve("[ff01::1]:22222", &m_addr, &m_prefixlen), 0) << aeron_errmsg();
+    EXPECT_EQ(m_prefixlen, 128u);
+    EXPECT_EQ(addr_in6->sin6_port, htons(22222));
+    EXPECT_STREQ(inet_ntop(AF_INET6, &addr_in6->sin6_addr, buffer, sizeof(buffer)), "ff01::1");
+    EXPECT_TRUE(aeron_is_addr_multicast(&m_addr));
 }
 
 TEST_F(UriResolverTest, shouldMatchIpv4)
@@ -539,6 +692,10 @@ TEST_F(UriResolverTest, shouldMatchIpv4)
     EXPECT_TRUE(ipv4_match("127.0.0.0", "127.0.0.0", 24));
     EXPECT_TRUE(ipv4_match("127.0.0.0", "127.0.0.1", 24));
     EXPECT_TRUE(ipv4_match("127.0.0.0", "127.0.0.255", 24));
+    EXPECT_TRUE(ipv4_match("127.1.1.1", "127.0.0.0", 8));
+    EXPECT_TRUE(ipv4_match("127.255.1.1", "127.255.255.255", 16));
+    EXPECT_TRUE(ipv4_match("127.255.254.1", "127.255.254.255", 24));
+    EXPECT_TRUE(ipv4_match("127.255.254.16", "127.255.254.16", 32));
 }
 
 TEST_F(UriResolverTest, shouldNotMatchIpv4)
@@ -583,4 +740,52 @@ TEST_F(UriResolverTest, shouldCalculateIpv6PrefixlenFromNetmask)
     EXPECT_EQ(ipv6_prefixlen("FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FF00::"), 104u);
     EXPECT_EQ(ipv6_prefixlen("FFFF:FF80::"), 25u);
     EXPECT_EQ(ipv6_prefixlen("0000:0000:0000:0000:0000:0000:0000:0000"), 0u);
+}
+
+TEST_F(UriResolverTest, shouldDefaultResolveRawIPv6AddressesAndHostNames)
+{
+    EXPECT_EQ(0, m_resolver.resolve_func(&m_resolver, "127.0.0.1", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET, m_addr.ss_family);
+
+    EXPECT_EQ(0, m_resolver.resolve_func(&m_resolver, "localhost", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET, m_addr.ss_family);
+
+    EXPECT_EQ(0, m_resolver.resolve_func(&m_resolver, "::1", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET6, m_addr.ss_family);
+
+#if defined(__linux__)
+    EXPECT_EQ(0, m_resolver.resolve_func(&m_resolver, "fe00::0", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET6, m_addr.ss_family);
+
+    EXPECT_EQ(0, m_resolver.resolve_func(&m_resolver, "ip6-localnet", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET6, m_addr.ss_family);
+#endif
+}
+
+TEST_F(UriResolverTest, shouldHandleIpv6ResultFromHostNameResolution)
+{
+    EXPECT_EQ(0, aeron_name_resolver_resolve_host_and_port(&m_resolver, "127.0.0.1:5051", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET, m_addr.ss_family);
+    EXPECT_EQ(htons(5051), addr_in->sin_port);
+
+    EXPECT_EQ(0, aeron_name_resolver_resolve_host_and_port(&m_resolver, "localhost:5052", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET, m_addr.ss_family);
+    EXPECT_EQ(htons(5052), addr_in->sin_port);
+
+    EXPECT_EQ(0, aeron_name_resolver_resolve_host_and_port(&m_resolver, "[::1]:5053", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET6, m_addr.ss_family);
+    EXPECT_EQ(AF_INET6, addr_in6->sin6_family);
+    EXPECT_EQ(htons(5053), addr_in6->sin6_port);
+
+#if defined(__linux__)
+    EXPECT_EQ(0, aeron_name_resolver_resolve_host_and_port(&m_resolver, "[fe00::0]:5054", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET6, m_addr.ss_family);
+    EXPECT_EQ(AF_INET6, addr_in6->sin6_family);
+    EXPECT_EQ(htons(5054), addr_in6->sin6_port);
+
+    EXPECT_EQ(0, aeron_name_resolver_resolve_host_and_port(&m_resolver, "ip6-localnet:5055", "endpoint", false, &m_addr));
+    EXPECT_EQ(AF_INET6, m_addr.ss_family);
+    EXPECT_EQ(AF_INET6, addr_in6->sin6_family);
+    EXPECT_EQ(htons(5055), addr_in6->sin6_port);
+#endif
 }

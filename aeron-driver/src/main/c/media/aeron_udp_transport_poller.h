@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,6 @@
 
 #include "aeron_driver_conductor.h"
 
-#define AERON_UDP_TRANSPORT_POLLER_ITERATION_THRESHOLD (5)
-
 typedef struct aeron_udp_channel_transport_entry_stct
 {
     aeron_udp_channel_transport_t *transport;
@@ -37,6 +35,8 @@ typedef struct aeron_udp_transport_poller_stct
     }
     transports;
 
+    size_t iteration_threshold;
+    int32_t socket_poll_limit;
     int fd;
     void *bindings_clientd;
 }

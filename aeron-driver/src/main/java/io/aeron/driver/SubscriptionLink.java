@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,21 +23,23 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 
 /**
- * Subscription registration from a client used for liveness tracking
+ * Subscription registration from a client used for liveness tracking.
  */
 public abstract class SubscriptionLink implements DriverManagedResource
 {
     final long registrationId;
     final int streamId;
-    final int sessionId;
-    final boolean hasSessionId;
     final boolean isSparse;
     final boolean isTether;
-    boolean reachedEndOfLife = false;
+    final boolean isResponse;
+    final boolean isRejoin;
     final CommonContext.InferableBoolean group;
     final String channel;
     final AeronClient aeronClient;
     final IdentityHashMap<Subscribable, ReadablePosition> positionBySubscribableMap;
+    int sessionId;
+    boolean hasSessionId;
+    boolean reachedEndOfLife = false;
 
     SubscriptionLink(
         final long registrationId,
@@ -55,6 +57,8 @@ public abstract class SubscriptionLink implements DriverManagedResource
         this.isSparse = params.isSparse;
         this.isTether = params.isTether;
         this.group = params.group;
+        this.isResponse = params.isResponse;
+        this.isRejoin = params.isRejoin;
 
         positionBySubscribableMap = new IdentityHashMap<>(hasSessionId ? 1 : 8);
     }
@@ -99,6 +103,17 @@ public abstract class SubscriptionLink implements DriverManagedResource
         return sessionId;
     }
 
+    void sessionId(final int sessionId, final boolean hasSessionId)
+    {
+        this.hasSessionId = hasSessionId;
+        this.sessionId = sessionId;
+    }
+
+    boolean isResponse()
+    {
+        return isResponse;
+    }
+
     ReceiveChannelEndpoint channelEndpoint()
     {
         return null;
@@ -111,7 +126,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
 
     boolean isRejoin()
     {
-        return true;
+        return isRejoin;
     }
 
     boolean isTether()
@@ -176,7 +191,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
 
     boolean isWildcardOrSessionIdMatch(final int sessionId)
     {
-        return !hasSessionId || this.sessionId == sessionId;
+        return (!hasSessionId && !isResponse()) || this.sessionId == sessionId;
     }
 
     boolean supportsMds()
@@ -196,6 +211,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
     /**
      * {@inheritDoc}
      */
+    @Override
     public void close()
     {
         for (final Map.Entry<Subscribable, ReadablePosition> entry : positionBySubscribableMap.entrySet())
@@ -209,6 +225,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
     /**
      * {@inheritDoc}
      */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         if (aeronClient.hasTimedOut())
@@ -221,6 +238,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
     /**
      * {@inheritDoc}
      */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;
@@ -229,6 +247,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
     /**
      * {@inheritDoc}
      */
+    @Override
     public String toString()
     {
         return this.getClass().getName() + "{" +

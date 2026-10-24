@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -66,6 +66,15 @@ public class ImageBuffersReadyFlyweight
 
     private MutableDirectBuffer buffer;
     private int offset;
+
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public ImageBuffersReadyFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
@@ -152,9 +161,9 @@ public class ImageBuffersReadyFlyweight
     }
 
     /**
-     * Set the position counter Id for the subscriber
+     * Set the position counter Id for the subscriber.
      *
-     * @param id for the subscriber position counter
+     * @param id for the subscriber position counter.
      * @return this for a fluent API.
      */
     public ImageBuffersReadyFlyweight subscriberPositionId(final int id)
@@ -200,7 +209,7 @@ public class ImageBuffersReadyFlyweight
     /**
      * The Log Filename in ASCII.
      *
-     * @return log filename
+     * @return log filename.
      */
     public String logFileName()
     {
@@ -218,7 +227,7 @@ public class ImageBuffersReadyFlyweight
     }
 
     /**
-     * Set the log filename in ASCII
+     * Set the log filename in ASCII.
      *
      * @param logFileName for the image.
      * @return this for a fluent API.
@@ -264,11 +273,11 @@ public class ImageBuffersReadyFlyweight
     }
 
     /**
-     * Get the length of the current message
+     * Get the length of the current message.
      * <p>
      * NB: must be called after the data is written in order to be accurate.
      *
-     * @return the length of the current message
+     * @return the length of the current message.
      */
     public int length()
     {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,10 @@
 
 #include "util/aeron_bitutil.h"
 #include "aeron_udp_protocol.h"
+
+_Static_assert(
+    sizeof(aeron_data_header_as_longs_t) == sizeof(aeron_data_header_t),
+    "sizeof(aeron_data_header_as_longs_t) must match sizeof(aeron_data_header_t)");
 
 int aeron_udp_protocol_group_tag(aeron_status_message_header_t *sm, int64_t *group_tag)
 {
@@ -38,6 +42,8 @@ int aeron_udp_protocol_group_tag(aeron_status_message_header_t *sm, int64_t *gro
 
     return (int)((size_t)sm->frame_header.frame_length - group_tag_offset);
 }
+
+extern bool aeron_is_frame_valid(const aeron_frame_header_t *header, size_t packet_length);
 
 extern size_t aeron_res_header_address_length(int8_t res_type);
 
@@ -93,4 +99,3 @@ int aeron_res_header_entry_length(void *res, size_t remaining)
 
     return result;
 }
-

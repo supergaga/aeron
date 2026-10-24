@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
 /**
  * Command message flyweight to ask the driver process to terminate.
  *
- * @see ControlProtocolEvents
  * <pre>
  *   0                   1                   2                   3
  *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -44,12 +43,22 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  * ...                                                              |
  *  +---------------------------------------------------------------+
  * </pre>
+ * @see ControlProtocolEvents
  */
 public class TerminateDriverFlyweight extends CorrelatedMessageFlyweight
 {
     private static final int TOKEN_LENGTH_OFFSET = CORRELATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
     static final int TOKEN_BUFFER_OFFSET = TOKEN_LENGTH_OFFSET + SIZE_OF_INT;
     private static final int MINIMUM_LENGTH = TOKEN_LENGTH_OFFSET + SIZE_OF_INT;
+
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public TerminateDriverFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
@@ -65,9 +74,9 @@ public class TerminateDriverFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Relative offset of the token buffer
+     * Relative offset of the token buffer.
      *
-     * @return relative offset of the token buffer
+     * @return relative offset of the token buffer.
      */
     public int tokenBufferOffset()
     {
@@ -75,9 +84,9 @@ public class TerminateDriverFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Length of the token buffer in bytes
+     * Length of the token buffer in bytes.
      *
-     * @return length of token buffer in bytes
+     * @return length of token buffer in bytes.
      */
     public int tokenBufferLength()
     {

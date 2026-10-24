@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,12 +23,16 @@ import org.agrona.concurrent.status.CountersManager;
 /**
  * The receiving end of a local socket address, i.e. the destination or endpoint for a subscription.
  */
-public class ReceiveLocalSocketAddress
+public final class ReceiveLocalSocketAddress
 {
     /**
      * The human-readable name for the beginning of a label.
      */
     public static final String NAME = "rcv-local-sockaddr";
+
+    private ReceiveLocalSocketAddress()
+    {
+    }
 
     /**
      * Allocate a counter to represent a local socket address associated with a receiving channel.

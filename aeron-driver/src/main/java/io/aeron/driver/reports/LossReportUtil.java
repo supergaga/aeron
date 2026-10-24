@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,10 @@ public final class LossReportUtil
      * Name of the error report file in the Aeron directory.
      */
     public static final String LOSS_REPORT_FILE_NAME = "loss-report.dat";
+
+    private LossReportUtil()
+    {
+    }
 
     /**
      * Create a new {@link File} object for the loss report.

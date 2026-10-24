@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2022 Real Logic Limited.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,16 @@
 #include "aeron_driver_sender_proxy.h"
 #include "aeron_system_counters.h"
 #include "media/aeron_udp_transport_poller.h"
-#include "aeron_network_publication.h"
 #include "concurrent/aeron_distinct_error_log.h"
+
+#if !defined(HAVE_STRUCT_MMSGHDR)
+#define HAVE_STRUCT_MMSGHDR
+struct mmsghdr
+{
+    struct msghdr msg_hdr;
+    unsigned int msg_len;
+};
+#endif
 
 typedef struct aeron_driver_sender_network_publication_entry_stct
 {
@@ -52,14 +60,19 @@ typedef struct aeron_driver_sender_stct
     }
     recv_buffers;
 
+    struct mmsghdr control_msgvec[1];
+
     aeron_udp_channel_data_paths_t data_paths;
 
-    int64_t *total_bytes_sent_counter;
-    int64_t *errors_counter;
-    int64_t *invalid_frames_counter;
-    int64_t *status_messages_received_counter;
-    int64_t *nak_messages_received_counter;
-    int64_t *resolution_changes_counter;
+    volatile int64_t *total_bytes_sent_counter;
+    volatile int64_t *errors_counter;
+    volatile int64_t *invalid_frames_counter;
+    volatile int64_t *status_messages_received_counter;
+    volatile int64_t *status_messages_rejected_counter;
+    volatile int64_t *nak_messages_received_counter;
+    volatile int64_t *error_messages_received_counter;
+    volatile int64_t *resolution_changes_counter;
+    volatile int64_t *short_sends_counter;
 
     aeron_driver_context_t *context;
     aeron_udp_transport_poller_poll_func_t poller_poll_func;
@@ -79,7 +92,7 @@ aeron_driver_sender_t;
 inline void aeron_driver_sender_log_error(aeron_driver_sender_t *sender)
 {
     aeron_distinct_error_log_record(sender->error_log, aeron_errcode(), aeron_errmsg());
-    aeron_counter_increment(sender->errors_counter, 1);
+    aeron_counter_increment(sender->errors_counter);
     aeron_err_clear();
 }
 
@@ -98,6 +111,7 @@ void aeron_driver_sender_on_add_publication(void *clientd, void *command);
 void aeron_driver_sender_on_remove_publication(void *clientd, void *command);
 void aeron_driver_sender_on_add_destination(void *clientd, void *command);
 void aeron_driver_sender_on_remove_destination(void *clientd, void *command);
+void aeron_driver_sender_on_remove_destination_by_id(void *clientd, void *command);
 void aeron_driver_sender_on_resolution_change(void *clientd, void *command);
 
 int aeron_driver_sender_do_send(aeron_driver_sender_t *sender, int64_t now_ns);
